@@ -1,0 +1,32 @@
+[project]
+name = "til-26-overflow"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "jiwer",
+  "python-dotenv",
+  "requests",
+  "tqdm",
+  "pycocotools",
+  "transformers",
+  "torch>=2.11.0",
+  "torchvision>=0.26.0",
+  "numpy",
+  "scikit-image",
+  "lightning",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
