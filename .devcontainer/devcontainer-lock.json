@@ -1,0 +1,9 @@
+{
+  "features": {
+    "ghcr.io/devcontainers/features/nvidia-cuda:3": {
+      "version": "3.0.0",
+      "resolved": "ghcr.io/devcontainers/features/nvidia-cuda@sha256:144e3c199d51688baea43ff20e5d931381a5990cb7b323bade9f4d6d67876ee3",
+      "integrity": "sha256:144e3c199d51688baea43ff20e5d931381a5990cb7b323bade9f4d6d67876ee3"
+    }
+  }
+}
