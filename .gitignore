@@ -175,3 +175,4 @@ src/gcloud/*.json
 
 data
 pyproject.toml
+uv.lock
