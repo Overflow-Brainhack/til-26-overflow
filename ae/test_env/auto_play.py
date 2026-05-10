@@ -141,6 +141,22 @@ def main() -> None:
     parser.add_argument("--bomb-tune-target", type=float, default=0.40,
                         help="Target predictive-bomb hit rate for auto-tuning (default 0.40)")
 
+    parser.add_argument("--bomb-economy", dest="bomb_economy",
+                        action="store_true", default=False,
+                        help="Enable unified value scoring for bomb placement — only "
+                             "bomb when score >= bomb_reserve_threshold (default OFF)")
+    parser.add_argument("--no-bomb-economy", dest="bomb_economy",
+                        action="store_false")
+    parser.add_argument("--base-bomb-value", type=float, default=5.0,
+                        help="Value of hitting an enemy base in agent-hit units (default 5.0)")
+    parser.add_argument("--agent-bomb-value", type=float, default=1.0,
+                        help="Value of a single definite agent hit (default 1.0)")
+    parser.add_argument("--bomb-reserve-threshold", type=float, default=1.0,
+                        help="Minimum score required to place a bomb under economy mode (default 1.0)")
+    parser.add_argument("--wall-break-tile-threshold", type=float, default=0.0,
+                        help="Min tile value behind wall to justify a wall-break bomb; "
+                             "0.0 = always break (default 0.0)")
+
     parser.add_argument("--cache", dest="cache_path", type=Path,
                         default=DEFAULT_CACHE_PATH,
                         help="Pre-load this novice-map cache (default: ae/src/novice_map.json)")
@@ -169,6 +185,11 @@ def main() -> None:
             drift_aware_bomb=args.drift_aware_bomb,
             auto_tune_bomb=args.auto_tune_bomb,
             bomb_tune_target=args.bomb_tune_target,
+            bomb_economy=args.bomb_economy,
+            base_bomb_value=args.base_bomb_value,
+            agent_bomb_value=args.agent_bomb_value,
+            bomb_reserve_threshold=args.bomb_reserve_threshold,
+            wall_break_tile_threshold=args.wall_break_tile_threshold,
         )
 
     managers = _build_managers(env, make_policy, args.cache_path)

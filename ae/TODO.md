@@ -9,22 +9,10 @@ of adding it.
 
 ## Medium value
 
-- **Bomb economy.** Resources accumulate at 0.1/step → ~1.5 resources
-  every 15 steps = 1 bomb. We currently bomb whenever an enemy is in
-  range. Should reserve bombs for high-value targets (enemy bases > enemy
-  agents > destructible walls blocking missions). Especially in late game
-  when no enemies are in range, holding a bomb to break a wall to a
-  mission is +5 points vs 0 for a wasted attack.
-
 - ~~Stale tile_contents in novice mode.~~ — fixed by the novice-map
   cache: `AEManager.__init__` re-merges the cache on every `/reset`, so
   walls/tiles destroyed or consumed in round N are restored to their
   initial state at the start of round N+1.
-
-- **Action mask isn't fed into BFS.** `pathfinding` uses
-  `memory.passable` (our belief). The action_mask is canonical truth. If
-  the chosen action is masked off, we just STAY. Better: include action
-  mask in the first step's options and replan if needed.
 
 ## Low value / nice-to-have
 
@@ -50,6 +38,29 @@ of adding it.
   our base from outside our agent's viewcone).
 
 ## Resolved
+
+- ~~Action mask fed into BFS~~ — `first_action_to` and `reachable_cells` in `pathfinding.py`
+  now accept an `action_mask: Optional[Sequence[int]]` kwarg. When provided, first-step
+  expansions from the start node skip any action whose mask bit is 0 — so the planner only
+  considers moves the environment actually permits. `_immediate_neighbors` (panic-dodge fallback)
+  also filters by mask. All `first_action_to` / `reachable_cells` call sites in `policy.py`
+  pass `action_mask=obs.action_mask`.
+
+- ~~Bomb economy~~ — implemented as `bomb_economy=True` (opt-in, default OFF) on
+  `HeuristicPolicy`. When enabled, `_try_attack` replaces the hard threshold
+  with a unified value score: `base_hits * base_bomb_value + agent_hits *
+  agent_bomb_value + expected_hits * agent_bomb_value` (predictive term included
+  when `predictive_bomb=True`). A bomb is placed only when `score >=
+  bomb_reserve_threshold`. Bases are worth far more than agents by default
+  (`base_bomb_value=5.0`, `agent_bomb_value=1.0`). Additionally,
+  `wall_break_tile_threshold > 0.0` suppresses wall-break bombs when the tile
+  behind the wall has insufficient value, conserving bombs for high-value targets.
+  Toggle: `HeuristicPolicy(bomb_economy=True, bomb_reserve_threshold=1.5,
+  base_bomb_value=5.0, wall_break_tile_threshold=3.0)` /
+  `auto_play.py --bomb-economy --bomb-reserve-threshold 1.5 --base-bomb-value 5.0`.
+  Sweep tool: `ae/test_env/benchmark_bomb_economy.py` — headless self-play
+  over (reserve_threshold × base_value) and wall_break_tile_threshold grids,
+  prints ranked table.
 
 - ~~Predictive bomb threshold auto-tuning~~ — two mechanisms added:
   (1) **Drift-aware model** (`drift_aware_bomb=True`, default): instead of

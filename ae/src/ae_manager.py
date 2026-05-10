@@ -49,11 +49,20 @@ class AEManager:
         self._policy: Policy = policy or HeuristicPolicy(
             predictive_bomb=True,
             predictive_bomb_threshold=0.7,
+
             wall_breaking=True,
             wall_break_cost=5.0,
+
             smart_defend=True,
+
             drift_aware_bomb=True,
             auto_tune_bomb=False,
+
+            bomb_economy=True,
+            base_bomb_value=5.0,
+            agent_bomb_value=1.0,
+            bomb_reserve_threshold=0.5,
+            wall_break_tile_threshold=0.0,
         )
 
     def _maybe_load_cache(self, path: Path) -> None:

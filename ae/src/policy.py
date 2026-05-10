@@ -20,6 +20,11 @@ Toggles (`HeuristicPolicy(**kwargs)` / CLI flags in auto_play.py):
     drift_aware_bomb             — use velocity-biased enemy position distribution (reduces overcounting)
     auto_tune_bomb               — online EMA that raises/lowers threshold based on observed hit rate
     bomb_tune_target             — target hit rate for auto-tuning (default 0.40)
+    bomb_economy                 — unified value scoring: only bomb if score >= bomb_reserve_threshold
+    base_bomb_value              — value of hitting an enemy base (in agent-hit units; default 5.0)
+    agent_bomb_value             — value of a single definite agent hit (default 1.0)
+    bomb_reserve_threshold       — minimum score to place a bomb under economy mode (default 1.0)
+    wall_break_tile_threshold    — min tile value to justify a wall-break bomb (0.0 = always break)
 """
 
 from abc import ABC, abstractmethod
@@ -115,6 +120,11 @@ class HeuristicPolicy(Policy):
         drift_aware_bomb: bool = True,
         auto_tune_bomb: bool = False,
         bomb_tune_target: float = 0.40,
+        bomb_economy: bool = False,
+        base_bomb_value: float = 5.0,
+        agent_bomb_value: float = 1.0,
+        bomb_reserve_threshold: float = 1.0,
+        wall_break_tile_threshold: float = 0.0,
     ) -> None:
         self.predictive_bomb = predictive_bomb
         self.predictive_bomb_threshold = predictive_bomb_threshold
@@ -124,6 +134,11 @@ class HeuristicPolicy(Policy):
         self.drift_aware_bomb = drift_aware_bomb
         self.auto_tune_bomb = auto_tune_bomb
         self.bomb_tune_target = bomb_tune_target
+        self.bomb_economy = bomb_economy
+        self.base_bomb_value = base_bomb_value
+        self.agent_bomb_value = agent_bomb_value
+        self.bomb_reserve_threshold = bomb_reserve_threshold
+        self.wall_break_tile_threshold = wall_break_tile_threshold
 
         # Mutable auto-tune state — persists across rounds (policy is not re-created on /reset).
         self._tuned_threshold: float = predictive_bomb_threshold
@@ -247,6 +262,19 @@ class HeuristicPolicy(Policy):
                 best_action = int(action)
         return best_action
 
+    def _bomb_opportunity_score(self, memory: MapMemory, blast: set[tuple[int, int]]) -> float:
+        """Compute unified value score for placing a bomb at the current position.
+
+        Score = base_hits * base_bomb_value + agent_hits * agent_bomb_value
+                + (expected_hits * agent_bomb_value if predictive_bomb is on).
+        """
+        base_hits = sum(1 for p in memory.enemy_bases if p in blast)
+        agent_hits = sum(1 for p in memory.enemy_agents if p in blast)
+        score = base_hits * self.base_bomb_value + agent_hits * self.agent_bomb_value
+        if self.predictive_bomb:
+            score += self._expected_hits(memory, blast) * self.agent_bomb_value
+        return score
+
     def _try_attack(self, obs: ParsedObs, memory: MapMemory) -> Optional[int]:
         if obs.action_mask[Action.PLACE_BOMB] != 1:
             return None
@@ -259,6 +287,20 @@ class HeuristicPolicy(Policy):
             return None
 
         blast = cells_in_blast(memory, obs.location)
+
+        # Economy mode: score the opportunity and only bomb if score is sufficient.
+        if self.bomb_economy:
+            score = self._bomb_opportunity_score(memory, blast)
+            if score < self.bomb_reserve_threshold:
+                return None
+            if self.auto_tune_bomb:
+                expected = self._expected_hits(memory, blast)
+                self._pending_bombs.append(_PendingBomb(
+                    placed_step=obs.step,
+                    blast_cells=frozenset(blast),
+                    expected_hits=expected,
+                ))
+            return int(Action.PLACE_BOMB)
 
         # Definite hits: enemies / enemy bases currently in blast.
         definite = 0.0
@@ -463,6 +505,10 @@ class HeuristicPolicy(Policy):
         sitting_bomb = memory.bombs.get(obs.location)
         if sitting_bomb is not None and sitting_bomb.ally:
             return int(Action.STAY)
+
+        if self.bomb_economy and self.wall_break_tile_threshold > 0.0:
+            if memory.tile_value(next_pos) < self.wall_break_tile_threshold:
+                return None
 
         if obs.action_mask[Action.PLACE_BOMB] == 1 and obs.team_bombs > 0:
             return int(Action.PLACE_BOMB)
