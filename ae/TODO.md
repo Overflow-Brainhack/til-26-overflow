@@ -14,6 +14,11 @@ of adding it.
   walls/tiles destroyed or consumed in round N are restored to their
   initial state at the start of round N+1.
 
+- **Action mask isn't fed into BFS.** `pathfinding` uses
+  `memory.passable` (our belief). The action_mask is canonical truth. If
+  the chosen action is masked off, we just STAY. Better: include action
+  mask in the first step's options and replan if needed.
+
 ## Low value / nice-to-have
 
 - **Learned policy slot.** `Policy` ABC exists; a `LearnedPolicy(Policy)`
@@ -38,13 +43,6 @@ of adding it.
   our base from outside our agent's viewcone).
 
 ## Resolved
-
-- ~~Action mask fed into BFS~~ — `first_action_to` and `reachable_cells` in `pathfinding.py`
-  now accept an `action_mask: Optional[Sequence[int]]` kwarg. When provided, first-step
-  expansions from the start node skip any action whose mask bit is 0 — so the planner only
-  considers moves the environment actually permits. `_immediate_neighbors` (panic-dodge fallback)
-  also filters by mask. All `first_action_to` / `reachable_cells` call sites in `policy.py`
-  pass `action_mask=obs.action_mask`.
 
 - ~~Bomb economy~~ — implemented as `bomb_economy=True` (opt-in, default OFF) on
   `HeuristicPolicy`. When enabled, `_try_attack` replaces the hard threshold
