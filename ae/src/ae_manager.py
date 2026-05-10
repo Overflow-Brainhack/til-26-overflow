@@ -56,13 +56,15 @@ class AEManager:
             smart_defend=True,
 
             drift_aware_bomb=True,
-            auto_tune_bomb=False,
+            auto_tune_bomb=True,
 
             bomb_economy=True,
             base_bomb_value=5.0,
             agent_bomb_value=1.0,
             bomb_reserve_threshold=0.5,
             wall_break_tile_threshold=0.0,
+
+            loop_detection=True,
         )
 
     def _maybe_load_cache(self, path: Path) -> None:

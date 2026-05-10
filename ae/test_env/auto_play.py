@@ -157,6 +157,17 @@ def main() -> None:
                         help="Min tile value behind wall to justify a wall-break bomb; "
                              "0.0 = always break (default 0.0)")
 
+    parser.add_argument("--loop-detection", dest="loop_detection",
+                        action="store_true", default=True,
+                        help="Detect and break 2- or 3-step (action, position) cycles to "
+                             "prevent the agent spinning in place (default ON)")
+    parser.add_argument("--no-loop-detection", dest="loop_detection",
+                        action="store_false",
+                        help="Disable loop detection (useful for diagnosing oscillation bugs)")
+    parser.add_argument("--loop-window", type=int, default=6,
+                        help="Number of past (action, pos) entries retained for cycle "
+                             "detection; must be >= 5 to catch period-3 loops (default 6)")
+
     parser.add_argument("--cache", dest="cache_path", type=Path,
                         default=DEFAULT_CACHE_PATH,
                         help="Pre-load this novice-map cache (default: ae/src/novice_map.json)")
@@ -190,6 +201,8 @@ def main() -> None:
             agent_bomb_value=args.agent_bomb_value,
             bomb_reserve_threshold=args.bomb_reserve_threshold,
             wall_break_tile_threshold=args.wall_break_tile_threshold,
+            loop_detection=args.loop_detection,
+            loop_window=args.loop_window,
         )
 
     managers = _build_managers(env, make_policy, args.cache_path)
@@ -204,6 +217,7 @@ def main() -> None:
     features.append(f"smart_defend={'on' if args.smart_defend else 'off'}")
     features.append(f"drift_aware={'on' if args.drift_aware_bomb else 'off'}")
     features.append(f"auto_tune={'on (target={args.bomb_tune_target})' if args.auto_tune_bomb else 'off'}")
+    features.append(f"loop_detection={'on (window=' + str(args.loop_window) + ')' if args.loop_detection else 'off'}")
     features.append(f"map_cache={'on (' + args.cache_path.name + ')' if cache_used else 'off'}")
     print(f"Auto-play: {len(env.possible_agents)} HeuristicPolicy bots, seed={seed}, "
           f"novice={args.novice}, rounds={args.rounds}")

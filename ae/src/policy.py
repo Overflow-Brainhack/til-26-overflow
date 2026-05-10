@@ -25,9 +25,12 @@ Toggles (`HeuristicPolicy(**kwargs)` / CLI flags in auto_play.py):
     agent_bomb_value             — value of a single definite agent hit (default 1.0)
     bomb_reserve_threshold       — minimum score to place a bomb under economy mode (default 1.0)
     wall_break_tile_threshold    — min tile value to justify a wall-break bomb (0.0 = always break)
+    loop_detection               — detect and break 2- or 3-step (action, position) cycles (default ON)
+    loop_window                  — number of past (action, pos) entries to retain for cycle detection
 """
 
 from abc import ABC, abstractmethod
+from collections import deque
 from typing import NamedTuple, Optional
 
 from constants import (
@@ -62,6 +65,12 @@ _TUNE_EMA_ALPHA = 0.75   # smoothing factor for the hit-rate EMA
 _TUNE_MIN = 0.05         # floor: never go below this threshold
 _TUNE_MAX = 0.95         # ceiling: never go above this threshold
 _TUNE_WARMUP = 3         # minimum resolved bombs before threshold updates
+
+# Loop-detection constants.
+_LOOP_PERIODS = (2, 3)   # cycle lengths to detect
+# Minimum history depth needed: 2*max_period - 1 = 5. Default window of 6
+# gives one entry of slack while keeping memory negligible.
+_LOOP_WINDOW_DEFAULT = 6
 
 
 class _PendingBomb(NamedTuple):
@@ -125,6 +134,8 @@ class HeuristicPolicy(Policy):
         agent_bomb_value: float = 1.0,
         bomb_reserve_threshold: float = 1.0,
         wall_break_tile_threshold: float = 0.0,
+        loop_detection: bool = True,
+        loop_window: int = _LOOP_WINDOW_DEFAULT,
     ) -> None:
         self.predictive_bomb = predictive_bomb
         self.predictive_bomb_threshold = predictive_bomb_threshold
@@ -139,6 +150,8 @@ class HeuristicPolicy(Policy):
         self.agent_bomb_value = agent_bomb_value
         self.bomb_reserve_threshold = bomb_reserve_threshold
         self.wall_break_tile_threshold = wall_break_tile_threshold
+        self.loop_detection = loop_detection
+        self.loop_window = loop_window
 
         # Mutable auto-tune state — persists across rounds (policy is not re-created on /reset).
         self._tuned_threshold: float = predictive_bomb_threshold
@@ -146,12 +159,18 @@ class HeuristicPolicy(Policy):
         self._ema_n: int = 0
         self._pending_bombs: list[_PendingBomb] = []
 
+        # Rolling history of (action, position) pairs for loop detection.
+        # Both components must match for a cycle to be confirmed — same action at
+        # a different position (e.g. two FORWARD moves in a corridor) is not a loop.
+        self._action_history: deque[tuple[int, tuple[int, int]]] = deque(maxlen=loop_window)
+
     # ── main entrypoint ─────────────────────────────────────────────────────
     def choose(self, obs: ParsedObs, memory: MapMemory) -> int:
         self._resolve_pending_bombs(memory)
 
+        # Frozen ticks are forced by the engine — nothing to decide.
         if obs.frozen_ticks > 0:
-            return int(Action.STAY)
+            return self._record_action(int(Action.STAY), obs.location)
 
         timeline = project_danger(memory)
         danger_now: set[tuple[int, int]] = set()
@@ -159,29 +178,95 @@ class HeuristicPolicy(Policy):
             if tick <= 1:
                 danger_now.update(cells)
 
+        # Dodge is safety-critical: skip loop detection so we never get stuck
+        # in a blast zone while trying to break a navigation cycle.
         my_blast_tick = imminent_danger(memory, obs.location)
         if my_blast_tick is not None and my_blast_tick <= BOMB_TIMER:
             chosen = self._dodge(obs, memory, timeline)
             if chosen is not None:
-                return self._mask_check(chosen, obs)
+                return self._record_action(self._mask_check(chosen, obs), obs.location)
 
         attack = self._try_attack(obs, memory)
         if attack is not None:
-            return self._mask_check(attack, obs)
+            return self._finalize(self._mask_check(attack, obs), obs, memory)
 
         defend = self._try_defend(obs, memory, danger_now)
         if defend is not None:
-            return self._mask_check(defend, obs)
+            return self._finalize(self._mask_check(defend, obs), obs, memory)
 
         collect = self._try_collect(obs, memory, danger_now)
         if collect is not None:
-            return self._mask_check(collect, obs)
+            return self._finalize(self._mask_check(collect, obs), obs, memory)
 
         explore = self._try_explore(obs, memory, danger_now)
         if explore is not None:
-            return self._mask_check(explore, obs)
+            return self._finalize(self._mask_check(explore, obs), obs, memory)
 
+        return self._finalize(int(Action.STAY), obs, memory)
+
+    # ── loop detection ──────────────────────────────────────────────────────
+
+    def _record_action(self, action: int, pos: tuple[int, int]) -> int:
+        """Append (action, pos) to the rolling history and return action."""
+        if self.loop_detection:
+            self._action_history.append((action, pos))
+        return action
+
+    def _is_loop(self, action: int, pos: tuple[int, int]) -> bool:
+        """Return True if taking (action, pos) now would complete a repeating cycle.
+
+        Checks whether the proposed entry, appended to the current history,
+        would form a tail that exactly repeats the preceding block of equal
+        length.  Both the action *and* the position must match — identical
+        actions at different coordinates (e.g. two consecutive FORWARD moves
+        along a corridor) are not considered a loop.
+
+        For a period-P check (P ∈ {2, 3}):
+            proposed suffix  = history[-(P-1):] + [(action, pos)]   # length P
+            preceding block  = history[-(2P-1):-(P-1)]              # length P
+        A match means the agent has already executed this exact sequence once
+        before and is about to start it again.
+        """
+        entry = (action, pos)
+        buf = list(self._action_history)  # deque doesn't support slicing
+        n = len(buf)
+        for period in _LOOP_PERIODS:
+            needed = 2 * period - 1   # minimum history length for this period
+            if n < needed:
+                continue
+            suffix = tuple(buf[n - (period - 1):]) + (entry,)
+            prev   = tuple(buf[n - (2 * period - 1): n - (period - 1)])
+            if suffix == prev:
+                return True
+        return False
+
+    def _break_loop(self, obs: ParsedObs, memory: MapMemory, looping_action: int) -> int:
+        """Return a legal, non-looping action to escape the detected cycle.
+
+        Priority: turns first (cheap, changes heading without committing to a
+        cell), then linear motion, then STAY.  Skips the detected looping
+        action and any action that would itself complete a cycle.
+        """
+        for action in (Action.LEFT, Action.RIGHT, Action.FORWARD, Action.BACKWARD, Action.STAY):
+            candidate = int(action)
+            if candidate == looping_action:
+                continue
+            if obs.action_mask[candidate] != 1:
+                continue
+            if not self._is_loop(candidate, obs.location):
+                return candidate
+        # All alternatives are either masked or themselves looping — return any
+        # masked-legal action as a last resort.
+        for action in (Action.LEFT, Action.RIGHT, Action.FORWARD, Action.BACKWARD, Action.STAY):
+            if obs.action_mask[int(action)] == 1:
+                return int(action)
         return int(Action.STAY)
+
+    def _finalize(self, action: int, obs: ParsedObs, memory: MapMemory) -> int:
+        """Apply loop detection and record the action before returning it."""
+        if self.loop_detection and self._is_loop(action, obs.location):
+            action = self._break_loop(obs, memory, action)
+        return self._record_action(action, obs.location)
 
     # ── edge cost builder (incorporates wall-breaking flag) ────────────────
     def _edge_cost(
