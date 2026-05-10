@@ -14,25 +14,7 @@ of adding it.
   edge cost as a function of accumulated step cost, rejecting edges whose
   arrival tick falls within any projected blast window.
 
-- ~~Anti-oscillation / loop detection~~ — implemented as `loop_detection=True`
-  (default ON) on `HeuristicPolicy`. A `deque` of `(action, position)` pairs
-  is maintained with configurable `loop_window` (default 6). Before committing
-  to a non-dodge action, `_is_loop()` checks whether adding that `(action, pos)`
-  entry would complete a period-2 or period-3 repeating suffix in the history
-  (both action and coordinates must match — same action at different cells is
-  not a loop). When a loop is detected, `_break_loop()` selects the first legal
-  non-looping alternative, preferring turns (LEFT/RIGHT) over linear motion over
-  STAY. Dodge actions bypass the check entirely to avoid blocking safety moves.
-  Toggle: `HeuristicPolicy(loop_detection=False)` /
-  `auto_play.py --no-loop-detection`. Window: `--loop-window N` (must be ≥ 5
-  to catch period-3 cycles).
-
 ## Medium value
-
-- ~~Stale tile_contents in novice mode.~~ — fixed by the novice-map
-  cache: `AEManager.__init__` re-merges the cache on every `/reset`, so
-  walls/tiles destroyed or consumed in round N are restored to their
-  initial state at the start of round N+1.
 
 - **Action mask isn't fed into BFS.** `pathfinding` uses
   `memory.passable` (our belief). The action_mask is canonical truth. If
@@ -110,6 +92,19 @@ of adding it.
 
 ## Resolved
 
+- ~~Anti-oscillation / loop detection~~ — implemented as `loop_detection=True`
+  (default ON) on `HeuristicPolicy`. A `deque` of `(action, position)` pairs
+  is maintained with configurable `loop_window` (default 6). Before committing
+  to a non-dodge action, `_is_loop()` checks whether adding that `(action, pos)`
+  entry would complete a period-2 or period-3 repeating suffix in the history
+  (both action and coordinates must match — same action at different cells is
+  not a loop). When a loop is detected, `_break_loop()` selects the first legal
+  non-looping alternative, preferring turns (LEFT/RIGHT) over linear motion over
+  STAY. Dodge actions bypass the check entirely to avoid blocking safety moves.
+  Toggle: `HeuristicPolicy(loop_detection=False)` /
+  `auto_play.py --no-loop-detection`. Window: `--loop-window N` (must be ≥ 5
+  to catch period-3 cycles).
+
 - ~~Bomb economy~~ — implemented as `bomb_economy=True` (opt-in, default OFF) on
   `HeuristicPolicy`. When enabled, `_try_attack` replaces the hard threshold
   with a unified value score: `base_hits * base_bomb_value + agent_hits *
@@ -185,3 +180,8 @@ of adding it.
   restored at round boundaries (matching the env's own reset). Toggle:
   `AEManager(cache_path=None)` / `auto_play.py --no-cache`. First-round
   self-play (n=48) showed +7 mean reward when cache is loaded.
+
+- ~~Stale tile_contents in novice mode.~~ — fixed by the novice-map
+  cache: `AEManager.__init__` re-merges the cache on every `/reset`, so
+  walls/tiles destroyed or consumed in round N are restored to their
+  initial state at the start of round N+1.
