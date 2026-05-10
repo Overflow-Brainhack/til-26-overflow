@@ -4,10 +4,18 @@ Static state (walls, base positions, observed tile types) is preserved
 across `/reset` calls so that novice mode (fixed map layout) doesn't need
 to re-explore each round. Per-round dynamic state (bombs, enemy positions)
 is cleared explicitly via `reset_round()`.
+
+In novice mode the simulator hardcodes maze seed 19 and episode seed 88
+(arena.py:454, dynamics.py:304), so the map is identical every game.
+`save()`/`load()` lets us capture that map once offline and bundle the
+JSON into the Docker image — round 1 starts with full map knowledge
+instead of wasting steps on re-exploration.
 """
 
+import json
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 import numpy as np
 
@@ -50,21 +58,33 @@ class BombInfo:
 
 @dataclass
 class MapMemory:
-    # ── static knowledge (preserved across rounds) ──────────────────────────
+    # ── static knowledge (preserved across rounds, serializable) ────────────
     blocked_edges: set[Edge] = field(default_factory=set)
     destructible_edges: set[Edge] = field(default_factory=set)
     known_edges: set[Edge] = field(default_factory=set)
     tile_contents: dict[tuple[int, int], str] = field(default_factory=dict)
-    enemy_bases: set[tuple[int, int]] = field(default_factory=set)
-    ally_base: Optional[tuple[int, int]] = None
+    # All bases ever observed, regardless of team. `enemy_bases` is computed
+    # from this minus our current ally_base — which lets a single saved cache
+    # file work for any agent_id (we'd never know which team we'd be at
+    # capture time).
+    base_positions: set[tuple[int, int]] = field(default_factory=set)
 
-    # ── dynamic per-round state ─────────────────────────────────────────────
+    # ── per-round dynamic state ─────────────────────────────────────────────
+    ally_base: Optional[tuple[int, int]] = None
     bombs: dict[tuple[int, int], BombInfo] = field(default_factory=dict)
     enemy_agents: dict[tuple[int, int], int] = field(default_factory=dict)  # pos -> last_step
     last_seen_step: dict[tuple[int, int], int] = field(default_factory=dict)
     current_step: int = 0
 
-    # ── static-knowledge updates ────────────────────────────────────────────
+    # ── derived ─────────────────────────────────────────────────────────────
+    @property
+    def enemy_bases(self) -> set[tuple[int, int]]:
+        """All known base positions excluding our own."""
+        if self.ally_base is None:
+            return set(self.base_positions)
+        return self.base_positions - {self.ally_base}
+
+    # ── per-round reset ─────────────────────────────────────────────────────
     def reset_round(self) -> None:
         """Clear per-round dynamic state. Static map knowledge persists."""
         self.bombs.clear()
@@ -136,8 +156,9 @@ class MapMemory:
     def _stamp_entities(self, cell_view: np.ndarray, pos: tuple[int, int]) -> None:
         if cell_view[ViewChannel.ENEMY_AGENT] > 0.5:
             self.enemy_agents[pos] = self.current_step
-        if cell_view[ViewChannel.ENEMY_BASE] > 0.5:
-            self.enemy_bases.add(pos)
+        # Track ALL bases (ally or enemy). `enemy_bases` filters at read time.
+        if cell_view[ViewChannel.ALLY_BASE] > 0.5 or cell_view[ViewChannel.ENEMY_BASE] > 0.5:
+            self.base_positions.add(pos)
 
         ally_bomb = cell_view[ViewChannel.ALLY_BOMB] > 0.5
         enemy_bomb = cell_view[ViewChannel.ENEMY_BOMB] > 0.5
@@ -190,6 +211,65 @@ class MapMemory:
 
     def in_bounds(self, p: tuple[int, int]) -> bool:
         return 0 <= p[0] < GRID_SIZE and 0 <= p[1] < GRID_SIZE
+
+    # ── persistence (static state only) ─────────────────────────────────────
+
+    def to_static_dict(self) -> dict[str, Any]:
+        """Serialize the across-rounds-stable subset of state.
+
+        Excludes: ally_base (per-team), bombs, enemy_agents, last_seen_step,
+        current_step. Including those would couple a saved cache to a
+        specific team or round.
+        """
+        def edges(s: set[Edge]) -> list[list[list[int]]]:
+            out: list[list[list[int]]] = []
+            for e in s:
+                pts = sorted(e)  # canonical ordering for determinism
+                out.append([list(pts[0]), list(pts[1])])
+            out.sort()
+            return out
+
+        return {
+            "version": 1,
+            "blocked_edges": edges(self.blocked_edges),
+            "destructible_edges": edges(self.destructible_edges),
+            "known_edges": edges(self.known_edges),
+            "tile_contents": [
+                [list(p), v] for p, v in sorted(self.tile_contents.items())
+            ],
+            "base_positions": sorted(list(p) for p in self.base_positions),
+        }
+
+    @classmethod
+    def from_static_dict(cls, data: dict[str, Any]) -> "MapMemory":
+        m = cls()
+        for key, dest in (
+            ("blocked_edges", m.blocked_edges),
+            ("destructible_edges", m.destructible_edges),
+            ("known_edges", m.known_edges),
+        ):
+            for a, b in data.get(key, []):
+                dest.add(_edge(tuple(a), tuple(b)))
+        m.tile_contents = {
+            tuple(p): v for p, v in data.get("tile_contents", [])
+        }
+        m.base_positions = {tuple(p) for p in data.get("base_positions", [])}
+        return m
+
+    def save(self, path: str | Path) -> None:
+        Path(path).write_text(json.dumps(self.to_static_dict(), indent=2))
+
+    @classmethod
+    def load(cls, path: str | Path) -> "MapMemory":
+        return cls.from_static_dict(json.loads(Path(path).read_text()))
+
+    def merge_static_from(self, other: "MapMemory") -> None:
+        """Adopt another memory's static state into ours. Idempotent."""
+        self.blocked_edges.update(other.blocked_edges)
+        self.destructible_edges.update(other.destructible_edges)
+        self.known_edges.update(other.known_edges)
+        self.tile_contents.update(other.tile_contents)
+        self.base_positions.update(other.base_positions)
 
 
 # ── module-level singleton ─────────────────────────────────────────────────

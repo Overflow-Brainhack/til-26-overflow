@@ -6,25 +6,17 @@ of adding it.
 
 ## High value
 
-- **Predictive bomb targeting.** We drop bombs reacting to *current* enemy
-  positions; the bomb takes `BOMB_TIMER` (3) ticks to detonate. By then the
-  enemy has likely moved out of blast. Improvement: reason about likely
-  enemy moves (e.g. enemies usually advance toward collectibles) and drop
-  bombs at predicted-future positions or chokepoints. Cost: needs an enemy
-  model, even a crude "most likely action" one.
-
-- **Wall-breaking pathfinding.** Destructible walls are treated as
-  impassable. If a high-value tile (mission, +5) sits behind a destructible
-  wall, we ignore it. Improvement: `pathfinding` should optionally treat
-  destructible edges as passable-with-cost (cost ~ BOMB_TIMER + a bomb
-  charge), and `policy._try_collect` should consider wall-breaking when
-  the value justifies the detour. Cost: extend `can_traverse` API to
-  return cost, A* instead of BFS.
-
 - **Defend stance is naive.** `_try_defend` just walks toward the closest
   enemy near our base — doesn't bomb them, doesn't intercept on the line
   between enemy and base. Should: pre-position between enemy and base,
   bomb when enemy steps in range, weight base-health against tile-pursuit.
+
+- **Predictive bomb threshold isn't auto-tuned.** Multi-seed self-play
+  (n=48 across 8 seeds) shows predictive bombing slightly *hurts* in
+  self-play (213 → 192 mean reward). Either the threshold is too low or
+  the random-walk uniform-distribution model over-counts hits. Try a
+  drift-aware enemy model (last-velocity continuation), or raise the
+  threshold so we only bomb on ≥0.5 expected hits.
 
 ## Medium value
 
@@ -35,13 +27,10 @@ of adding it.
   when no enemies are in range, holding a bomb to break a wall to a
   mission is +5 points vs 0 for a wasted attack.
 
-- **Stale tile_contents in novice mode.** We persist `tile_contents`
-  across rounds (singleton survives `/reset`). If we saw a tile consumed
-  in round N, we'll start round N+1 thinking it's empty until we
-  re-observe. In novice mode tiles reset at round start, so we miss
-  collectibles in cells we don't visit early. Fix: clear tile_contents
-  on reset_round (still keep walls / base positions), or re-stamp on
-  every observation regardless.
+- ~~Stale tile_contents in novice mode.~~ — fixed by the novice-map
+  cache: `AEManager.__init__` re-merges the cache on every `/reset`, so
+  walls/tiles destroyed or consumed in round N are restored to their
+  initial state at the start of round N+1.
 
 - **Action mask isn't fed into BFS.** `pathfinding` uses
   `memory.passable` (our belief). The action_mask is canonical truth. If
@@ -76,3 +65,32 @@ of adding it.
 - ~~Friendly-fire safety check (`_can_escape_after_self_bomb`)~~ — removed
   after confirming `dynamics.py:691-692` skips same-team defenders. Our
   own bomb cannot damage our agent or our base.
+
+- ~~Predictive bomb targeting~~ — implemented as
+  `threat.expected_blast_hits`. Each known enemy is treated as uniform
+  over its `BOMB_TIMER`-step random-walk reachability cloud; we bomb when
+  Σ |cloud ∩ blast| / |cloud| ≥ `predictive_bomb_threshold` (default 0.25).
+  Toggle: `HeuristicPolicy(predictive_bomb=...)` /
+  `auto_play.py --no-predictive-bomb`.
+
+- ~~Wall-breaking pathfinding~~ — `pathfinding` is now Dijkstra over
+  (pos, facing) with a generic `EdgeCost` callback. `HeuristicPolicy`
+  builds an EdgeCost where destructible walls cost `wall_break_cost`
+  (default 5.0). When the chosen first action crosses a destructible
+  wall, `_maybe_wall_break` substitutes `PLACE_BOMB` (and `STAY` if our
+  own bomb is already placed at this cell, to avoid double-bombing).
+  Toggle: `HeuristicPolicy(wall_breaking=...)` /
+  `auto_play.py --no-wall-breaking`. Multi-seed self-play (n=48) showed
+  +43% mean reward when enabled.
+
+- ~~Novice map cache~~ — confirmed novice mode hardcodes maze seed 19
+  and episode seed 88, so the map (walls, base positions, initial tile
+  layout) is byte-identical every game regardless of user seed.
+  `MapMemory.save()/load()/merge_static_from()` serialize the static
+  subset to JSON. `ae/test_env/capture_novice_map.py` plays a few rounds
+  to populate the cache and writes it to `ae/src/novice_map.json`, which
+  the Dockerfile bundles via `COPY src .`. `AEManager` auto-loads the
+  cache on every `/reset`, so destroyed walls / consumed tiles get
+  restored at round boundaries (matching the env's own reset). Toggle:
+  `AEManager(cache_path=None)` / `auto_play.py --no-cache`. First-round
+  self-play (n=48) showed +7 mean reward when cache is loaded.

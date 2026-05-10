@@ -32,13 +32,30 @@ if str(SRC) not in sys.path:
 from til_environment.bomberman_env import Bomberman  # noqa: E402
 from til_environment.config import default_config, load_config  # noqa: E402
 
-from ae_manager import AEManager  # noqa: E402
+from ae_manager import DEFAULT_CACHE_PATH, AEManager  # noqa: E402
 from map_memory import MapMemory  # noqa: E402
+from policy import HeuristicPolicy  # noqa: E402
 
 
-def _build_managers(env: Bomberman) -> dict[str, AEManager]:
-    """One AEManager per agent, each with an isolated MapMemory."""
-    return {agent: AEManager(memory=MapMemory()) for agent in env.possible_agents}
+def _build_managers(
+    env: Bomberman,
+    policy_factory,
+    cache_path,
+) -> dict[str, AEManager]:
+    """One AEManager per agent. Each bot has an isolated MapMemory; if a
+    cache_path is provided and exists, every bot pre-loads it (so round 1
+    starts with full map knowledge)."""
+    cached_template: MapMemory | None = None
+    if cache_path is not None and cache_path.exists():
+        cached_template = MapMemory.load(cache_path)
+
+    out: dict[str, AEManager] = {}
+    for agent in env.possible_agents:
+        mem = MapMemory()
+        if cached_template is not None:
+            mem.merge_static_from(cached_template)
+        out[agent] = AEManager(policy=policy_factory(), memory=mem)
+    return out
 
 
 def _reset_managers(managers: dict[str, AEManager]) -> None:
@@ -77,6 +94,34 @@ def main() -> None:
                         help="Use the fixed novice map (default)")
     parser.add_argument("--advanced", dest="novice", action="store_false",
                         help="Use a randomized advanced map")
+
+    # Feature toggles — flip these to A/B test the heuristic policy.
+    parser.add_argument("--predictive-bomb", dest="predictive_bomb",
+                        action="store_true", default=True,
+                        help="Bomb when an enemy is *likely* to be in blast at "
+                             "detonation, not just currently in blast (default ON)")
+    parser.add_argument("--no-predictive-bomb", dest="predictive_bomb",
+                        action="store_false",
+                        help="Disable predictive bombing (only fire on current overlap)")
+    parser.add_argument("--bomb-threshold", type=float, default=0.25,
+                        help="Min expected enemy hits required for a predictive bomb")
+
+    parser.add_argument("--wall-breaking", dest="wall_breaking",
+                        action="store_true", default=True,
+                        help="Allow pathfinding to route through destructible "
+                             "walls (paying a bomb-fuse cost) (default ON)")
+    parser.add_argument("--no-wall-breaking", dest="wall_breaking",
+                        action="store_false",
+                        help="Treat all destructible walls as impassable")
+    parser.add_argument("--wall-break-cost", type=float, default=5.0,
+                        help="Extra path cost (≈ ticks lost) to break a wall")
+
+    parser.add_argument("--cache", dest="cache_path", type=Path,
+                        default=DEFAULT_CACHE_PATH,
+                        help="Pre-load this novice-map cache (default: ae/src/novice_map.json)")
+    parser.add_argument("--no-cache", dest="cache_path", action="store_const", const=None,
+                        help="Start with empty map memory (for benchmarking)")
+
     args = parser.parse_args()
 
     cfg = load_config(args.config) if args.config else default_config()
@@ -89,11 +134,27 @@ def main() -> None:
     seed = args.seed if args.seed is not None else random.randint(0, 99999)
     env.reset(seed=seed)
 
-    managers = _build_managers(env)
+    def make_policy() -> HeuristicPolicy:
+        return HeuristicPolicy(
+            predictive_bomb=args.predictive_bomb,
+            predictive_bomb_threshold=args.bomb_threshold,
+            wall_breaking=args.wall_breaking,
+            wall_break_cost=args.wall_break_cost,
+        )
+
+    managers = _build_managers(env, make_policy, args.cache_path)
     selected_view = env.possible_agents[0]  # camera/highlight follows this agent
 
+    cache_used = args.cache_path is not None and args.cache_path.exists()
+    features = []
+    features.append(f"predictive_bomb={'on' if args.predictive_bomb else 'off'}"
+                    + (f" (≥{args.bomb_threshold})" if args.predictive_bomb else ""))
+    features.append(f"wall_breaking={'on' if args.wall_breaking else 'off'}"
+                    + (f" (cost={args.wall_break_cost})" if args.wall_breaking else ""))
+    features.append(f"map_cache={'on (' + args.cache_path.name + ')' if cache_used else 'off'}")
     print(f"Auto-play: {len(env.possible_agents)} HeuristicPolicy bots, seed={seed}, "
           f"novice={args.novice}, rounds={args.rounds}")
+    print(f"Features:  {' · '.join(features)}")
     print("Keys: Q/ESC quit · R reset · T toggle respawn overlay")
 
     clock = pygame.time.Clock()

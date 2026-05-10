@@ -1,18 +1,24 @@
-"""BFS over the grid that respects walls and produces an Action sequence.
+"""Dijkstra over (position, facing) state space, parameterised by edge cost.
 
-The agent has a facing direction; turning is a separate action. We model
-a state as (position, facing) and expand neighbors via legal Actions:
+The agent has a facing direction; turning is its own action. State expansion:
+    FORWARD    — move 1 step in facing direction (cost = edge_cost(here, ahead))
+    BACKWARD   — move 1 step opposite to facing (cost = edge_cost(here, behind))
+    LEFT       — turn 90° CCW (cost = turn_cost)
+    RIGHT      — turn 90° CW  (cost = turn_cost)
 
-    FORWARD    — move 1 step in facing direction (if no wall)
-    BACKWARD   — move 1 step opposite to facing (if no wall); does not turn
-    LEFT       — turn 90° CCW (no movement)
-    RIGHT      — turn 90° CW (no movement)
+`edge_cost(a, b)` returns the traversal cost from cell `a` to adjacent cell
+`b`, or `None` if impassable. This lets callers express "free passage = 1,
+destructible wall = wall_break_cost, structural wall = impassable" in a
+single function — pathfinding stays generic, policy decides the cost model.
 """
 
-from collections import deque
+import heapq
 from typing import Callable, Optional
 
 from constants import Action, DIR_VECTOR, Direction
+
+
+EdgeCost = Callable[[tuple[int, int], tuple[int, int]], Optional[float]]
 
 
 def _turn_left(d: int) -> int:
@@ -27,87 +33,122 @@ def _opposite(d: int) -> int:
     return (d + 2) % 4
 
 
+def next_pos_after(
+    pos: tuple[int, int],
+    facing: int,
+    action: int,
+) -> tuple[int, int]:
+    """Cell the agent ends up in after taking `action` (assuming the move is legal)."""
+    if action == Action.FORWARD:
+        dx, dy = DIR_VECTOR[Direction(facing)]
+        return (pos[0] + dx, pos[1] + dy)
+    if action == Action.BACKWARD:
+        dx, dy = DIR_VECTOR[Direction(_opposite(facing))]
+        return (pos[0] + dx, pos[1] + dy)
+    return pos
+
+
+def from_can_traverse(
+    can_traverse: Callable[[tuple[int, int], tuple[int, int]], bool],
+    cost: float = 1.0,
+) -> EdgeCost:
+    """Adapter: turn a boolean traversability check into an EdgeCost."""
+    def f(a: tuple[int, int], b: tuple[int, int]) -> Optional[float]:
+        return cost if can_traverse(a, b) else None
+    return f
+
+
 def first_action_to(
     start: tuple[int, int],
     facing: int,
     goals: set[tuple[int, int]],
-    can_traverse: Callable[[tuple[int, int], tuple[int, int]], bool],
+    edge_cost: EdgeCost,
+    *,
+    turn_cost: float = 1.0,
+    max_cost: float = 200.0,
 ) -> Optional[Action]:
-    """BFS from (start, facing) to any goal cell. Return the first Action.
-
-    `can_traverse(a, b)` answers whether the agent can move from cell a to
-    adjacent cell b (i.e. no blocking wall between them). Unknown edges
-    should return True (optimistic).
-    """
+    """Cheapest path from (start, facing) to any goal cell. Return first Action."""
     if start in goals:
         return Action.STAY
 
-    seen = {(start, facing)}
-    # frontier: (pos, facing, first_action)
-    queue: deque[tuple[tuple[int, int], int, Optional[Action]]] = deque()
-    queue.append((start, facing, None))
+    counter = 0
+    heap: list[tuple[float, int, tuple[int, int], int, Optional[Action]]] = [
+        (0.0, counter, start, facing, None)
+    ]
+    seen: dict[tuple[tuple[int, int], int], float] = {(start, facing): 0.0}
 
-    while queue:
-        pos, dirn, first = queue.popleft()
-
-        for action, next_pos, next_dir in _expand(pos, dirn, can_traverse):
-            state = (next_pos, next_dir)
-            if state in seen:
+    while heap:
+        cost, _, pos, dirn, first = heapq.heappop(heap)
+        if cost > max_cost:
+            continue
+        if pos in goals:
+            return first
+        if cost > seen.get((pos, dirn), float("inf")):
+            continue
+        for action, next_pos, next_dir, step_cost in _expand(pos, dirn, edge_cost, turn_cost):
+            new_cost = cost + step_cost
+            if new_cost > max_cost:
                 continue
-            seen.add(state)
-            chosen_first = first if first is not None else action
-            if next_pos in goals:
-                return chosen_first
-            queue.append((next_pos, next_dir, chosen_first))
-
+            state = (next_pos, next_dir)
+            if new_cost < seen.get(state, float("inf")):
+                seen[state] = new_cost
+                chosen_first = first if first is not None else action
+                counter += 1
+                heapq.heappush(heap, (new_cost, counter, next_pos, next_dir, chosen_first))
     return None
-
-
-def _expand(
-    pos: tuple[int, int],
-    facing: int,
-    can_traverse: Callable[[tuple[int, int], tuple[int, int]], bool],
-):
-    # FORWARD
-    fdx, fdy = DIR_VECTOR[Direction(facing)]
-    fwd = (pos[0] + fdx, pos[1] + fdy)
-    if can_traverse(pos, fwd):
-        yield Action.FORWARD, fwd, facing
-
-    # BACKWARD (does not change facing)
-    bdx, bdy = DIR_VECTOR[Direction(_opposite(facing))]
-    back = (pos[0] + bdx, pos[1] + bdy)
-    if can_traverse(pos, back):
-        yield Action.BACKWARD, back, facing
-
-    # Turns (no movement)
-    yield Action.LEFT, pos, _turn_left(facing)
-    yield Action.RIGHT, pos, _turn_right(facing)
 
 
 def reachable_cells(
     start: tuple[int, int],
     facing: int,
-    can_traverse: Callable[[tuple[int, int], tuple[int, int]], bool],
-    max_steps: int = 50,
-) -> dict[tuple[int, int], int]:
-    """Return a {cell: action_count_to_reach} map for BFS within max_steps."""
-    out: dict[tuple[int, int], int] = {start: 0}
-    seen = {(start, facing)}
-    queue: deque[tuple[tuple[int, int], int, int]] = deque()
-    queue.append((start, facing, 0))
+    edge_cost: EdgeCost,
+    *,
+    max_cost: float = 50.0,
+    turn_cost: float = 1.0,
+) -> dict[tuple[int, int], float]:
+    """Cell -> cheapest cost to reach it from (start, facing)."""
+    counter = 0
+    out: dict[tuple[int, int], float] = {start: 0.0}
+    seen: dict[tuple[tuple[int, int], int], float] = {(start, facing): 0.0}
+    heap: list[tuple[float, int, tuple[int, int], int]] = [(0.0, counter, start, facing)]
 
-    while queue:
-        pos, dirn, dist = queue.popleft()
-        if dist >= max_steps:
+    while heap:
+        cost, _, pos, dirn = heapq.heappop(heap)
+        if cost > max_cost:
             continue
-        for _, next_pos, next_dir in _expand(pos, dirn, can_traverse):
-            state = (next_pos, next_dir)
-            if state in seen:
+        if cost > seen.get((pos, dirn), float("inf")):
+            continue
+        for _action, next_pos, next_dir, step_cost in _expand(pos, dirn, edge_cost, turn_cost):
+            new_cost = cost + step_cost
+            if new_cost > max_cost:
                 continue
-            seen.add(state)
-            new_dist = dist + 1
-            if next_pos not in out or new_dist < out[next_pos]:
-                out[next_pos] = new_dist
-            queue.append((next_pos, next_dir, new_dist))
+            state = (next_pos, next_dir)
+            if new_cost < seen.get(state, float("inf")):
+                seen[state] = new_cost
+                if next_pos not in out or new_cost < out[next_pos]:
+                    out[next_pos] = new_cost
+                counter += 1
+                heapq.heappush(heap, (new_cost, counter, next_pos, next_dir))
     return out
+
+
+def _expand(
+    pos: tuple[int, int],
+    facing: int,
+    edge_cost: EdgeCost,
+    turn_cost: float,
+):
+    fdx, fdy = DIR_VECTOR[Direction(facing)]
+    fwd = (pos[0] + fdx, pos[1] + fdy)
+    fwd_cost = edge_cost(pos, fwd)
+    if fwd_cost is not None:
+        yield Action.FORWARD, fwd, facing, fwd_cost
+
+    bdx, bdy = DIR_VECTOR[Direction(_opposite(facing))]
+    back = (pos[0] + bdx, pos[1] + bdy)
+    back_cost = edge_cost(pos, back)
+    if back_cost is not None:
+        yield Action.BACKWARD, back, facing, back_cost
+
+    yield Action.LEFT, pos, _turn_left(facing), turn_cost
+    yield Action.RIGHT, pos, _turn_right(facing), turn_cost

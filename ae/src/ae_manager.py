@@ -4,9 +4,15 @@ Per-round entrypoint. The server recreates this on `/reset` (and implicitly
 on observations with `step == 0`). Static map knowledge is shared across
 recreations via the module-level singleton in `map_memory`, so novice mode
 (fixed map) doesn't re-explore each round.
+
+Optional novice-map cache: if `ae/src/novice_map.json` exists, its static
+state (walls, tile types, base positions) is merged into the singleton on
+first construction. Bundle a captured cache via the Dockerfile's
+`COPY src .` to start round 1 with full map knowledge.
 """
 
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 from constants import Action
 from map_memory import MapMemory, get_shared_memory
@@ -14,18 +20,43 @@ from observation import parse_observation
 from policy import HeuristicPolicy, Policy
 
 
+# Default cache path: bundled into the Docker image alongside source.
+DEFAULT_CACHE_PATH = Path(__file__).resolve().parent / "novice_map.json"
+
+
 class AEManager:
     def __init__(
         self,
         policy: Policy | None = None,
         memory: MapMemory | None = None,
+        cache_path: Optional[Path] = None,
     ) -> None:
-        # Production (Docker, single agent): use the module-level singleton so
-        # static map knowledge survives /reset across rounds.
+        # Production (single-bot Docker): use the singleton so static state
+        # survives /reset across rounds.
         # Multi-agent visualization: pass an isolated MapMemory per bot.
         self._memory = memory if memory is not None else get_shared_memory()
+
+        # Re-merge the cache on every construction (i.e. every /reset). The
+        # merge is idempotent for the data structures we care about, and
+        # crucially restores walls that were destroyed in the previous round
+        # (novice mode resets the env's walls but our `blocked_edges` only
+        # learns about that when we re-observe). Skipped when the caller
+        # supplied their own MapMemory — they control preloading.
+        if memory is None:
+            self._maybe_load_cache(cache_path or DEFAULT_CACHE_PATH)
+
         self._memory.reset_round()
         self._policy: Policy = policy or HeuristicPolicy()
+
+    def _maybe_load_cache(self, path: Path) -> None:
+        if not path.exists():
+            return
+        try:
+            cached = MapMemory.load(path)
+        except Exception:
+            # Cache is corrupt or stale — silently ignore.
+            return
+        self._memory.merge_static_from(cached)
 
     def ae(self, observation: dict[str, Any]) -> int:
         """Choose the next action given the current observation.
