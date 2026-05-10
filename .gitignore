@@ -176,8 +176,3 @@ cython_debug/
 src/gcloud/*.json
 
 data
-<<<<<<< Updated upstream
-pyproject.toml
-uv.lock
-=======
->>>>>>> Stashed changes
