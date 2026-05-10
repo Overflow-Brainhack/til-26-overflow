@@ -3,7 +3,6 @@
 # Unless you want to do something special with the server, you shouldn't need
 # to change anything in this file.
 
-
 import base64
 from typing import Any
 
@@ -32,7 +31,6 @@ async def cv(request: Request) -> dict[str, list[list[dict[str, Any]]]]:
 
     predictions = []
     for instance in inputs_json["instances"]:
-
         # Reads the base-64 encoded image and decodes it into bytes.
         image_bytes = base64.b64decode(instance["b64"])
 
