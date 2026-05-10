@@ -16,6 +16,9 @@ dependencies = [
   "numpy",
   "scikit-image",
   "lightning",
+  "scikit-learn>=1.8.0",
+  "albumentations>=2.0.8",
+  "ultralytics>=8.4.48",
 ]
 
 [[tool.uv.index]]
@@ -30,8 +33,8 @@ torch = [
 torchvision = [
   { index = "pytorch-cu118", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
+til-26-ae = { path = "./til-26-ae", editable = true }
+cv_dev = { path = "cv_dev", editable = true }
 
 [tool.uv.workspace]
-members = [
-    "ae",
-]
+members = ["ae"]

@@ -4,10 +4,7 @@ from typing import Any
 
 
 class CVManager:
-
     def __init__(self):
-        # This is where you can initialize your model and any static configurations.
-        # TODO
         pass
 
     def cv(self, image: bytes) -> list[dict[str, Any]]:
@@ -20,8 +17,5 @@ class CVManager:
             A list of `dict`s containing your CV model's predictions. See
             `cv/README.md` for the expected format.
         """
-
-        # Your inference code goes here.
-        # TODO
 
         return []

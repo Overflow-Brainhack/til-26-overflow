@@ -5,6 +5,8 @@
 # Large files like model weights, training data, and results should be ignored.
 **/models/
 **/results/
+**/runs/
+*.pt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -174,5 +176,8 @@ cython_debug/
 src/gcloud/*.json
 
 data
+<<<<<<< Updated upstream
 pyproject.toml
 uv.lock
+=======
+>>>>>>> Stashed changes
