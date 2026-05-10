@@ -23,6 +23,7 @@
 #   ./submit.sh ae
 #   ./submit.sh nlp best-rag
 #   ./submit.sh --dry-run cv                    # print commands without running them
+#   ./submit.sh --build ae                      # build image (linux/amd64) then submit
 
 set -euo pipefail
 
@@ -50,6 +51,7 @@ VALID_CHALLENGES="asr cv noise nlp ae"
 # ─── arg parsing ───────────────────────────────────────────────────────────
 DRY_RUN=0
 SKIP_LOGIN=0
+BUILD=0
 CHALLENGE=""
 TAG="latest"
 
@@ -62,6 +64,7 @@ while (( $# )); do
   case "$1" in
     -h|--help) usage 0 ;;
     --dry-run) DRY_RUN=1 ;;
+    --build) BUILD=1 ;;
     --skip-login) SKIP_LOGIN=1 ;;
     --) shift; break ;;
     -*) echo "unknown flag: $1" >&2; usage 2 ;;
@@ -137,13 +140,19 @@ run() {
   "$@"
 }
 
+# ─── build (if requested) ──────────────────────────────────────────────────
+if (( BUILD )); then
+  run docker build --platform linux/amd64 -t "$LOCAL_REF" "$CHALLENGE"
+fi
+
 # ─── verify the local image exists ─────────────────────────────────────────
-if (( ! DRY_RUN )); then
+if (( ! DRY_RUN && ! BUILD )); then
   if ! docker image inspect "$LOCAL_REF" >/dev/null 2>&1; then
     cat >&2 <<EOF
 error: local image '$LOCAL_REF' not found.
   Build it first:
-    cd $CHALLENGE && docker build -t '$LOCAL_REF' .
+    cd $CHALLENGE && docker build --platform linux/amd64 -t '$LOCAL_REF' .
+  Or pass --build to have this script do it automatically.
 EOF
     exit 1
   fi

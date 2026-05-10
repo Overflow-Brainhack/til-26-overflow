@@ -46,7 +46,12 @@ class AEManager:
             self._maybe_load_cache(cache_path or DEFAULT_CACHE_PATH)
 
         self._memory.reset_round()
-        self._policy: Policy = policy or HeuristicPolicy()
+        self._policy: Policy = policy or HeuristicPolicy(
+            predictive_bomb=False,
+            predictive_bomb_threshold=0.25,
+            wall_breaking=False,
+            wall_break_cost=5.0,
+        )
 
     def _maybe_load_cache(self, path: Path) -> None:
         if not path.exists():
