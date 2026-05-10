@@ -134,13 +134,37 @@ def expected_blast_hits(
     return total
 
 
+def _blast_cell_escape_factor(
+    memory: MapMemory,
+    cell: tuple[int, int],
+    blast_cells: set[tuple[int, int]],
+) -> float:
+    """Fraction of probability mass to keep for a blast cell given its escape routes.
+
+    An enemy in a blast cell with open exits to non-blast passable cells is likely
+    to walk away before detonation. We discount its contribution by 1/(1+exits),
+    so a fully cornered cell (0 exits) counts at 1.0 and one with 3 clear escape
+    routes counts at 0.25.
+    """
+    exits = 0
+    for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        nbr = (cell[0] + ddx, cell[1] + ddy)
+        if (
+            memory.in_bounds(nbr)
+            and memory.passable(cell, nbr)
+            and nbr not in blast_cells
+        ):
+            exits += 1
+    return 1.0 / (1.0 + exits)
+
+
 def expected_blast_hits_drift(
     memory: MapMemory,
     blast_cells: set[tuple[int, int]],
     horizon: int = BOMB_TIMER,
     drift_weight: float = 2.0,
 ) -> float:
-    """Expected hits using a velocity-biased enemy position distribution.
+    """Expected hits using a velocity-biased, escape-aware enemy position distribution.
 
     The uniform model (`expected_blast_hits`) treats each cell in the
     reachability cloud as equally likely — this overcounts because in practice
@@ -148,6 +172,11 @@ def expected_blast_hits_drift(
     reachable cell by exp(drift_weight * dot(displacement, vel_unit)), so cells
     in the enemy's direction of travel receive exponentially more probability
     mass. When velocity is unknown the distribution collapses to uniform.
+
+    Additionally, blast cells are discounted by 1/(1+exits) where exits is the
+    number of passable non-blast neighbors. An enemy in an open blast cell is
+    likely to walk away before detonation; one in a cornered cell (0 exits)
+    counts at full weight.
 
     drift_weight=2.0 makes a cell directly ahead ~7× more likely than one
     directly behind the enemy. Set to 0 to recover the uniform model.
@@ -170,7 +199,8 @@ def expected_blast_hits_drift(
             w = math.exp(drift_weight * dot)
             w_total += w
             if cell in blast_cells:
-                w_in_blast += w
+                escape = _blast_cell_escape_factor(memory, cell, blast_cells)
+                w_in_blast += w * escape
         if w_total > 0:
             total += w_in_blast / w_total
     return total

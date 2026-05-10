@@ -13,7 +13,7 @@ single function — pathfinding stays generic, policy decides the cost model.
 """
 
 import heapq
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 from constants import Action, DIR_VECTOR, Direction
 
@@ -66,8 +66,14 @@ def first_action_to(
     *,
     turn_cost: float = 1.0,
     max_cost: float = 200.0,
+    action_mask: Optional[Sequence[int]] = None,
 ) -> Optional[Action]:
-    """Cheapest path from (start, facing) to any goal cell. Return first Action."""
+    """Cheapest path from (start, facing) to any goal cell. Return first Action.
+
+    action_mask, when provided, restricts the first step to only actions the
+    environment currently permits (canonical truth vs. our memory belief).
+    Subsequent steps are unrestricted — the mask is only valid for step 0.
+    """
     if start in goals:
         return Action.STAY
 
@@ -86,6 +92,8 @@ def first_action_to(
         if cost > seen.get((pos, dirn), float("inf")):
             continue
         for action, next_pos, next_dir, step_cost in _expand(pos, dirn, edge_cost, turn_cost):
+            if first is None and action_mask is not None and not action_mask[int(action)]:
+                continue
             new_cost = cost + step_cost
             if new_cost > max_cost:
                 continue
@@ -105,20 +113,31 @@ def reachable_cells(
     *,
     max_cost: float = 50.0,
     turn_cost: float = 1.0,
+    action_mask: Optional[Sequence[int]] = None,
 ) -> dict[tuple[int, int], float]:
-    """Cell -> cheapest cost to reach it from (start, facing)."""
+    """Cell -> cheapest cost to reach it from (start, facing).
+
+    action_mask gates first-step moves so distance estimates reflect what
+    is actually reachable this tick (e.g. a masked FORWARD means the agent
+    must turn first, adding a turn_cost to all cells in that direction).
+    """
     counter = 0
     out: dict[tuple[int, int], float] = {start: 0.0}
     seen: dict[tuple[tuple[int, int], int], float] = {(start, facing): 0.0}
-    heap: list[tuple[float, int, tuple[int, int], int]] = [(0.0, counter, start, facing)]
+    # is_first: True only for the initial expansion from (start, facing).
+    heap: list[tuple[float, int, tuple[int, int], int, bool]] = [
+        (0.0, counter, start, facing, True)
+    ]
 
     while heap:
-        cost, _, pos, dirn = heapq.heappop(heap)
+        cost, _, pos, dirn, is_first = heapq.heappop(heap)
         if cost > max_cost:
             continue
         if cost > seen.get((pos, dirn), float("inf")):
             continue
-        for _action, next_pos, next_dir, step_cost in _expand(pos, dirn, edge_cost, turn_cost):
+        for action, next_pos, next_dir, step_cost in _expand(pos, dirn, edge_cost, turn_cost):
+            if is_first and action_mask is not None and not action_mask[int(action)]:
+                continue
             new_cost = cost + step_cost
             if new_cost > max_cost:
                 continue
@@ -128,7 +147,7 @@ def reachable_cells(
                 if next_pos not in out or new_cost < out[next_pos]:
                     out[next_pos] = new_cost
                 counter += 1
-                heapq.heappush(heap, (new_cost, counter, next_pos, next_dir))
+                heapq.heappush(heap, (new_cost, counter, next_pos, next_dir, False))
     return out
 
 

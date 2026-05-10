@@ -224,7 +224,8 @@ class HeuristicPolicy(Policy):
         if not safe:
             return self._panic_move(obs, memory, timeline)
 
-        action = first_action_to(obs.location, obs.direction, safe, dodge_cost)
+        action = first_action_to(obs.location, obs.direction, safe, dodge_cost,
+                                  action_mask=obs.action_mask)
         if action is not None:
             return int(action)
         return self._panic_move(obs, memory, timeline)
@@ -324,7 +325,8 @@ class HeuristicPolicy(Policy):
         else:
             targets = threats
 
-        action = first_action_to(obs.location, obs.direction, targets, edge)
+        action = first_action_to(obs.location, obs.direction, targets, edge,
+                                  action_mask=obs.action_mask)
         if action is None:
             return None
         return self._maybe_wall_break(obs, memory, action)
@@ -341,7 +343,8 @@ class HeuristicPolicy(Policy):
 
         edge = self._edge_cost(memory, danger_avoid=danger_now)
         distances = reachable_cells(
-            obs.location, obs.direction, edge, max_cost=EXPLORE_BUDGET
+            obs.location, obs.direction, edge,
+            max_cost=EXPLORE_BUDGET, action_mask=obs.action_mask,
         )
 
         best_score = 0.0
@@ -359,7 +362,8 @@ class HeuristicPolicy(Policy):
         if best_cell is None:
             return None
 
-        action = first_action_to(obs.location, obs.direction, {best_cell}, edge)
+        action = first_action_to(obs.location, obs.direction, {best_cell}, edge,
+                                  action_mask=obs.action_mask)
         if action is None:
             return None
         return self._maybe_wall_break(obs, memory, action)
@@ -383,7 +387,8 @@ class HeuristicPolicy(Policy):
         if not frontier:
             return None
 
-        action = first_action_to(obs.location, obs.direction, frontier, edge)
+        action = first_action_to(obs.location, obs.direction, frontier, edge,
+                                  action_mask=obs.action_mask)
         if action is None:
             return None
         return self._maybe_wall_break(obs, memory, action)
@@ -469,17 +474,20 @@ class HeuristicPolicy(Policy):
         memory: MapMemory,
     ) -> list[tuple[Action, tuple[int, int]]]:
         out: list[tuple[Action, tuple[int, int]]] = []
+        mask = obs.action_mask
         fdx, fdy = DIR_VECTOR[Direction(obs.direction)]
         fwd = (obs.location[0] + fdx, obs.location[1] + fdy)
-        if memory.in_bounds(fwd) and memory.passable(obs.location, fwd):
+        if mask[Action.FORWARD] and memory.in_bounds(fwd) and memory.passable(obs.location, fwd):
             out.append((Action.FORWARD, fwd))
         bdx, bdy = DIR_VECTOR[Direction((obs.direction + 2) % 4)]
         back = (obs.location[0] + bdx, obs.location[1] + bdy)
-        if memory.in_bounds(back) and memory.passable(obs.location, back):
+        if mask[Action.BACKWARD] and memory.in_bounds(back) and memory.passable(obs.location, back):
             out.append((Action.BACKWARD, back))
-        out.append((Action.LEFT, obs.location))
-        out.append((Action.RIGHT, obs.location))
-        out.append((Action.STAY, obs.location))
+        if mask[Action.LEFT]:
+            out.append((Action.LEFT, obs.location))
+        if mask[Action.RIGHT]:
+            out.append((Action.RIGHT, obs.location))
+        out.append((Action.STAY, obs.location))  # always available as last resort
         return out
 
     def _mask_check(self, action: int, obs: ParsedObs) -> int:
