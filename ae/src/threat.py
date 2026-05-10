@@ -18,6 +18,7 @@ Predictive targeting
 Blast model approximates the simulator's Chebyshev-LOS blast.
 """
 
+import math
 from typing import Optional
 
 from constants import BOMB_BLAST_RADIUS, BOMB_TIMER, DIR_VECTOR, GRID_SIZE
@@ -130,6 +131,48 @@ def expected_blast_hits(
             continue
         in_blast = sum(1 for c in cloud if c in blast_cells)
         total += in_blast / len(cloud)
+    return total
+
+
+def expected_blast_hits_drift(
+    memory: MapMemory,
+    blast_cells: set[tuple[int, int]],
+    horizon: int = BOMB_TIMER,
+    drift_weight: float = 2.0,
+) -> float:
+    """Expected hits using a velocity-biased enemy position distribution.
+
+    The uniform model (`expected_blast_hits`) treats each cell in the
+    reachability cloud as equally likely — this overcounts because in practice
+    enemies continue in their observed direction of travel. Here we weight each
+    reachable cell by exp(drift_weight * dot(displacement, vel_unit)), so cells
+    in the enemy's direction of travel receive exponentially more probability
+    mass. When velocity is unknown the distribution collapses to uniform.
+
+    drift_weight=2.0 makes a cell directly ahead ~7× more likely than one
+    directly behind the enemy. Set to 0 to recover the uniform model.
+    """
+    total = 0.0
+    enemy_clouds = predict_enemy_positions(memory, horizon)
+    for last_pos, cloud in enemy_clouds.items():
+        if not cloud:
+            continue
+        vel = memory.enemy_velocities.get(last_pos, (0, 0))
+        vx, vy = vel
+        vmag = math.hypot(vx, vy) or 1.0  # avoid divide-by-zero; 1.0 → uniform
+
+        w_total = 0.0
+        w_in_blast = 0.0
+        for cell in cloud:
+            dx = cell[0] - last_pos[0]
+            dy = cell[1] - last_pos[1]
+            dot = (dx * vx + dy * vy) / vmag
+            w = math.exp(drift_weight * dot)
+            w_total += w
+            if cell in blast_cells:
+                w_in_blast += w
+        if w_total > 0:
+            total += w_in_blast / w_total
     return total
 
 

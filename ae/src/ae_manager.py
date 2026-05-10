@@ -47,10 +47,13 @@ class AEManager:
 
         self._memory.reset_round()
         self._policy: Policy = policy or HeuristicPolicy(
-            predictive_bomb=False,
-            predictive_bomb_threshold=0.25,
-            wall_breaking=False,
+            predictive_bomb=True,
+            predictive_bomb_threshold=0.7,
+            wall_breaking=True,
             wall_break_cost=5.0,
+            smart_defend=True,
+            drift_aware_bomb=True,
+            auto_tune_bomb=False,
         )
 
     def _maybe_load_cache(self, path: Path) -> None:

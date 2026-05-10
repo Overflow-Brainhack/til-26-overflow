@@ -13,16 +13,21 @@ decision tree:
 
 Toggles (`HeuristicPolicy(**kwargs)` / CLI flags in auto_play.py):
     predictive_bomb              — bomb based on expected hits, not just current overlap
-    predictive_bomb_threshold    — minimum expected hits to bomb predictively
+    predictive_bomb_threshold    — minimum expected hits to bomb predictively (starting value for auto-tune)
     wall_breaking                — pathfinding may route through destructible walls
     wall_break_cost              — extra cost (≈ ticks lost) to traverse a destructible wall
+    smart_defend                 — pre-position between enemy and base; expand defend radius when base health is low
+    drift_aware_bomb             — use velocity-biased enemy position distribution (reduces overcounting)
+    auto_tune_bomb               — online EMA that raises/lowers threshold based on observed hit rate
+    bomb_tune_target             — target hit rate for auto-tuning (default 0.40)
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from constants import (
     Action,
+    BASE_MAX_HEALTH,
     BOMB_TIMER,
     DIR_VECTOR,
     Direction,
@@ -34,6 +39,7 @@ from threat import (
     cells_in_blast,
     cells_safe_for_at_least,
     expected_blast_hits,
+    expected_blast_hits_drift,
     imminent_danger,
     project_danger,
 )
@@ -42,6 +48,51 @@ from threat import (
 # Search-space tunables (independent of feature toggles).
 DEFEND_RADIUS = 4                  # enemy within this many cells of base = threat
 EXPLORE_BUDGET = 60.0              # max Dijkstra cost when looking for frontier
+
+# How many steps from our base toward the enemy the intercept position sits.
+INTERCEPT_STEPS = 2
+
+# Predictive-bomb auto-tuning constants.
+_TUNE_EMA_ALPHA = 0.75   # smoothing factor for the hit-rate EMA
+_TUNE_MIN = 0.05         # floor: never go below this threshold
+_TUNE_MAX = 0.95         # ceiling: never go above this threshold
+_TUNE_WARMUP = 3         # minimum resolved bombs before threshold updates
+
+
+class _PendingBomb(NamedTuple):
+    """Record of a predictive bomb we placed, pending hit/miss resolution."""
+    placed_step: int
+    blast_cells: frozenset[tuple[int, int]]
+    expected_hits: float
+
+
+def _intercept_cells(
+    threats: set[tuple[int, int]],
+    ally_base: tuple[int, int],
+    memory: MapMemory,
+) -> set[tuple[int, int]]:
+    """Cells INTERCEPT_STEPS steps from base toward each threat.
+
+    Navigating here places us on the enemy's path to the base rather than
+    chasing them from behind, making it far easier to block and bomb them.
+    Falls back to the threat cell itself when the enemy is already adjacent.
+    """
+    bx, by = ally_base
+    out: set[tuple[int, int]] = set()
+    for ex, ey in threats:
+        dist = abs(ex - bx) + abs(ey - by)
+        n = min(INTERCEPT_STEPS, dist)
+        cx, cy = bx, by
+        for _ in range(n):
+            rdx, rdy = ex - cx, ey - cy
+            if abs(rdx) >= abs(rdy):
+                cx += 1 if rdx > 0 else -1
+            else:
+                cy += 1 if rdy > 0 else -1
+        cell = (cx, cy)
+        if memory.in_bounds(cell):
+            out.add(cell)
+    return out
 
 
 class Policy(ABC):
@@ -60,14 +111,30 @@ class HeuristicPolicy(Policy):
         predictive_bomb_threshold: float = 0.25,
         wall_breaking: bool = True,
         wall_break_cost: float = 5.0,
+        smart_defend: bool = True,
+        drift_aware_bomb: bool = True,
+        auto_tune_bomb: bool = False,
+        bomb_tune_target: float = 0.40,
     ) -> None:
         self.predictive_bomb = predictive_bomb
         self.predictive_bomb_threshold = predictive_bomb_threshold
         self.wall_breaking = wall_breaking
         self.wall_break_cost = wall_break_cost
+        self.smart_defend = smart_defend
+        self.drift_aware_bomb = drift_aware_bomb
+        self.auto_tune_bomb = auto_tune_bomb
+        self.bomb_tune_target = bomb_tune_target
+
+        # Mutable auto-tune state — persists across rounds (policy is not re-created on /reset).
+        self._tuned_threshold: float = predictive_bomb_threshold
+        self._hit_ema: float = bomb_tune_target   # warm-start at the target hit rate
+        self._ema_n: int = 0
+        self._pending_bombs: list[_PendingBomb] = []
 
     # ── main entrypoint ─────────────────────────────────────────────────────
     def choose(self, obs: ParsedObs, memory: MapMemory) -> int:
+        self._resolve_pending_bombs(memory)
+
         if obs.frozen_ticks > 0:
             return int(Action.STAY)
 
@@ -190,23 +257,29 @@ class HeuristicPolicy(Policy):
         if sitting_bomb is not None and sitting_bomb.ally:
             return None
 
-        targets = cells_in_blast(memory, obs.location)
+        blast = cells_in_blast(memory, obs.location)
 
         # Definite hits: enemies / enemy bases currently in blast.
         definite = 0.0
         for p in memory.enemy_agents:
-            if p in targets:
+            if p in blast:
                 definite += 1.0
         for p in memory.enemy_bases:
-            if p in targets:
+            if p in blast:
                 definite += 2.0  # bases score more (50 pts vs ~20 damage on agent)
         if definite >= 1.0:
             return int(Action.PLACE_BOMB)
 
         # Predictive: would the bomb plausibly hit a moving enemy by detonation?
         if self.predictive_bomb:
-            expected = expected_blast_hits(memory, targets, BOMB_TIMER)
-            if expected >= self.predictive_bomb_threshold:
+            expected = self._expected_hits(memory, blast)
+            if expected >= self._effective_threshold():
+                if self.auto_tune_bomb:
+                    self._pending_bombs.append(_PendingBomb(
+                        placed_step=obs.step,
+                        blast_cells=frozenset(blast),
+                        expected_hits=expected,
+                    ))
                 return int(Action.PLACE_BOMB)
 
         return None
@@ -219,16 +292,39 @@ class HeuristicPolicy(Policy):
     ) -> Optional[int]:
         if memory.ally_base is None or not memory.enemy_agents:
             return None
+        # Base is permanently destroyed for this episode — defending it gains nothing.
+        if obs.base_health <= 0:
+            return None
         bx, by = memory.ally_base
+
+        # Expand the defend radius when base health is low so we intercept
+        # enemies earlier — at full health DEFEND_RADIUS=4; at zero health +4.
+        if self.smart_defend:
+            health_frac = min(1.0, obs.base_health / BASE_MAX_HEALTH)
+            effective_radius = DEFEND_RADIUS + int((1.0 - health_frac) * 4)
+        else:
+            effective_radius = DEFEND_RADIUS
+
         threats = {
             p for p in memory.enemy_agents
-            if abs(p[0] - bx) + abs(p[1] - by) <= DEFEND_RADIUS
+            if abs(p[0] - bx) + abs(p[1] - by) <= effective_radius
         }
         if not threats:
             return None
 
         edge = self._edge_cost(memory, danger_avoid=danger_now)
-        action = first_action_to(obs.location, obs.direction, threats, edge)
+
+        # Pre-position between the enemy and our base rather than chasing the
+        # enemy directly. This puts us on their inbound path so _try_attack can
+        # bomb them on the next tick once they enter our blast radius.
+        if self.smart_defend:
+            targets = _intercept_cells(threats, memory.ally_base, memory)
+            if not targets:
+                targets = threats
+        else:
+            targets = threats
+
+        action = first_action_to(obs.location, obs.direction, targets, edge)
         if action is None:
             return None
         return self._maybe_wall_break(obs, memory, action)
@@ -291,6 +387,51 @@ class HeuristicPolicy(Policy):
         if action is None:
             return None
         return self._maybe_wall_break(obs, memory, action)
+
+    # ── auto-tune helpers ────────────────────────────────────────────────────
+
+    def _effective_threshold(self) -> float:
+        return self._tuned_threshold if self.auto_tune_bomb else self.predictive_bomb_threshold
+
+    def _expected_hits(self, memory: MapMemory, blast: set[tuple[int, int]]) -> float:
+        if self.drift_aware_bomb:
+            return expected_blast_hits_drift(memory, blast, BOMB_TIMER)
+        return expected_blast_hits(memory, blast, BOMB_TIMER)
+
+    def _resolve_pending_bombs(self, memory: MapMemory) -> None:
+        """Resolve predictive bombs whose fuse has elapsed and update the EMA.
+
+        A bomb is considered a hit if any enemy_agents entry falls within its
+        blast cells at or after the step it was placed. This is an approximate
+        proxy — enemies that were hit and then moved away before we observed
+        them count as misses, and enemies that wandered in after detonation
+        count as hits. Good enough for EMA calibration.
+        """
+        if not self.auto_tune_bomb or not self._pending_bombs:
+            return
+        current = memory.current_step
+        resolved = [b for b in self._pending_bombs if current >= b.placed_step + BOMB_TIMER + 1]
+        for bomb in resolved:
+            self._pending_bombs.remove(bomb)
+            hit = any(
+                p in bomb.blast_cells and memory.enemy_agents.get(p, -1) >= bomb.placed_step
+                for p in memory.enemy_agents
+            )
+            self._update_bomb_ema(hit)
+
+    def _update_bomb_ema(self, hit: bool) -> None:
+        self._hit_ema = _TUNE_EMA_ALPHA * self._hit_ema + (1 - _TUNE_EMA_ALPHA) * (1.0 if hit else 0.0)
+        self._ema_n += 1
+        if self._ema_n >= _TUNE_WARMUP:
+            # Positive error → hit rate below target → raise threshold (bomb less).
+            error = self.bomb_tune_target - self._hit_ema
+            self._tuned_threshold = max(_TUNE_MIN, min(_TUNE_MAX,
+                self._tuned_threshold + 0.05 * error))
+
+    @property
+    def tuned_threshold(self) -> float:
+        """Current effective threshold (auto-tuned or static)."""
+        return self._effective_threshold()
 
     # ── helpers ─────────────────────────────────────────────────────────────
 

@@ -116,6 +116,31 @@ def main() -> None:
     parser.add_argument("--wall-break-cost", type=float, default=5.0,
                         help="Extra path cost (≈ ticks lost) to break a wall")
 
+    parser.add_argument("--smart-defend", dest="smart_defend",
+                        action="store_true", default=True,
+                        help="Pre-position between enemy and base when defending; "
+                             "expand defend radius when base health is low (default ON)")
+    parser.add_argument("--no-smart-defend", dest="smart_defend",
+                        action="store_false",
+                        help="Revert to naive defend: walk directly toward threat")
+
+    parser.add_argument("--drift-aware-bomb", dest="drift_aware_bomb",
+                        action="store_true", default=True,
+                        help="Use velocity-biased enemy distribution for predictive "
+                             "bombing — reduces overcounting (default ON)")
+    parser.add_argument("--no-drift-aware-bomb", dest="drift_aware_bomb",
+                        action="store_false",
+                        help="Revert to uniform random-walk enemy distribution")
+
+    parser.add_argument("--auto-tune-bomb", dest="auto_tune_bomb",
+                        action="store_true", default=False,
+                        help="Adaptively tune the bomb threshold via EMA of observed "
+                             "hit rate (experimental, default OFF)")
+    parser.add_argument("--no-auto-tune-bomb", dest="auto_tune_bomb",
+                        action="store_false")
+    parser.add_argument("--bomb-tune-target", type=float, default=0.40,
+                        help="Target predictive-bomb hit rate for auto-tuning (default 0.40)")
+
     parser.add_argument("--cache", dest="cache_path", type=Path,
                         default=DEFAULT_CACHE_PATH,
                         help="Pre-load this novice-map cache (default: ae/src/novice_map.json)")
@@ -140,6 +165,10 @@ def main() -> None:
             predictive_bomb_threshold=args.bomb_threshold,
             wall_breaking=args.wall_breaking,
             wall_break_cost=args.wall_break_cost,
+            smart_defend=args.smart_defend,
+            drift_aware_bomb=args.drift_aware_bomb,
+            auto_tune_bomb=args.auto_tune_bomb,
+            bomb_tune_target=args.bomb_tune_target,
         )
 
     managers = _build_managers(env, make_policy, args.cache_path)
@@ -151,6 +180,9 @@ def main() -> None:
                     + (f" (≥{args.bomb_threshold})" if args.predictive_bomb else ""))
     features.append(f"wall_breaking={'on' if args.wall_breaking else 'off'}"
                     + (f" (cost={args.wall_break_cost})" if args.wall_breaking else ""))
+    features.append(f"smart_defend={'on' if args.smart_defend else 'off'}")
+    features.append(f"drift_aware={'on' if args.drift_aware_bomb else 'off'}")
+    features.append(f"auto_tune={'on (target={args.bomb_tune_target})' if args.auto_tune_bomb else 'off'}")
     features.append(f"map_cache={'on (' + args.cache_path.name + ')' if cache_used else 'off'}")
     print(f"Auto-play: {len(env.possible_agents)} HeuristicPolicy bots, seed={seed}, "
           f"novice={args.novice}, rounds={args.rounds}")
@@ -195,6 +227,10 @@ def main() -> None:
             if all(env.terminations.values()) or all(env.truncations.values()):
                 rounds_done += 1
                 _print_round_summary(env, rounds_done)
+                if args.auto_tune_bomb:
+                    sample_policy = next(iter(managers.values()))._policy
+                    print(f"  [auto-tune] threshold={sample_policy.tuned_threshold:.3f}  "
+                          f"hit_ema={sample_policy._hit_ema:.3f}")
                 if rounds_done < args.rounds:
                     seed = random.randint(0, 99999)
                     env.reset(seed=seed)

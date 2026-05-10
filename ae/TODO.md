@@ -6,17 +6,6 @@ of adding it.
 
 ## High value
 
-- **Defend stance is naive.** `_try_defend` just walks toward the closest
-  enemy near our base — doesn't bomb them, doesn't intercept on the line
-  between enemy and base. Should: pre-position between enemy and base,
-  bomb when enemy steps in range, weight base-health against tile-pursuit.
-
-- **Predictive bomb threshold isn't auto-tuned.** Multi-seed self-play
-  (n=48 across 8 seeds) shows predictive bombing slightly *hurts* in
-  self-play (213 → 192 mean reward). Either the threshold is too low or
-  the random-walk uniform-distribution model over-counts hits. Try a
-  drift-aware enemy model (last-velocity continuation), or raise the
-  threshold so we only bomb on ≥0.5 expected hits.
 
 ## Medium value
 
@@ -61,6 +50,33 @@ of adding it.
   our base from outside our agent's viewcone).
 
 ## Resolved
+
+- ~~Predictive bomb threshold auto-tuning~~ — two mechanisms added:
+  (1) **Drift-aware model** (`drift_aware_bomb=True`, default): instead of
+  the uniform random-walk cloud, each reachable cell is weighted by
+  `exp(drift_weight * dot(displacement, vel_unit))`, concentrating probability
+  mass in the enemy's observed direction of travel. Enemy velocities are inferred
+  each step by matching adjacent consecutive sightings in `MapMemory`. When
+  velocity is unknown the distribution collapses to uniform.
+  (2) **Online EMA auto-tuning** (`auto_tune_bomb=True`, opt-in): after each
+  predictive bomb, we check whether any enemy appeared in the blast cells at or
+  after placement; the hit/miss result feeds a per-session EMA. When hit rate
+  drifts below `bomb_tune_target` (default 0.40) the threshold rises; above
+  target it falls. Clamped to [0.05, 0.95].
+  (3) **`benchmark_bomb_threshold.py`**: headless self-play sweep over arbitrary
+  threshold grids + auto-tune, prints ranked table and recommendation.
+  Toggles: `HeuristicPolicy(drift_aware_bomb=..., auto_tune_bomb=...)` /
+  `auto_play.py --no-drift-aware-bomb --auto-tune-bomb`.
+
+- ~~Defend stance is naive~~ — implemented as `smart_defend=True` (default) on
+  `HeuristicPolicy`. `_try_defend` now: (1) computes an *intercept* cell
+  `INTERCEPT_STEPS=2` out from the base toward the enemy, navigating there
+  instead of chasing the enemy directly — placing us on their inbound path so
+  `_try_attack` can bomb them the next tick they enter our blast radius;
+  (2) dynamically expands `effective_radius` from 4 → up to 8 as
+  `base_health` drops to zero, so we engage threats earlier when the base is
+  at risk. Toggle: `HeuristicPolicy(smart_defend=...)` /
+  `auto_play.py --no-smart-defend`.
 
 - ~~Friendly-fire safety check (`_can_escape_after_self_bomb`)~~ — removed
   after confirming `dynamics.py:691-692` skips same-team defenders. Our

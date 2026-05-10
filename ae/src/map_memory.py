@@ -75,6 +75,8 @@ class MapMemory:
     enemy_agents: dict[tuple[int, int], int] = field(default_factory=dict)  # pos -> last_step
     last_seen_step: dict[tuple[int, int], int] = field(default_factory=dict)
     current_step: int = 0
+    # Inferred from consecutive sightings: enemy_pos -> (dx, dy) velocity unit.
+    enemy_velocities: dict[tuple[int, int], tuple[int, int]] = field(default_factory=dict)
 
     # ── derived ─────────────────────────────────────────────────────────────
     @property
@@ -89,6 +91,7 @@ class MapMemory:
         """Clear per-round dynamic state. Static map knowledge persists."""
         self.bombs.clear()
         self.enemy_agents.clear()
+        self.enemy_velocities.clear()
         self.current_step = 0
 
     def update(self, obs: ParsedObs) -> None:
@@ -106,6 +109,7 @@ class MapMemory:
             view_shape=(2 * BASE_VISION_RADIUS + 1, 2 * BASE_VISION_RADIUS + 1),
         )
 
+        self._infer_enemy_velocities()
         self._gc_dynamic()
 
     def _ingest_view(self, view: np.ndarray, world_for_cell, view_shape: tuple[int, int]) -> None:
@@ -171,6 +175,26 @@ class MapMemory:
                 step_seen=self.current_step,
                 ally=ally_bomb,
             )
+
+    def _infer_enemy_velocities(self) -> None:
+        """Match same-step and previous-step enemy positions to infer velocities.
+
+        When an enemy was at P_prev (last step) and now appears at P_cur ≤ 1
+        Manhattan step away, we record velocity P_cur - P_prev. Stationary
+        enemies get velocity (0, 0). Used by the drift-aware blast model.
+        """
+        prev_step = self.current_step - 1
+        prev = {p for p, s in self.enemy_agents.items() if s == prev_step}
+        current = {p for p, s in self.enemy_agents.items() if s == self.current_step}
+        new_vel: dict[tuple[int, int], tuple[int, int]] = {}
+        for cp in current:
+            best_d = 2
+            for pp in prev:
+                d = abs(cp[0] - pp[0]) + abs(cp[1] - pp[1])
+                if d < best_d:
+                    best_d = d
+                    new_vel[cp] = (cp[0] - pp[0], cp[1] - pp[1])
+        self.enemy_velocities = new_vel
 
     def _gc_dynamic(self) -> None:
         # Drop bombs whose timer has elapsed.

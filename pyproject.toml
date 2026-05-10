@@ -30,3 +30,8 @@ torch = [
 torchvision = [
   { index = "pytorch-cu118", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
+
+[tool.uv.workspace]
+members = [
+    "ae",
+]

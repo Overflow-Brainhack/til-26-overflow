@@ -11,12 +11,17 @@
 #
 # Prerequisites (one-time setup, see the wiki for details):
 #   • gcloud + docker installed and on PATH
-#   • TEAM_ID and GCLOUD_ACCESS_TOKEN exported (in .env or your shell):
-#       — Run `gcloud auth print-access-token` on your Workbench instance,
-#         copy the output to .env as GCLOUD_ACCESS_TOKEN=<token>.
-#       — Tokens expire (~1 hour). Re-fetch from the Workbench if pushes
-#         start failing with 401/403 from Artifact Registry or Vertex AI.
-#       — Falls back to TEAM_NAME if TEAM_ID isn't set.
+#   • TEAM_ID exported (in .env or your shell)
+#
+# Auth (pick one):
+#   Impersonation (default) — your local gcloud identity must have
+#     roles/iam.serviceAccountTokenCreator on the team service account.
+#     Run `gcloud auth login` once; tokens refresh automatically.
+#
+#   Token fallback — set GCLOUD_ACCESS_TOKEN in .env (or your shell).
+#     Run `gcloud auth print-access-token` on your Workbench instance and
+#     copy the output.  Tokens expire after ~1 hour; refresh when needed.
+#     The token fallback takes precedence if the variable is set.
 #
 # Usage:
 #   ./submit.sh CHALLENGE [TAG]                 # CHALLENGE in {asr,cv,nlp,ae,noise}; TAG defaults to "latest"
@@ -30,6 +35,7 @@ set -euo pipefail
 REGION="asia-southeast1"
 REGISTRY="${REGION}-docker.pkg.dev"
 PROJECT="til-ai-2026"
+SERVICE_ACCOUNT="svc-overflow@til-ai-2026.iam.gserviceaccount.com"
 
 # ─── per-challenge config (port + predict route) ───────────────────────────
 challenge_port() {
@@ -102,16 +108,15 @@ EOF
   exit 2
 fi
 
-if [[ -z "${GCLOUD_ACCESS_TOKEN:-}" ]]; then
-  cat >&2 <<EOF
-error: GCLOUD_ACCESS_TOKEN not set.
-  On your Workbench instance, run:
-      gcloud auth print-access-token
-  then copy the output and add it to .env as:
-      GCLOUD_ACCESS_TOKEN=<token>
-  Tokens expire after ~1 hour; refresh if submissions start failing.
-EOF
-  exit 2
+# ─── auth setup ────────────────────────────────────────────────────────────
+# Token fallback takes precedence if GCLOUD_ACCESS_TOKEN is set.
+if [[ -n "${GCLOUD_ACCESS_TOKEN:-}" ]]; then
+  AUTH_MODE="token"
+  # Let gcloud pick up the token from the environment for all subcommands.
+  export CLOUDSDK_AUTH_ACCESS_TOKEN="$GCLOUD_ACCESS_TOKEN"
+else
+  AUTH_MODE="impersonate"
+  export CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT="$SERVICE_ACCOUNT"
 fi
 
 REPO="${REGISTRY}/${PROJECT}/repo-til-26-${TEAM_ID}"
@@ -168,25 +173,21 @@ Submitting:
   port:        $PORT
   predict:     $ROUTE
   health:      /health
+  auth:        $AUTH_MODE${AUTH_MODE:+ ($( [[ $AUTH_MODE == impersonate ]] && echo "$SERVICE_ACCOUNT" || echo "GCLOUD_ACCESS_TOKEN"))}
   dry-run:     $((DRY_RUN ? 1 : 0))
 EOF
 echo
-
-# ─── access token ──────────────────────────────────────────────────────────
-# GCLOUD_ACCESS_TOKEN comes from the Workbench (`gcloud auth print-access-token`
-# there); the local machine isn't authenticated as the team's service account.
-# Existence was already checked above; here we just stage it for use.
-TOKEN_FILE="$(mktemp -t til-submit-token.XXXXXX)"
-trap 'rm -f "$TOKEN_FILE"' EXIT
-printf '%s' "$GCLOUD_ACCESS_TOKEN" > "$TOKEN_FILE"
-TOKEN="$GCLOUD_ACCESS_TOKEN"
 
 # ─── docker login (if not skipped) ─────────────────────────────────────────
 if (( ! SKIP_LOGIN )); then
   printf '\033[1;34m>>\033[0m %s\n' \
     "docker login -u oauth2accesstoken --password-stdin https://$REGISTRY" >&2
   if (( ! DRY_RUN )); then
-    echo "$TOKEN" | docker login -u oauth2accesstoken --password-stdin "https://$REGISTRY"
+    if [[ "$AUTH_MODE" == "impersonate" ]]; then
+      gcloud auth print-access-token | docker login -u oauth2accesstoken --password-stdin "https://$REGISTRY"
+    else
+      echo "$GCLOUD_ACCESS_TOKEN" | docker login -u oauth2accesstoken --password-stdin "https://$REGISTRY"
+    fi
   fi
 fi
 
@@ -203,8 +204,7 @@ run gcloud ai models upload \
   --container-health-route="/health" \
   --container-predict-route="$ROUTE" \
   --container-ports="$PORT" \
-  --version-aliases="default" \
-  --access-token-file="$TOKEN_FILE"
+  --version-aliases="default"
 
 echo
 echo "✓ Submitted $LOCAL_REF as $IMAGE_NAME on $REGION."
