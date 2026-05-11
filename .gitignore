@@ -176,3 +176,5 @@ cython_debug/
 src/gcloud/*.json
 
 data
+
+.claude/projects

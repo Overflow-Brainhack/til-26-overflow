@@ -51,7 +51,10 @@ torchvision = [
 ]
 
 til-26-ae = { path = "./til-26-ae", editable = true }
+
+# run with uv run -m [module_name].[file_name]
 cv_dev = { path = "cv_dev", editable = true }
+ae = { path = "ae", editable = true }
 
 [tool.uv.workspace]
-members = ["ae"]
+members = []
