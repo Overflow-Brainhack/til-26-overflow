@@ -12,6 +12,13 @@ ENV PYTHONUNBUFFERED=1
 ENV PIP_ROOT_USER_ACTION=ignore
 WORKDIR /workspace
 
+RUN apt-get update && apt-get install -y \
+    libxcb1 \
+    libxrender1 \
+    libxext6 \
+    libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Installs your dependencies.
 RUN pip install -U pip
 COPY requirements.txt .
@@ -19,6 +26,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copies your source files.
 COPY src .
+COPY models/ models/
 
 # Starts your model server.
 CMD uvicorn cv_server:app --port 5002 --host 0.0.0.0

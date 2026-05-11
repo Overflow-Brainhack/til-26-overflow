@@ -18,7 +18,7 @@ load_dotenv()
 TEAM_NAME = os.getenv("TEAM_NAME")
 TEAM_TRACK = os.getenv("TEAM_TRACK")
 
-BATCH_SIZE = 4
+BATCH_SIZE = 16
 
 
 class COCOPatched(COCO):
@@ -28,9 +28,9 @@ class COCOPatched(COCO):
         self.dataset, self.anns, self.cats, self.imgs = {}, {}, {}, {}
         self.imgToAnns, self.catToImgs = defaultdict(list), defaultdict(list)
 
-        assert (
-            type(annotations) == dict
-        ), f"Annotation format {type(annotations)} not supported"
+        assert type(annotations) == dict, (
+            f"Annotation format {type(annotations)} not supported"
+        )
         print("Annotations loaded.")
         self.dataset = annotations
         self.createIndex()
@@ -63,8 +63,8 @@ def score_cv(preds: Sequence[Mapping[str, Any]], ground_truth: Any) -> float:
 
 
 def main():
-    data_dir = Path(f"/home/jupyter/{TEAM_TRACK}/cv")
-    results_dir = Path(f"/home/jupyter/{TEAM_NAME}")
+    data_dir = Path(f"data/cv")
+    results_dir = Path(f"results/cv")
     results_dir.mkdir(parents=True, exist_ok=True)
 
     with open(data_dir / "annotations.json", "r") as f:
