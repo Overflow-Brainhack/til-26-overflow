@@ -54,37 +54,52 @@ def make_dataset(
             [
                 A.NoOp(),
             ],
-            bbox_params=A.BboxParams(format="yolo", label_fields=["category_ids"]),
+            bbox_params=A.BboxParams(
+                format="yolo", label_fields=["category_ids"], min_visibility=0.3
+            ),
         )
     else:
         transform = A.Compose(
             [
                 A.HorizontalFlip(p=0.5),
-                A.VerticalFlip(p=0.5),
-                A.Rotate(
-                    limit=45,
+                A.VerticalFlip(p=0.3),
+                # scale jitter ±30% + rotation + shift + shear; keeps output size constant
+                A.Affine(
+                    scale=(0.7, 1.3),
+                    translate_percent=(-0.1, 0.1),
+                    rotate=(-45, 45),
+                    shear=(-10, 10),
                     interpolation=1,
-                    border_mode=0,
-                    fill=(0, 0, 0),
-                    fill_mask=(0, 0, 0),
-                    p=0.5,
+                    fill=0,
+                    p=0.7,
                 ),
+                # perspective distortion — composited objects often lack this
+                A.Perspective(scale=(0.05, 0.1), keep_size=True, p=0.3),
                 A.RandomBrightnessContrast(
-                    brightness_limit=0.2,
-                    contrast_limit=0.2,
-                    p=0.5,
+                    brightness_limit=0.3, contrast_limit=0.3, p=0.6
                 ),
                 A.ColorJitter(
-                    brightness=0.1,
-                    contrast=0.1,
-                    saturation=0.1,
-                    hue=0.05,
-                    p=0.5,
+                    brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5
                 ),
-                A.Blur(blur_limit=3, p=0.5),
-                A.GaussNoise(p=0.5),
+                # shadows to simulate lighting mismatch common in composited images
+                A.RandomShadow(p=0.3),
+                A.Blur(blur_limit=5, p=0.15),
+                A.GaussianBlur(blur_limit=5, p=0.15),
+                A.MotionBlur(blur_limit=7, p=0.15),
+                A.GaussNoise(p=0.3),
+                A.CLAHE(clip_limit=4.0, p=0.2),
+                # simulate partial occlusion
+                A.CoarseDropout(
+                    num_holes_range=(1, 6),
+                    hole_height_range=(10, 40),
+                    hole_width_range=(10, 40),
+                    fill=0,
+                    p=0.3,
+                ),
             ],
-            bbox_params=A.BboxParams(format="yolo", label_fields=["category_ids"]),
+            bbox_params=A.BboxParams(
+                format="yolo", label_fields=["category_ids"], min_visibility=0.3
+            ),
         )
 
     for annotation in tqdm(
@@ -164,7 +179,7 @@ if __name__ == "__main__":
         train_annotations,
         dimensions["width"],
         dimensions["height"],
-        no_aug=True,
+        no_aug=False,
     )
 
     os.mkdir(VAL_PATH / "images")

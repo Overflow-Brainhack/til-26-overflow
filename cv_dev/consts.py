@@ -21,4 +21,4 @@ NUM_CATEGORIES = len(CATEGORIES)  # 18
 TRAIN_PATH = Path("data/cv/train")
 VAL_PATH = Path("data/cv/val")
 
-TRAINED_MODELS_PATH = Path("")
+TRAIN_OUTPUT = Path(__file__).parent.parent / "cv-training" / "trains"
