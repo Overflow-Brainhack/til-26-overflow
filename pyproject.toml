@@ -19,6 +19,7 @@ dependencies = [
   "scikit-learn>=1.8.0",
   "albumentations>=2.0.8",
   "ultralytics>=8.4.48",
+  "rembg>=2.0.75",
 ]
 
 [[tool.uv.index]]
