@@ -38,13 +38,6 @@ of adding it.
   `value = unknown_neighbor_count / (travel_cost + 1)`, breaking ties
   toward cells that expose the most new information per tick spent.
 
-- **Adaptive wall-break cost based on tile value behind the wall.** The
-  fixed `wall_break_cost=5.0` does not distinguish between a wall hiding
-  a mission tile (high value, worth breaking early) and one leading to an
-  empty dead-end. Peek at known or inferred tiles one step past the wall;
-  scale cost down (e.g. `5.0 / (1 + tile_value)`) so high-value targets
-  attract wall-breaking naturally without needing a separate planning pass.
-
 ## Low value / nice-to-have
 
 - **Learned policy slot.** `Policy` ABC exists; a `LearnedPolicy(Policy)`
@@ -188,3 +181,15 @@ of adding it.
   cache: `AEManager.__init__` re-merges the cache on every `/reset`, so
   walls/tiles destroyed or consumed in round N are restored to their
   initial state at the start of round N+1.
+
+- ~~Adaptive wall-break cost based on tile value behind the wall~~ — implemented as
+  `adaptive_wall_break_cost=True` (opt-in, default OFF) on `HeuristicPolicy`. When
+  enabled, `_edge_cost` replaces the flat `wall_break_cost` with
+  `wall_break_cost / (1 + tile_value(target_cell))` for destructible wall edges.
+  Effect at the defaults (`wall_break_cost=5.0`): mission tile (value 5) attracts
+  wall-breaking at ~0.83 cost, resource (2) at ~1.67, recon (1) at 2.5, empty/unknown
+  (0) keeps the full 5.0 penalty — so high-value targets draw the agent through walls
+  naturally without a separate planning pass. Orthogonal to `wall_break_tile_threshold`
+  (which gates the bomb action) — this feature only adjusts pathfinding cost.
+  Toggle: `HeuristicPolicy(adaptive_wall_break_cost=True)` /
+  `auto_play.py --adaptive-wall-break-cost`.

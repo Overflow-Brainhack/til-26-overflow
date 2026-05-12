@@ -116,6 +116,11 @@ def main() -> None:
                         action="store_false")
     parser.add_argument("--wall-break-cost", type=float, default=_P["wall_break_cost"],
                         help="Extra path cost (≈ ticks lost) to break a wall")
+    parser.add_argument("--adaptive-wall-break-cost", dest="adaptive_wall_break_cost",
+                        action="store_true", default=_P["adaptive_wall_break_cost"],
+                        help="Scale wall-break path cost down by tile value behind the wall")
+    parser.add_argument("--no-adaptive-wall-break-cost", dest="adaptive_wall_break_cost",
+                        action="store_false")
 
     parser.add_argument("--smart-defend", dest="smart_defend",
                         action="store_true", default=_P["smart_defend"],
@@ -213,6 +218,7 @@ def main() -> None:
             predictive_bomb_threshold=args.bomb_threshold,
             wall_breaking=args.wall_breaking,
             wall_break_cost=args.wall_break_cost,
+            adaptive_wall_break_cost=args.adaptive_wall_break_cost,
             smart_defend=args.smart_defend,
             drift_aware_bomb=args.drift_aware_bomb,
             auto_tune_bomb=args.auto_tune_bomb,

@@ -19,6 +19,10 @@ Toggles (`HeuristicPolicy(**kwargs)` / CLI flags in auto_play.py):
     predictive_bomb_threshold    — minimum expected hits to bomb predictively (starting value for auto-tune)
     wall_breaking                — pathfinding may route through destructible walls
     wall_break_cost              — extra cost (≈ ticks lost) to traverse a destructible wall
+    adaptive_wall_break_cost     — when ON, scale wall_break_cost down by known tile value behind the
+                                   wall: effective_cost = wall_break_cost / (1 + tile_value(target)).
+                                   Mission tiles (value 5) attract wall-breaking at ~0.83× base cost;
+                                   empty cells behind walls keep the full wall_break_cost (default OFF)
     smart_defend                 — pre-position between enemy and base; expand defend radius when base health is low
     drift_aware_bomb             — use velocity-biased enemy position distribution (reduces overcounting)
     auto_tune_bomb               — online EMA that raises/lowers threshold based on observed hit rate
@@ -147,6 +151,7 @@ class HeuristicPolicy(Policy):
         predictive_bomb_threshold: float = 0.25,
         wall_breaking: bool = True,
         wall_break_cost: float = 5.0,
+        adaptive_wall_break_cost: bool = False,
         smart_defend: bool = True,
         drift_aware_bomb: bool = True,
         auto_tune_bomb: bool = False,
@@ -169,6 +174,7 @@ class HeuristicPolicy(Policy):
         self.predictive_bomb_threshold = predictive_bomb_threshold
         self.wall_breaking = wall_breaking
         self.wall_break_cost = wall_break_cost
+        self.adaptive_wall_break_cost = adaptive_wall_break_cost
         self.smart_defend = smart_defend
         self.drift_aware_bomb = drift_aware_bomb
         self.auto_tune_bomb = auto_tune_bomb
@@ -325,6 +331,7 @@ class HeuristicPolicy(Policy):
         if allow_walls is None:
             allow_walls = self.wall_breaking
         wall_cost = self.wall_break_cost
+        adaptive = self.adaptive_wall_break_cost
 
         def cost(a: tuple[int, int], b: tuple[int, int]) -> Optional[float]:
             if not memory.in_bounds(b):
@@ -334,6 +341,8 @@ class HeuristicPolicy(Policy):
                     return None
                 return 1.0
             if allow_walls and memory.edge_is_destructible_wall(a, b):
+                if adaptive:
+                    return wall_cost / (1.0 + memory.tile_value(b))
                 return wall_cost
             return None
 

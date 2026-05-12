@@ -32,6 +32,7 @@ DEFAULT_POLICY_KWARGS: dict = dict(
 
     wall_breaking=True,
     wall_break_cost=5.0,
+    adaptive_wall_break_cost=False,
 
     smart_defend=True,
 
