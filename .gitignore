@@ -179,3 +179,4 @@ src/gcloud/*.json
 data
 
 .claude/projects
+cv_dev/object_bank

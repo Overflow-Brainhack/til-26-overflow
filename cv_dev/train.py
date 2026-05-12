@@ -1,6 +1,14 @@
-from cv_dev.consts import DATA_PATH, TRAIN_OUTPUT, IMAGE_PATH, JSON_PATH, NUM_CATEGORIES
+from cv_dev.consts import DATA_PATH, TRAIN_OUTPUT, DATASETS_PATH, NUM_CATEGORIES
+from cv_dev.make_dataset import load_dataset, ImageDataset
+from transformers import (
+    DetrForObjectDetection,
+    Trainer,
+    TrainingArguments,
+)
+from torch.utils.data import Dataset
+from torchvision.transforms.functional import normalize
 
-from ultralytics import YOLO
+from ultralytics import YOLO, RTDETR
 from ultralytics.models.rtdetr.train import RTDETRTrainer
 
 import os
@@ -41,10 +49,40 @@ def train_yolov11(n_epochs: int):
     )
 
 
+def train_yolov26(n_epochs: int):
+    # model = YOLO("yolo26l.pt")
+    model = YOLO(TRAIN_OUTPUT / "yolo26l-finetuned" / "weights" / "last.pt")
+    model.train(
+        data=DATA_YAML,
+        epochs=n_epochs,
+        batch=32,
+        project=str(TRAIN_OUTPUT),
+        name="yolo26l-finetuned",
+        save_period=5,
+        device=0,
+        workers=0,
+        imgsz=640,
+        rect=True,
+        resume=True,
+        mosaic=1.0,
+        mixup=0.15,
+        copy_paste=0.1,
+        degrees=10.0,
+        translate=0.1,
+        scale=0.5,
+        flipud=0.3,
+        fliplr=0.5,
+        hsv_h=0.015,
+        hsv_s=0.7,
+        hsv_v=0.4,
+        perspective=0.0005,
+    )
+
+
 def train_rtdetr(n_epochs: int):
     args = dict(
-        model=TRAIN_OUTPUT / "trains" / "rtdetr-x-finetuned" / "weights" / "last.pt",
-        # model="rtdetr-x.pt",
+        # model=TRAIN_OUTPUT / "rtdetr-x-finetuned" / "weights" / "last.pt",
+        model="rtdetr-x.pt",
         data=DATA_YAML,
         epochs=n_epochs,
         batch=2,
@@ -62,16 +100,6 @@ def train_rtdetr(n_epochs: int):
 
 
 def train_detr_hf(n_epochs: int):
-    from transformers import (
-        DetrForObjectDetection,
-        Trainer,
-        TrainingArguments,
-    )
-    from torch.utils.data import Dataset
-    from torchvision.transforms.functional import normalize
-    from cv_dev.make_dataset import load_dataset, ImageDataset
-    from cv_dev.consts import DATASETS_PATH
-
     # ImageNet normalization — applied on top of the 0-1 float tensors from ImageDataset
     IMAGENET_MEAN = [0.485, 0.456, 0.406]
     IMAGENET_STD = [0.229, 0.224, 0.225]
@@ -83,7 +111,7 @@ def train_detr_hf(n_epochs: int):
         def __len__(self) -> int:
             return len(self.base)
 
-        def __getitem__(self, idx: int) -> dict:
+        def __getitem__(self, idx: int):
             image, target = self.base[idx]
             _, H, W = image.shape
 
@@ -116,21 +144,25 @@ def train_detr_hf(n_epochs: int):
                 },
             }
 
-    def collate_fn(batch: list[dict]) -> dict:
+    def collate_fn(batch):
         return {
             "pixel_values": torch.stack([x["pixel_values"] for x in batch]),
             "pixel_mask": torch.stack([x["pixel_mask"] for x in batch]),
             "labels": [x["labels"] for x in batch],
         }
 
+    print("loading datasets")
     train_base = load_dataset(DATASETS_PATH / "train.pt")
     val_base = load_dataset(DATASETS_PATH / "val.pt")
+    print("loaded datasets")
 
     model = DetrForObjectDetection.from_pretrained(
         "facebook/detr-resnet-101",
         num_labels=NUM_CATEGORIES,
         ignore_mismatched_sizes=True,
     )
+
+    print("loaded model")
 
     output_dir = str(TRAIN_OUTPUT / "detr-resnet101-finetuned")
 
@@ -163,4 +195,6 @@ def train_detr_hf(n_epochs: int):
 
 if __name__ == "__main__":
     # train_yolov11(50)
-    train_rtdetr(50)
+    train_yolov26(50)
+    # train_rtdetr(50)
+    # train_detr_hf(50)
