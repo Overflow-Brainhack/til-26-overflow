@@ -2,3 +2,6 @@
 
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
+ultralytics
+pillow
+opencv-python

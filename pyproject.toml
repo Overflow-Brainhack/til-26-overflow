@@ -16,6 +16,9 @@ dependencies = [
   "numpy",
   "scikit-image",
   "lightning",
+  "scikit-learn>=1.8.0",
+  "albumentations>=2.0.8",
+  "ultralytics>=8.4.48",
 ]
 
 [[tool.uv.index]]
@@ -23,15 +26,35 @@ name = "pytorch-cu118"
 url = "https://download.pytorch.org/whl/cu118"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
 [tool.uv.sources]
 torch = [
-  { index = "pytorch-cu118", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-]
-torchvision = [
-  { index = "pytorch-cu118", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 
-[tool.uv.workspace]
-members = [
-    "ae",
+torchvision = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
+
+til-26-ae = { path = "./til-26-ae", editable = true }
+
+# run with uv run -m [module_name].[file_name]
+cv_dev = { path = "cv_dev", editable = true }
+ae = { path = "ae", editable = true }
+
+[tool.uv.workspace]
+members = []

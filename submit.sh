@@ -40,12 +40,12 @@ SERVICE_ACCOUNT="svc-overflow@til-ai-2026.iam.gserviceaccount.com"
 # ─── per-challenge config (port + predict route) ───────────────────────────
 challenge_port() {
   case "$1" in
-    asr)   echo 5001 ;;
-    cv)    echo 5002 ;;
-    noise) echo 5003 ;;
-    nlp)   echo 5004 ;;
-    ae)    echo 5005 ;;
-    *) return 1 ;;
+  asr) echo 5001 ;;
+  cv) echo 5002 ;;
+  noise) echo 5003 ;;
+  nlp) echo 5004 ;;
+  ae) echo 5005 ;;
+  *) return 1 ;;
   esac
 }
 challenge_route() {
@@ -66,17 +66,25 @@ usage() {
   exit "${1:-0}"
 }
 
-while (( $# )); do
+while (($#)); do
   case "$1" in
-    -h|--help) usage 0 ;;
-    --dry-run) DRY_RUN=1 ;;
-    --build) BUILD=1 ;;
-    --skip-login) SKIP_LOGIN=1 ;;
-    --) shift; break ;;
-    -*) echo "unknown flag: $1" >&2; usage 2 ;;
-    *) if [[ -z "$CHALLENGE" ]]; then CHALLENGE="$1"
-       else TAG="$1"
-       fi ;;
+  -h | --help) usage 0 ;;
+  --dry-run) DRY_RUN=1 ;;
+  --build) BUILD=1 ;;
+  --skip-login) SKIP_LOGIN=1 ;;
+  --)
+    shift
+    break
+    ;;
+  -*)
+    echo "unknown flag: $1" >&2
+    usage 2
+    ;;
+  *) if [[ -z "$CHALLENGE" ]]; then
+    CHALLENGE="$1"
+  else
+    TAG="$1"
+  fi ;;
   esac
   shift
 done
@@ -95,7 +103,9 @@ ROUTE=$(challenge_route "$CHALLENGE")
 # ─── env config ────────────────────────────────────────────────────────────
 # Source .env if present (without polluting the user's shell).
 if [[ -f .env ]]; then
-  set -a; . ./.env; set +a
+  set -a
+  . ./.env
+  set +a
 fi
 
 TEAM_ID="${TEAM_ID:-${TEAM_NAME:-}}"
@@ -127,10 +137,11 @@ REMOTE_REF="${REPO}/${IMAGE_NAME}:${TAG}"
 # ─── tool checks ───────────────────────────────────────────────────────────
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then
-    if (( DRY_RUN )); then
+    if ((DRY_RUN)); then
       echo "warning: '$1' not found on PATH (dry-run continues anyway)" >&2
     else
-      echo "error: '$1' not found on PATH" >&2; exit 127
+      echo "error: '$1' not found on PATH" >&2
+      exit 127
     fi
   fi
 }
@@ -141,17 +152,17 @@ need gcloud
 # Print to stderr so callers like `run cmd > file` capture only cmd's stdout.
 run() {
   printf '\033[1;34m>>\033[0m %s\n' "$*" >&2
-  if (( DRY_RUN )); then return 0; fi
+  if ((DRY_RUN)); then return 0; fi
   "$@"
 }
 
 # ─── build (if requested) ──────────────────────────────────────────────────
-if (( BUILD )); then
+if ((BUILD)); then
   run docker build --platform linux/amd64 -t "$LOCAL_REF" "$CHALLENGE"
 fi
 
 # ─── verify the local image exists ─────────────────────────────────────────
-if (( ! DRY_RUN && ! BUILD )); then
+if ((!DRY_RUN && !BUILD)); then
   if ! docker image inspect "$LOCAL_REF" >/dev/null 2>&1; then
     cat >&2 <<EOF
 error: local image '$LOCAL_REF' not found.
@@ -173,16 +184,16 @@ Submitting:
   port:        $PORT
   predict:     $ROUTE
   health:      /health
-  auth:        $AUTH_MODE${AUTH_MODE:+ ($( [[ $AUTH_MODE == impersonate ]] && echo "$SERVICE_ACCOUNT" || echo "GCLOUD_ACCESS_TOKEN"))}
+  auth:        $AUTH_MODE${AUTH_MODE:+ ($([[ $AUTH_MODE == impersonate ]] && echo "$SERVICE_ACCOUNT" || echo "GCLOUD_ACCESS_TOKEN"))}
   dry-run:     $((DRY_RUN ? 1 : 0))
 EOF
 echo
 
 # ─── docker login (if not skipped) ─────────────────────────────────────────
-if (( ! SKIP_LOGIN )); then
+if ((!SKIP_LOGIN)); then
   printf '\033[1;34m>>\033[0m %s\n' \
     "docker login -u oauth2accesstoken --password-stdin https://$REGISTRY" >&2
-  if (( ! DRY_RUN )); then
+  if ((!DRY_RUN)); then
     if [[ "$AUTH_MODE" == "impersonate" ]]; then
       gcloud auth print-access-token | docker login -u oauth2accesstoken --password-stdin "https://$REGISTRY"
     else
@@ -208,3 +219,4 @@ run gcloud ai models upload \
 
 echo
 echo "✓ Submitted $LOCAL_REF as $IMAGE_NAME on $REGION."
+

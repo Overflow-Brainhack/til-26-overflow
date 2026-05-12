@@ -38,21 +38,6 @@ of adding it.
   `value = unknown_neighbor_count / (travel_cost + 1)`, breaking ties
   toward cells that expose the most new information per tick spent.
 
-- **Proactive enemy base routing.** `_try_attack` only places a bomb when
-  an enemy base is already within blast radius. Known enemy base positions
-  are stored in `memory.base_positions`. When no immediate attack/defend
-  pressure exists and tiles are mostly collected, the agent should use
-  `_try_collect`-style Dijkstra to navigate *toward* a known enemy base
-  so `_try_attack` can fire once we arrive. Currently we drift there only
-  accidentally.
-
-- **Adaptive wall-break cost based on tile value behind the wall.** The
-  fixed `wall_break_cost=5.0` does not distinguish between a wall hiding
-  a mission tile (high value, worth breaking early) and one leading to an
-  empty dead-end. Peek at known or inferred tiles one step past the wall;
-  scale cost down (e.g. `5.0 / (1 + tile_value)`) so high-value targets
-  attract wall-breaking naturally without needing a separate planning pass.
-
 ## Low value / nice-to-have
 
 - **Learned policy slot.** `Policy` ABC exists; a `LearnedPolicy(Policy)`
@@ -91,6 +76,17 @@ of adding it.
   our base from outside our agent's viewcone).
 
 ## Resolved
+
+- ~~Proactive enemy base routing~~ — implemented as `proactive_base_routing=True`
+  (opt-in, default OFF) on `HeuristicPolicy`. When enabled, known enemy base
+  cells are included in the `_try_collect` scoring pass with a synthetic value of
+  `base_route_weight` (default 3.0, comparable to MISSION=5/RESOURCE=2/RECON=1).
+  The same `value / (distance + 1)` formula ranks tiles and bases together, so a
+  nearby high-value tile always beats a distant base while an uncontested close base
+  (or post-tile-exhaustion) wins naturally. Attack/defend still fire before collect,
+  so approaching a base never blocks an immediate bomb opportunity.
+  Toggles: `HeuristicPolicy(proactive_base_routing=True, base_route_weight=3.0)` /
+  `auto_play.py --proactive-base-routing --base-route-weight 3.0`.
 
 - ~~Anti-oscillation / loop detection~~ — implemented as `loop_detection=True`
   (default ON) on `HeuristicPolicy`. A `deque` of `(action, position)` pairs
@@ -185,3 +181,15 @@ of adding it.
   cache: `AEManager.__init__` re-merges the cache on every `/reset`, so
   walls/tiles destroyed or consumed in round N are restored to their
   initial state at the start of round N+1.
+
+- ~~Adaptive wall-break cost based on tile value behind the wall~~ — implemented as
+  `adaptive_wall_break_cost=True` (opt-in, default OFF) on `HeuristicPolicy`. When
+  enabled, `_edge_cost` replaces the flat `wall_break_cost` with
+  `wall_break_cost / (1 + tile_value(target_cell))` for destructible wall edges.
+  Effect at the defaults (`wall_break_cost=5.0`): mission tile (value 5) attracts
+  wall-breaking at ~0.83 cost, resource (2) at ~1.67, recon (1) at 2.5, empty/unknown
+  (0) keeps the full 5.0 penalty — so high-value targets draw the agent through walls
+  naturally without a separate planning pass. Orthogonal to `wall_break_tile_threshold`
+  (which gates the bomb action) — this feature only adjusts pathfinding cost.
+  Toggle: `HeuristicPolicy(adaptive_wall_break_cost=True)` /
+  `auto_play.py --adaptive-wall-break-cost`.

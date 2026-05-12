@@ -161,8 +161,13 @@ class MapMemory:
         if cell_view[ViewChannel.ENEMY_AGENT] > 0.5:
             self.enemy_agents[pos] = self.current_step
         # Track ALL bases (ally or enemy). `enemy_bases` filters at read time.
+        # When a previously-known base cell is visible with no base channel set,
+        # the base was destroyed — discard it so attack scoring and proactive
+        # routing don't target a ghost position. Mirrors the _stamp_walls pattern.
         if cell_view[ViewChannel.ALLY_BASE] > 0.5 or cell_view[ViewChannel.ENEMY_BASE] > 0.5:
             self.base_positions.add(pos)
+        else:
+            self.base_positions.discard(pos)
 
         ally_bomb = cell_view[ViewChannel.ALLY_BOMB] > 0.5
         enemy_bomb = cell_view[ViewChannel.ENEMY_BOMB] > 0.5

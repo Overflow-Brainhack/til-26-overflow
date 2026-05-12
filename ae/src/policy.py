@@ -7,7 +7,10 @@ decision tree:
     2. Imminent enemy-blast danger → dodge to nearest safe cell
     3. Attack opportunity (enemy in our bomb's blast OR predicted to be) → PLACE_BOMB
     4. Defend (enemy near our base) → intercept
-    5. Collect highest value-per-distance tile (optionally through walls)
+    5. Collect highest value-per-distance tile (optionally through walls);
+       when proactive_base_routing is on, enemy base cells compete in the same
+       scoring pass using base_route_weight as their synthetic tile value —
+       tiles and bases are ranked together so neither is blindly skipped
     6. Explore frontier
     7. STAY (final fallback)
 
@@ -16,6 +19,10 @@ Toggles (`HeuristicPolicy(**kwargs)` / CLI flags in auto_play.py):
     predictive_bomb_threshold    — minimum expected hits to bomb predictively (starting value for auto-tune)
     wall_breaking                — pathfinding may route through destructible walls
     wall_break_cost              — extra cost (≈ ticks lost) to traverse a destructible wall
+    adaptive_wall_break_cost     — when ON, scale wall_break_cost down by known tile value behind the
+                                   wall: effective_cost = wall_break_cost / (1 + tile_value(target)).
+                                   Mission tiles (value 5) attract wall-breaking at ~0.83× base cost;
+                                   empty cells behind walls keep the full wall_break_cost (default OFF)
     smart_defend                 — pre-position between enemy and base; expand defend radius when base health is low
     drift_aware_bomb             — use velocity-biased enemy position distribution (reduces overcounting)
     auto_tune_bomb               — online EMA that raises/lowers threshold based on observed hit rate
@@ -27,6 +34,25 @@ Toggles (`HeuristicPolicy(**kwargs)` / CLI flags in auto_play.py):
     wall_break_tile_threshold    — min tile value to justify a wall-break bomb (0.0 = always break)
     loop_detection               — detect and break 2- or 3-step (action, position) cycles (default ON)
     loop_window                  — number of past (action, pos) entries to retain for cycle detection
+    proactive_base_routing       — include known enemy bases in collect scoring so the agent routes
+                                   toward them when no better tile target exists (default OFF)
+    base_route_weight            — synthetic tile value assigned to an enemy base cell for scoring
+                                   purposes; comparable to REWARD_MISSION (5.0) / RESOURCE (2.0) /
+                                   RECON (1.0) — higher values pull the agent toward bases even when
+                                   collectibles are still available nearby (default 3.0)
+    adaptive_base_weight         — when ON (requires proactive_base_routing), automatically adjusts
+                                   the effective base-route weight based on observed enemy aggression.
+                                   Starts at base_weight_min each round and ramps up toward
+                                   base_route_weight at base_weight_ramp_rate per step.  When an
+                                   enemy enters DEFEND_RADIUS of our base, or our base health drops,
+                                   the weight resets to base_weight_min and a defensive cooldown
+                                   begins; the agent stays near home objectives until the cooldown
+                                   expires, then ramps again (default OFF)
+    base_weight_min              — effective weight floor after a detected attack (default 0.5)
+    base_weight_ramp_rate        — weight increase per step during the ramp phase (default 0.05;
+                                   reaches base_route_weight from base_weight_min in ~50 steps)
+    base_weight_attack_cooldown  — steps to hold the defensive posture (weight = base_weight_min)
+                                   after the last detected attack before ramping resumes (default 20)
 """
 
 from abc import ABC, abstractmethod
@@ -125,6 +151,7 @@ class HeuristicPolicy(Policy):
         predictive_bomb_threshold: float = 0.25,
         wall_breaking: bool = True,
         wall_break_cost: float = 5.0,
+        adaptive_wall_break_cost: bool = False,
         smart_defend: bool = True,
         drift_aware_bomb: bool = True,
         auto_tune_bomb: bool = False,
@@ -136,11 +163,18 @@ class HeuristicPolicy(Policy):
         wall_break_tile_threshold: float = 0.0,
         loop_detection: bool = True,
         loop_window: int = _LOOP_WINDOW_DEFAULT,
+        proactive_base_routing: bool = False,
+        base_route_weight: float = 3.0,
+        adaptive_base_weight: bool = False,
+        base_weight_min: float = 0.5,
+        base_weight_ramp_rate: float = 0.05,
+        base_weight_attack_cooldown: int = 20,
     ) -> None:
         self.predictive_bomb = predictive_bomb
         self.predictive_bomb_threshold = predictive_bomb_threshold
         self.wall_breaking = wall_breaking
         self.wall_break_cost = wall_break_cost
+        self.adaptive_wall_break_cost = adaptive_wall_break_cost
         self.smart_defend = smart_defend
         self.drift_aware_bomb = drift_aware_bomb
         self.auto_tune_bomb = auto_tune_bomb
@@ -152,6 +186,17 @@ class HeuristicPolicy(Policy):
         self.wall_break_tile_threshold = wall_break_tile_threshold
         self.loop_detection = loop_detection
         self.loop_window = loop_window
+        self.proactive_base_routing = proactive_base_routing
+        self.base_route_weight = base_route_weight
+        self.adaptive_base_weight = adaptive_base_weight
+        self.base_weight_min = base_weight_min
+        self.base_weight_ramp_rate = base_weight_ramp_rate
+        self.base_weight_attack_cooldown = base_weight_attack_cooldown
+
+        # Adaptive base-weight state — reset each round (step == 0).
+        self._adaptive_weight: float = base_weight_min
+        self._attack_cooldown: int = 0
+        self._prev_base_health: Optional[float] = None
 
         # Mutable auto-tune state — persists across rounds (policy is not re-created on /reset).
         self._tuned_threshold: float = predictive_bomb_threshold
@@ -164,12 +209,23 @@ class HeuristicPolicy(Policy):
         # a different position (e.g. two FORWARD moves in a corridor) is not a loop.
         self._action_history: deque[tuple[int, tuple[int, int]]] = deque(maxlen=loop_window)
 
+        # Analysis/debug state — written on every choose() call, read by auto_play.
+        self._debug_mode: str = "stay"
+        self._debug_target: Optional[tuple[int, int]] = None
+        self._debug_pos: tuple[int, int] = (0, 0)
+
     # ── main entrypoint ─────────────────────────────────────────────────────
     def choose(self, obs: ParsedObs, memory: MapMemory) -> int:
         self._resolve_pending_bombs(memory)
+        self._update_adaptive_weight(obs, memory)
+
+        self._debug_mode = "stay"
+        self._debug_target = None
+        self._debug_pos = obs.location
 
         # Frozen ticks are forced by the engine — nothing to decide.
         if obs.frozen_ticks > 0:
+            self._debug_mode = "frozen"
             return self._record_action(int(Action.STAY), obs.location)
 
         timeline = project_danger(memory)
@@ -184,22 +240,28 @@ class HeuristicPolicy(Policy):
         if my_blast_tick is not None and my_blast_tick <= BOMB_TIMER:
             chosen = self._dodge(obs, memory, timeline)
             if chosen is not None:
+                self._debug_mode = "dodge"
                 return self._record_action(self._mask_check(chosen, obs), obs.location)
 
         attack = self._try_attack(obs, memory)
         if attack is not None:
+            self._debug_mode = "attack"
+            self._debug_target = obs.location
             return self._finalize(self._mask_check(attack, obs), obs, memory)
 
         defend = self._try_defend(obs, memory, danger_now)
         if defend is not None:
+            self._debug_mode = "defend"
             return self._finalize(self._mask_check(defend, obs), obs, memory)
 
         collect = self._try_collect(obs, memory, danger_now)
         if collect is not None:
+            self._debug_mode = "collect"
             return self._finalize(self._mask_check(collect, obs), obs, memory)
 
         explore = self._try_explore(obs, memory, danger_now)
         if explore is not None:
+            self._debug_mode = "explore"
             return self._finalize(self._mask_check(explore, obs), obs, memory)
 
         return self._finalize(int(Action.STAY), obs, memory)
@@ -285,6 +347,7 @@ class HeuristicPolicy(Policy):
         if allow_walls is None:
             allow_walls = self.wall_breaking
         wall_cost = self.wall_break_cost
+        adaptive = self.adaptive_wall_break_cost
 
         def cost(a: tuple[int, int], b: tuple[int, int]) -> Optional[float]:
             if not memory.in_bounds(b):
@@ -294,6 +357,8 @@ class HeuristicPolicy(Policy):
                     return None
                 return 1.0
             if allow_walls and memory.edge_is_destructible_wall(a, b):
+                if adaptive:
+                    return wall_cost / (1.0 + memory.tile_value(b))
                 return wall_cost
             return None
 
@@ -454,6 +519,8 @@ class HeuristicPolicy(Policy):
         action = first_action_to(obs.location, obs.direction, targets, edge)
         if action is None:
             return None
+        ax, ay = obs.location
+        self._debug_target = min(targets, key=lambda c: abs(c[0] - ax) + abs(c[1] - ay))
         return self._maybe_wall_break(obs, memory, action)
 
     def _try_collect(
@@ -463,7 +530,21 @@ class HeuristicPolicy(Policy):
         danger_now: set[tuple[int, int]],
     ) -> Optional[int]:
         candidates = memory.collectible_cells()
-        if not candidates:
+
+        # Proactive base routing: include known enemy base cells as synthetic
+        # targets. They compete with real tiles using base_route_weight as their
+        # effective value, so a nearby high-value tile still beats a distant base
+        # while an uncontested base close by (or after tiles are exhausted) wins.
+        # Attack/defend fire before this method, so an enemy base we can already
+        # bomb is handled by _try_attack, not here.
+        base_candidates: list[tuple[int, int]] = []
+        if self.proactive_base_routing:
+            base_candidates = [
+                p for p in memory.enemy_bases
+                if p != obs.location
+            ]
+
+        if not candidates and not base_candidates:
             return None
 
         edge = self._edge_cost(memory, danger_avoid=danger_now)
@@ -483,9 +564,19 @@ class HeuristicPolicy(Policy):
             if score > best_score:
                 best_score = score
                 best_cell = cell
+
+        for cell in base_candidates:
+            if cell not in distances:
+                continue
+            score = self._effective_base_weight() / (distances[cell] + 1.0)
+            if score > best_score:
+                best_score = score
+                best_cell = cell
+
         if best_cell is None:
             return None
 
+        self._debug_target = best_cell
         action = first_action_to(obs.location, obs.direction, {best_cell}, edge)
         if action is None:
             return None
@@ -513,6 +604,8 @@ class HeuristicPolicy(Policy):
         action = first_action_to(obs.location, obs.direction, frontier, edge)
         if action is None:
             return None
+        ax, ay = obs.location
+        self._debug_target = min(frontier, key=lambda c: abs(c[0] - ax) + abs(c[1] - ay))
         return self._maybe_wall_break(obs, memory, action)
 
     # ── auto-tune helpers ────────────────────────────────────────────────────
@@ -559,6 +652,75 @@ class HeuristicPolicy(Policy):
     def tuned_threshold(self) -> float:
         """Current effective threshold (auto-tuned or static)."""
         return self._effective_threshold()
+
+    # ── adaptive base-weight helpers ─────────────────────────────────────────
+
+    def _effective_base_weight(self) -> float:
+        return self._adaptive_weight if self.adaptive_base_weight else self.base_route_weight
+
+    def _update_adaptive_weight(self, obs: ParsedObs, memory: MapMemory) -> None:
+        """Adjust _adaptive_weight based on observed enemy aggression.
+
+        Called once per step before any action selection.  Two threat signals:
+          1. An enemy agent is within DEFEND_RADIUS of our base (proactive).
+          2. Base health dropped since the previous step (reactive — enemy made
+             contact before we could see them).
+
+        On threat: weight resets to base_weight_min and a defensive cooldown
+        starts.  Cooldown ticks down while no new threat is detected; once it
+        expires the weight ramps back up toward base_route_weight at
+        base_weight_ramp_rate per step.
+
+        State is reset at the start of each round (obs.step == 0) so every
+        round begins with low base priority and ramps up from scratch.
+        """
+        if not self.adaptive_base_weight:
+            return
+
+        # Fresh round — reset state so every round starts with low base priority.
+        if obs.step == 0:
+            self._adaptive_weight = self.base_weight_min
+            self._attack_cooldown = 0
+            self._prev_base_health = None
+
+        # Base destroyed — nothing left to defend; snap to full aggression and
+        # stay there. _try_defend already returns None when base_health <= 0, so
+        # the cooldown would only waste time on a dead base.
+        if obs.base_health <= 0:
+            self._adaptive_weight = self.base_route_weight
+            self._attack_cooldown = 0
+            self._prev_base_health = obs.base_health
+            return
+
+        # Signal 1: base health dropped (enemy hit our base).
+        health_drop = (
+            self._prev_base_health is not None
+            and obs.base_health < self._prev_base_health
+        )
+        self._prev_base_health = obs.base_health
+
+        # Signal 2: enemy visible within defend radius of our base.
+        enemy_near_base = False
+        if memory.ally_base is not None and memory.enemy_agents and obs.base_health > 0:
+            bx, by = memory.ally_base
+            enemy_near_base = any(
+                abs(p[0] - bx) + abs(p[1] - by) <= DEFEND_RADIUS
+                for p in memory.enemy_agents
+            )
+
+        if health_drop or enemy_near_base:
+            # Attack detected — reset weight and restart defensive cooldown.
+            self._adaptive_weight = self.base_weight_min
+            self._attack_cooldown = self.base_weight_attack_cooldown
+        elif self._attack_cooldown > 0:
+            # Still in defensive posture; tick down but keep weight low.
+            self._attack_cooldown -= 1
+        else:
+            # Peaceful — ramp weight up toward the base_route_weight ceiling.
+            self._adaptive_weight = min(
+                self.base_route_weight,
+                self._adaptive_weight + self.base_weight_ramp_rate,
+            )
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
