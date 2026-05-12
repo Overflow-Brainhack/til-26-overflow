@@ -209,13 +209,23 @@ class HeuristicPolicy(Policy):
         # a different position (e.g. two FORWARD moves in a corridor) is not a loop.
         self._action_history: deque[tuple[int, tuple[int, int]]] = deque(maxlen=loop_window)
 
+        # Analysis/debug state — written on every choose() call, read by auto_play.
+        self._debug_mode: str = "stay"
+        self._debug_target: Optional[tuple[int, int]] = None
+        self._debug_pos: tuple[int, int] = (0, 0)
+
     # ── main entrypoint ─────────────────────────────────────────────────────
     def choose(self, obs: ParsedObs, memory: MapMemory) -> int:
         self._resolve_pending_bombs(memory)
         self._update_adaptive_weight(obs, memory)
 
+        self._debug_mode = "stay"
+        self._debug_target = None
+        self._debug_pos = obs.location
+
         # Frozen ticks are forced by the engine — nothing to decide.
         if obs.frozen_ticks > 0:
+            self._debug_mode = "frozen"
             return self._record_action(int(Action.STAY), obs.location)
 
         timeline = project_danger(memory)
@@ -230,22 +240,28 @@ class HeuristicPolicy(Policy):
         if my_blast_tick is not None and my_blast_tick <= BOMB_TIMER:
             chosen = self._dodge(obs, memory, timeline)
             if chosen is not None:
+                self._debug_mode = "dodge"
                 return self._record_action(self._mask_check(chosen, obs), obs.location)
 
         attack = self._try_attack(obs, memory)
         if attack is not None:
+            self._debug_mode = "attack"
+            self._debug_target = obs.location
             return self._finalize(self._mask_check(attack, obs), obs, memory)
 
         defend = self._try_defend(obs, memory, danger_now)
         if defend is not None:
+            self._debug_mode = "defend"
             return self._finalize(self._mask_check(defend, obs), obs, memory)
 
         collect = self._try_collect(obs, memory, danger_now)
         if collect is not None:
+            self._debug_mode = "collect"
             return self._finalize(self._mask_check(collect, obs), obs, memory)
 
         explore = self._try_explore(obs, memory, danger_now)
         if explore is not None:
+            self._debug_mode = "explore"
             return self._finalize(self._mask_check(explore, obs), obs, memory)
 
         return self._finalize(int(Action.STAY), obs, memory)
@@ -503,6 +519,8 @@ class HeuristicPolicy(Policy):
         action = first_action_to(obs.location, obs.direction, targets, edge)
         if action is None:
             return None
+        ax, ay = obs.location
+        self._debug_target = min(targets, key=lambda c: abs(c[0] - ax) + abs(c[1] - ay))
         return self._maybe_wall_break(obs, memory, action)
 
     def _try_collect(
@@ -558,6 +576,7 @@ class HeuristicPolicy(Policy):
         if best_cell is None:
             return None
 
+        self._debug_target = best_cell
         action = first_action_to(obs.location, obs.direction, {best_cell}, edge)
         if action is None:
             return None
@@ -585,6 +604,8 @@ class HeuristicPolicy(Policy):
         action = first_action_to(obs.location, obs.direction, frontier, edge)
         if action is None:
             return None
+        ax, ay = obs.location
+        self._debug_target = min(frontier, key=lambda c: abs(c[0] - ax) + abs(c[1] - ay))
         return self._maybe_wall_break(obs, memory, action)
 
     # ── auto-tune helpers ────────────────────────────────────────────────────
