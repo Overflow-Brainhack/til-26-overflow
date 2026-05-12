@@ -38,14 +38,6 @@ of adding it.
   `value = unknown_neighbor_count / (travel_cost + 1)`, breaking ties
   toward cells that expose the most new information per tick spent.
 
-- **Proactive enemy base routing.** `_try_attack` only places a bomb when
-  an enemy base is already within blast radius. Known enemy base positions
-  are stored in `memory.base_positions`. When no immediate attack/defend
-  pressure exists and tiles are mostly collected, the agent should use
-  `_try_collect`-style Dijkstra to navigate *toward* a known enemy base
-  so `_try_attack` can fire once we arrive. Currently we drift there only
-  accidentally.
-
 - **Adaptive wall-break cost based on tile value behind the wall.** The
   fixed `wall_break_cost=5.0` does not distinguish between a wall hiding
   a mission tile (high value, worth breaking early) and one leading to an
@@ -91,6 +83,17 @@ of adding it.
   our base from outside our agent's viewcone).
 
 ## Resolved
+
+- ~~Proactive enemy base routing~~ — implemented as `proactive_base_routing=True`
+  (opt-in, default OFF) on `HeuristicPolicy`. When enabled, known enemy base
+  cells are included in the `_try_collect` scoring pass with a synthetic value of
+  `base_route_weight` (default 3.0, comparable to MISSION=5/RESOURCE=2/RECON=1).
+  The same `value / (distance + 1)` formula ranks tiles and bases together, so a
+  nearby high-value tile always beats a distant base while an uncontested close base
+  (or post-tile-exhaustion) wins naturally. Attack/defend still fire before collect,
+  so approaching a base never blocks an immediate bomb opportunity.
+  Toggles: `HeuristicPolicy(proactive_base_routing=True, base_route_weight=3.0)` /
+  `auto_play.py --proactive-base-routing --base-route-weight 3.0`.
 
 - ~~Anti-oscillation / loop detection~~ — implemented as `loop_detection=True`
   (default ON) on `HeuristicPolicy`. A `deque` of `(action, position)` pairs

@@ -56,7 +56,7 @@ class AEManager:
             smart_defend=True,
 
             drift_aware_bomb=True,
-            auto_tune_bomb=True,
+            auto_tune_bomb=False,
 
             bomb_economy=True,
             base_bomb_value=5.0,
@@ -65,6 +65,13 @@ class AEManager:
             wall_break_tile_threshold=0.0,
 
             loop_detection=True,
+            
+            proactive_base_routing=True,
+            base_route_weight=1.0,
+            adaptive_base_weight=True,
+            base_weight_min=0.5,
+            base_weight_ramp_rate=0.05,
+            base_weight_attack_cooldown=20,
         )
 
     def _maybe_load_cache(self, path: Path) -> None:

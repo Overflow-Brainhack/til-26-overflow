@@ -168,6 +168,33 @@ def main() -> None:
                         help="Number of past (action, pos) entries retained for cycle "
                              "detection; must be >= 5 to catch period-3 loops (default 6)")
 
+    parser.add_argument("--proactive-base-routing", dest="proactive_base_routing",
+                        action="store_true", default=False,
+                        help="Include known enemy base cells in collect scoring so the agent "
+                             "navigates toward them when no better tile target exists (default OFF)")
+    parser.add_argument("--no-proactive-base-routing", dest="proactive_base_routing",
+                        action="store_false")
+    parser.add_argument("--base-route-weight", type=float, default=3.0,
+                        help="Synthetic tile value assigned to an enemy base cell for routing "
+                             "score; comparable to MISSION=5, RESOURCE=2, RECON=1 "
+                             "(default 3.0)")
+
+    parser.add_argument("--adaptive-base-weight", dest="adaptive_base_weight",
+                        action="store_true", default=False,
+                        help="Auto-adjust the base-route weight based on enemy aggression. "
+                             "Starts at base-weight-min each round, ramps toward base-route-weight "
+                             "while no threats are detected; resets on attack (default OFF, "
+                             "requires --proactive-base-routing)")
+    parser.add_argument("--no-adaptive-base-weight", dest="adaptive_base_weight",
+                        action="store_false")
+    parser.add_argument("--base-weight-min", type=float, default=0.5,
+                        help="Floor weight after a detected attack (default 0.5)")
+    parser.add_argument("--base-weight-ramp-rate", type=float, default=0.05,
+                        help="Weight increase per step during the ramp phase (default 0.05)")
+    parser.add_argument("--base-weight-attack-cooldown", type=int, default=20,
+                        help="Steps to hold defensive posture after last attack before "
+                             "ramping resumes (default 20)")
+
     parser.add_argument("--cache", dest="cache_path", type=Path,
                         default=DEFAULT_CACHE_PATH,
                         help="Pre-load this novice-map cache (default: ae/src/novice_map.json)")
@@ -203,6 +230,12 @@ def main() -> None:
             wall_break_tile_threshold=args.wall_break_tile_threshold,
             loop_detection=args.loop_detection,
             loop_window=args.loop_window,
+            proactive_base_routing=args.proactive_base_routing,
+            base_route_weight=args.base_route_weight,
+            adaptive_base_weight=args.adaptive_base_weight,
+            base_weight_min=args.base_weight_min,
+            base_weight_ramp_rate=args.base_weight_ramp_rate,
+            base_weight_attack_cooldown=args.base_weight_attack_cooldown,
         )
 
     managers = _build_managers(env, make_policy, args.cache_path)
@@ -218,6 +251,10 @@ def main() -> None:
     features.append(f"drift_aware={'on' if args.drift_aware_bomb else 'off'}")
     features.append(f"auto_tune={'on (target={args.bomb_tune_target})' if args.auto_tune_bomb else 'off'}")
     features.append(f"loop_detection={'on (window=' + str(args.loop_window) + ')' if args.loop_detection else 'off'}")
+    features.append(f"proactive_base_routing={'on (weight=' + str(args.base_route_weight) + ')' if args.proactive_base_routing else 'off'}")
+    if args.adaptive_base_weight:
+        features.append(f"adaptive_base_weight=on (min={args.base_weight_min}, "
+                        f"ramp={args.base_weight_ramp_rate}, cooldown={args.base_weight_attack_cooldown})")
     features.append(f"map_cache={'on (' + args.cache_path.name + ')' if cache_used else 'off'}")
     print(f"Auto-play: {len(env.possible_agents)} HeuristicPolicy bots, seed={seed}, "
           f"novice={args.novice}, rounds={args.rounds}")
