@@ -24,38 +24,89 @@ from tqdm import tqdm
 
 load_dotenv()
 
-# Diverse bboxes: (min_lon, min_lat, max_lon, max_lat)
-# ~25 images each → ~500 total
-BBOXES = [
-    (103.6, 1.2, 104.1, 1.5),  # Singapore
-    (100.4, 13.6, 100.9, 14.0),  # Bangkok outskirts
-    (106.6, 10.7, 107.0, 11.0),  # Ho Chi Minh City
-    (103.8, 3.1, 104.3, 3.5),  # Malaysia
-    (114.1, 22.2, 114.4, 22.5),  # Hong Kong
-    (120.9, 14.5, 121.2, 14.8),  # Manila
-    (106.8, -6.3, 107.1, -6.1),  # Jakarta
-    (2.2, 48.8, 2.5, 49.0),  # Paris suburbs
-    (13.3, 52.4, 13.6, 52.6),  # Berlin
-    (-0.2, 51.4, 0.1, 51.6),  # London
-    (4.8, 52.3, 5.0, 52.5),  # Amsterdam
-    (18.0, 59.3, 18.3, 59.5),  # Stockholm
-    (24.9, 60.1, 25.2, 60.3),  # Helsinki
-    (-73.9, 40.6, -73.7, 40.8),  # New York outer borough
-    (-87.7, 41.8, -87.5, 42.0),  # Chicago
-    (-122.5, 37.7, -122.3, 37.9),  # San Francisco
-    (-79.5, 43.6, -79.3, 43.8),  # Toronto
-    (-1.6, 52.0, -1.4, 52.2),  # English countryside
-    (7.4, 47.5, 7.6, 47.7),  # Swiss/German forest
-    (-64.0, 45.0, -63.8, 45.2),  # Nova Scotia coast
-    (25.0, 65.0, 25.3, 65.2),  # Finnish forest
-    (55.2, 25.1, 55.5, 25.3),  # Dubai
-    (46.6, 24.6, 46.9, 24.8),  # Riyadh
-    (139.6, 35.6, 139.9, 35.8),  # Tokyo suburbs
-    (126.9, 37.5, 127.2, 37.7),  # Seoul
-    (121.4, 31.1, 121.7, 31.3),  # Shanghai suburbs
+# Region centres (lon, lat, label).
+# Each is expanded into 5 non-overlapping 0.01°×0.01° boxes (API maximum).
+_CENTERS = [
+    # Southeast Asia
+    (103.85,  1.35,  "Singapore"),
+    (100.65,  13.80, "Bangkok"),
+    (106.80,  10.85, "Ho Chi Minh City"),
+    (104.05,  3.30,  "Kuala Lumpur"),
+    (114.25,  22.35, "Hong Kong"),
+    (121.05,  14.65, "Manila"),
+    (106.95,  -6.20, "Jakarta"),
+    # Europe
+    (2.35,    48.90, "Paris"),
+    (13.45,   52.50, "Berlin"),
+    (-0.05,   51.50, "London"),
+    (4.90,    52.40, "Amsterdam"),
+    (18.15,   59.40, "Stockholm"),
+    (25.05,   60.20, "Helsinki"),
+    (-1.50,   52.10, "English countryside"),
+    (7.50,    47.60, "Swiss/German forest"),
+    (16.35,   48.20, "Vienna"),
+    (2.15,    41.40, "Barcelona"),
+    (12.50,   41.90, "Rome"),
+    # North America
+    (-73.80,  40.70, "New York"),
+    (-87.60,  41.90, "Chicago"),
+    (-122.40, 37.80, "San Francisco"),
+    (-79.40,  43.70, "Toronto"),
+    (-63.90,  45.10, "Nova Scotia"),
+    (-118.25, 34.05, "Los Angeles"),
+    (-80.20,  25.80, "Miami"),
+    (-122.35, 47.65, "Seattle"),
+    # Nordic / Northern Europe
+    (25.15,   65.10, "Finnish forest"),
+    (10.75,   59.90, "Oslo"),
+    # Middle East
+    (55.35,   25.20, "Dubai"),
+    (46.75,   24.70, "Riyadh"),
+    (35.20,   31.80, "Jerusalem"),
+    # East Asia
+    (139.75,  35.70, "Tokyo"),
+    (127.05,  37.60, "Seoul"),
+    (121.55,  31.20, "Shanghai"),
+    (104.05,  30.65, "Chengdu"),
+    # South Asia
+    (72.85,   19.10, "Mumbai"),
+    (77.20,   28.60, "Delhi"),
+    (88.35,   22.55, "Kolkata"),
+    (80.25,   13.10, "Chennai"),
+    # Africa
+    (28.05,   -26.20, "Johannesburg"),
+    (36.85,   -1.30,  "Nairobi"),
+    (31.25,   30.05,  "Cairo"),
+    (3.40,    6.45,   "Lagos"),
+    (32.55,   0.30,   "Kampala"),
+    # South America
+    (-43.20,  -22.90, "Rio de Janeiro"),
+    (-46.65,  -23.55, "São Paulo"),
+    (-58.40,  -34.60, "Buenos Aires"),
+    (-74.10,  4.70,   "Bogotá"),
+    # Oceania
+    (151.20,  -33.85, "Sydney"),
+    (144.95,  -37.80, "Melbourne"),
+    (172.65,  -43.55, "Christchurch"),
 ]
 
-PER_BBOX = 20  # ~500 total (26 bboxes × 20 = 520)
+
+def _zones(lon: float, lat: float) -> list[tuple[float, float, float, float]]:
+    """Five non-overlapping 0.01°×0.01° boxes centred on (lon, lat)."""
+    h, s = 0.005, 0.015
+    return [
+        (lon - h, lat - h, lon + h, lat + h),           # centre
+        (lon - h, lat + s - h, lon + h, lat + s + h),   # north
+        (lon - h, lat - s - h, lon + h, lat - s + h),   # south
+        (lon + s - h, lat - h, lon + s + h, lat + h),   # east
+        (lon - s - h, lat - h, lon - s + h, lat + h),   # west
+    ]
+
+
+# 51 regions × 5 zones = 255 bboxes
+BBOXES = [box for lon, lat, *_ in _CENTERS for box in _zones(lon, lat)]
+
+PER_BBOX = 20  # target driven by scrape_backgrounds(); this is the per-call cap
 
 
 def fetch_images(bbox: tuple[float, ...], token: str, limit: int) -> list[dict]:
