@@ -1,4 +1,4 @@
-from cv_dev.consts import DATA_PATH, TRAIN_OUTPUT
+from cv_dev.consts import DATA_PATH, TRAIN_OUTPUT, IMAGE_PATH, JSON_PATH, NUM_CATEGORIES
 
 from ultralytics import YOLO
 from ultralytics.models.rtdetr.train import RTDETRTrainer
@@ -59,6 +59,106 @@ def train_rtdetr(n_epochs: int):
     )
     trainer: RTDETRTrainer = RTDETRTrainer(overrides=args)
     trainer.train()
+
+
+def train_detr_hf(n_epochs: int):
+    from transformers import (
+        DetrForObjectDetection,
+        Trainer,
+        TrainingArguments,
+    )
+    from torch.utils.data import Dataset
+    from torchvision.transforms.functional import normalize
+    from cv_dev.make_dataset import load_dataset, ImageDataset
+    from cv_dev.consts import DATASETS_PATH
+
+    # ImageNet normalization — applied on top of the 0-1 float tensors from ImageDataset
+    IMAGENET_MEAN = [0.485, 0.456, 0.406]
+    IMAGENET_STD = [0.229, 0.224, 0.225]
+
+    class DETRDataset(Dataset):
+        def __init__(self, base: ImageDataset) -> None:
+            self.base = base
+
+        def __len__(self) -> int:
+            return len(self.base)
+
+        def __getitem__(self, idx: int) -> dict:
+            image, target = self.base[idx]
+            _, H, W = image.shape
+
+            pixel_values = normalize(image, IMAGENET_MEAN, IMAGENET_STD)
+            pixel_mask = torch.ones(H, W, dtype=torch.long)
+
+            # xyxy absolute → cxcywh normalized
+            boxes = target["boxes"]
+            if len(boxes) > 0:
+                cx = (boxes[:, 0] + boxes[:, 2]) / 2 / W
+                cy = (boxes[:, 1] + boxes[:, 3]) / 2 / H
+                bw = (boxes[:, 2] - boxes[:, 0]) / W
+                bh = (boxes[:, 3] - boxes[:, 1]) / H
+                boxes_norm = torch.stack([cx, cy, bw, bh], dim=1)
+            else:
+                boxes_norm = torch.zeros((0, 4), dtype=torch.float32)
+
+            return {
+                "pixel_values": pixel_values,
+                "pixel_mask": pixel_mask,
+                "labels": {
+                    # ImageDataset adds +1 to category_id; undo it for DETR
+                    "class_labels": target["labels"] - 1,
+                    "boxes": boxes_norm,
+                    "image_id": target["image_id"],
+                    "area": target["area"],
+                    "iscrowd": target["iscrowd"],
+                    "orig_size": torch.tensor([H, W]),
+                    "size": torch.tensor([H, W]),
+                },
+            }
+
+    def collate_fn(batch: list[dict]) -> dict:
+        return {
+            "pixel_values": torch.stack([x["pixel_values"] for x in batch]),
+            "pixel_mask": torch.stack([x["pixel_mask"] for x in batch]),
+            "labels": [x["labels"] for x in batch],
+        }
+
+    train_base = load_dataset(DATASETS_PATH / "train.pt")
+    val_base = load_dataset(DATASETS_PATH / "val.pt")
+
+    model = DetrForObjectDetection.from_pretrained(
+        "facebook/detr-resnet-101",
+        num_labels=NUM_CATEGORIES,
+        ignore_mismatched_sizes=True,
+    )
+
+    output_dir = str(TRAIN_OUTPUT / "detr-resnet101-finetuned")
+
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        num_train_epochs=n_epochs,
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=2,
+        learning_rate=1e-4,
+        weight_decay=1e-4,
+        save_strategy="epoch",
+        save_total_limit=3,
+        dataloader_num_workers=0,
+        fp16=True,
+        logging_steps=50,
+        remove_unused_columns=False,
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=DETRDataset(train_base),
+        eval_dataset=DETRDataset(val_base),
+        data_collator=collate_fn,
+    )
+
+    trainer.train()
+    trainer.save_model(output_dir)
 
 
 if __name__ == "__main__":
