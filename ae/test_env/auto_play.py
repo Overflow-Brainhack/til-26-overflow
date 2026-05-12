@@ -32,7 +32,7 @@ if str(SRC) not in sys.path:
 from til_environment.bomberman_env import Bomberman  # noqa: E402
 from til_environment.config import default_config, load_config  # noqa: E402
 
-from ae_manager import DEFAULT_CACHE_PATH, AEManager  # noqa: E402
+from ae_manager import DEFAULT_CACHE_PATH, DEFAULT_POLICY_KWARGS, AEManager  # noqa: E402
 from map_memory import MapMemory  # noqa: E402
 from policy import HeuristicPolicy  # noqa: E402
 
@@ -80,6 +80,9 @@ def _print_round_summary(env: Bomberman, round_idx: int) -> None:
         print(f"  {a}  reward={r:.2f}")
 
 
+_P = DEFAULT_POLICY_KWARGS  # short alias for argparse default= expressions below
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=str, default=None,
@@ -95,105 +98,96 @@ def main() -> None:
     parser.add_argument("--advanced", dest="novice", action="store_false",
                         help="Use a randomized advanced map")
 
-    # Feature toggles — flip these to A/B test the heuristic policy.
+    # Feature toggles — defaults come from DEFAULT_POLICY_KWARGS in ae_manager.py
+    # so this script always mirrors the production container configuration.
     parser.add_argument("--predictive-bomb", dest="predictive_bomb",
-                        action="store_true", default=True,
-                        help="Bomb when an enemy is *likely* to be in blast at "
-                             "detonation, not just currently in blast (default ON)")
+                        action="store_true", default=_P["predictive_bomb"],
+                        help="Bomb when an enemy is *likely* to be in blast at detonation")
     parser.add_argument("--no-predictive-bomb", dest="predictive_bomb",
-                        action="store_false",
-                        help="Disable predictive bombing (only fire on current overlap)")
-    parser.add_argument("--bomb-threshold", type=float, default=0.25,
+                        action="store_false")
+    parser.add_argument("--bomb-threshold", type=float,
+                        default=_P["predictive_bomb_threshold"],
                         help="Min expected enemy hits required for a predictive bomb")
 
     parser.add_argument("--wall-breaking", dest="wall_breaking",
-                        action="store_true", default=True,
-                        help="Allow pathfinding to route through destructible "
-                             "walls (paying a bomb-fuse cost) (default ON)")
+                        action="store_true", default=_P["wall_breaking"],
+                        help="Allow pathfinding to route through destructible walls")
     parser.add_argument("--no-wall-breaking", dest="wall_breaking",
-                        action="store_false",
-                        help="Treat all destructible walls as impassable")
-    parser.add_argument("--wall-break-cost", type=float, default=5.0,
+                        action="store_false")
+    parser.add_argument("--wall-break-cost", type=float, default=_P["wall_break_cost"],
                         help="Extra path cost (≈ ticks lost) to break a wall")
 
     parser.add_argument("--smart-defend", dest="smart_defend",
-                        action="store_true", default=True,
+                        action="store_true", default=_P["smart_defend"],
                         help="Pre-position between enemy and base when defending; "
-                             "expand defend radius when base health is low (default ON)")
+                             "expand defend radius when base health is low")
     parser.add_argument("--no-smart-defend", dest="smart_defend",
-                        action="store_false",
-                        help="Revert to naive defend: walk directly toward threat")
+                        action="store_false")
 
     parser.add_argument("--drift-aware-bomb", dest="drift_aware_bomb",
-                        action="store_true", default=True,
-                        help="Use velocity-biased enemy distribution for predictive "
-                             "bombing — reduces overcounting (default ON)")
+                        action="store_true", default=_P["drift_aware_bomb"],
+                        help="Use velocity-biased enemy distribution for predictive bombing")
     parser.add_argument("--no-drift-aware-bomb", dest="drift_aware_bomb",
-                        action="store_false",
-                        help="Revert to uniform random-walk enemy distribution")
+                        action="store_false")
 
     parser.add_argument("--auto-tune-bomb", dest="auto_tune_bomb",
-                        action="store_true", default=False,
-                        help="Adaptively tune the bomb threshold via EMA of observed "
-                             "hit rate (experimental, default OFF)")
+                        action="store_true", default=_P["auto_tune_bomb"],
+                        help="Adaptively tune the bomb threshold via EMA of observed hit rate")
     parser.add_argument("--no-auto-tune-bomb", dest="auto_tune_bomb",
                         action="store_false")
-    parser.add_argument("--bomb-tune-target", type=float, default=0.40,
-                        help="Target predictive-bomb hit rate for auto-tuning (default 0.40)")
+    parser.add_argument("--bomb-tune-target", type=float, default=_P["bomb_tune_target"],
+                        help="Target predictive-bomb hit rate for auto-tuning")
 
     parser.add_argument("--bomb-economy", dest="bomb_economy",
-                        action="store_true", default=False,
-                        help="Enable unified value scoring for bomb placement — only "
-                             "bomb when score >= bomb_reserve_threshold (default OFF)")
+                        action="store_true", default=_P["bomb_economy"],
+                        help="Unified value scoring: only bomb when score >= bomb_reserve_threshold")
     parser.add_argument("--no-bomb-economy", dest="bomb_economy",
                         action="store_false")
-    parser.add_argument("--base-bomb-value", type=float, default=5.0,
-                        help="Value of hitting an enemy base in agent-hit units (default 5.0)")
-    parser.add_argument("--agent-bomb-value", type=float, default=1.0,
-                        help="Value of a single definite agent hit (default 1.0)")
-    parser.add_argument("--bomb-reserve-threshold", type=float, default=1.0,
-                        help="Minimum score required to place a bomb under economy mode (default 1.0)")
-    parser.add_argument("--wall-break-tile-threshold", type=float, default=0.0,
+    parser.add_argument("--base-bomb-value", type=float, default=_P["base_bomb_value"],
+                        help="Value of hitting an enemy base in agent-hit units")
+    parser.add_argument("--agent-bomb-value", type=float, default=_P["agent_bomb_value"],
+                        help="Value of a single definite agent hit")
+    parser.add_argument("--bomb-reserve-threshold", type=float,
+                        default=_P["bomb_reserve_threshold"],
+                        help="Minimum score required to place a bomb under economy mode")
+    parser.add_argument("--wall-break-tile-threshold", type=float,
+                        default=_P["wall_break_tile_threshold"],
                         help="Min tile value behind wall to justify a wall-break bomb; "
-                             "0.0 = always break (default 0.0)")
+                             "0.0 = always break")
 
     parser.add_argument("--loop-detection", dest="loop_detection",
-                        action="store_true", default=True,
-                        help="Detect and break 2- or 3-step (action, position) cycles to "
-                             "prevent the agent spinning in place (default ON)")
+                        action="store_true", default=_P["loop_detection"],
+                        help="Detect and break 2- or 3-step (action, position) cycles")
     parser.add_argument("--no-loop-detection", dest="loop_detection",
-                        action="store_false",
-                        help="Disable loop detection (useful for diagnosing oscillation bugs)")
-    parser.add_argument("--loop-window", type=int, default=6,
-                        help="Number of past (action, pos) entries retained for cycle "
-                             "detection; must be >= 5 to catch period-3 loops (default 6)")
+                        action="store_false")
+    parser.add_argument("--loop-window", type=int, default=_P["loop_window"],
+                        help="Past (action, pos) entries retained for cycle detection; "
+                             "must be >= 5 to catch period-3 loops")
 
     parser.add_argument("--proactive-base-routing", dest="proactive_base_routing",
-                        action="store_true", default=False,
-                        help="Include known enemy base cells in collect scoring so the agent "
-                             "navigates toward them when no better tile target exists (default OFF)")
+                        action="store_true", default=_P["proactive_base_routing"],
+                        help="Include known enemy base cells in collect scoring")
     parser.add_argument("--no-proactive-base-routing", dest="proactive_base_routing",
                         action="store_false")
-    parser.add_argument("--base-route-weight", type=float, default=3.0,
-                        help="Synthetic tile value assigned to an enemy base cell for routing "
-                             "score; comparable to MISSION=5, RESOURCE=2, RECON=1 "
-                             "(default 3.0)")
+    parser.add_argument("--base-route-weight", type=float, default=_P["base_route_weight"],
+                        help="Synthetic tile value for enemy base routing "
+                             "(comparable to MISSION=5, RESOURCE=2, RECON=1)")
 
     parser.add_argument("--adaptive-base-weight", dest="adaptive_base_weight",
-                        action="store_true", default=False,
-                        help="Auto-adjust the base-route weight based on enemy aggression. "
-                             "Starts at base-weight-min each round, ramps toward base-route-weight "
-                             "while no threats are detected; resets on attack (default OFF, "
-                             "requires --proactive-base-routing)")
+                        action="store_true", default=_P["adaptive_base_weight"],
+                        help="Auto-adjust base-route weight based on enemy aggression "
+                             "(requires --proactive-base-routing)")
     parser.add_argument("--no-adaptive-base-weight", dest="adaptive_base_weight",
                         action="store_false")
-    parser.add_argument("--base-weight-min", type=float, default=0.5,
-                        help="Floor weight after a detected attack (default 0.5)")
-    parser.add_argument("--base-weight-ramp-rate", type=float, default=0.05,
-                        help="Weight increase per step during the ramp phase (default 0.05)")
-    parser.add_argument("--base-weight-attack-cooldown", type=int, default=20,
-                        help="Steps to hold defensive posture after last attack before "
-                             "ramping resumes (default 20)")
+    parser.add_argument("--base-weight-min", type=float, default=_P["base_weight_min"],
+                        help="Floor weight after a detected attack")
+    parser.add_argument("--base-weight-ramp-rate", type=float,
+                        default=_P["base_weight_ramp_rate"],
+                        help="Weight increase per step during the ramp phase")
+    parser.add_argument("--base-weight-attack-cooldown", type=int,
+                        default=_P["base_weight_attack_cooldown"],
+                        help="Steps to hold defensive posture after last attack "
+                             "before ramping resumes")
 
     parser.add_argument("--cache", dest="cache_path", type=Path,
                         default=DEFAULT_CACHE_PATH,
