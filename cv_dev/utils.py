@@ -35,10 +35,10 @@ def clean_object_bank(
     max_coverage: float = 0.97,
 ) -> None:
     """
-    Review rembg crops that look bad (too sparse or background not removed).
+    Review SAM2 crops that look bad (too sparse or background not removed).
 
-    min_coverage: flag if foreground alpha fraction is below this (rembg wiped the object)
-    max_coverage: flag if foreground alpha fraction is above this (background wasn't removed)
+    min_coverage: flag if foreground alpha fraction is below this (object fully masked out)
+    max_coverage: flag if foreground alpha fraction is above this (background not removed)
 
     Interactive prompts per flagged image:
         y  — delete this crop
