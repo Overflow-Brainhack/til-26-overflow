@@ -1,6 +1,6 @@
 """Manages the CV model."""
 
-from ultralytics import RTDETR
+from ultralytics import RTDETR, YOLO
 from typing import Any
 from io import BytesIO
 from PIL import Image
@@ -9,8 +9,9 @@ from PIL import Image
 class CVManager:
     def __init__(self):
         # self.model = RTDETR("models/rtdetr-l-30.pt")
-        self.model = RTDETR("models/rtdetr-x-43.pt")
+        # self.model = RTDETR("models/rtdetr-x-43.pt")
         # self.model = YOLO("models/yolov11-50.pt")
+        self.model = YOLO("models/yolov26l-35.pt")
 
     def run_ultralytics(self, image: bytes) -> list[dict[str, Any]]:
         im = Image.open(BytesIO(image))
