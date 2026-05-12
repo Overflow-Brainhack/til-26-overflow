@@ -11,48 +11,45 @@ Requires a free Mapillary access token:
 Images are saved to cv_dev/backgrounds/ as JPEG.
 """
 
+from cv_dev.consts import BACKGROUNDS_PATH
+
 import argparse
 import os
 import time
 from pathlib import Path
 
 import requests
+from dotenv import load_dotenv
 from tqdm import tqdm
 
-BACKGROUNDS_PATH = Path("cv_dev/backgrounds")
+load_dotenv()
 
 # Diverse bboxes: (min_lon, min_lat, max_lon, max_lat)
 # ~25 images each → ~500 total
 BBOXES = [
-    # Southeast Asia (most likely matches test distribution)
-    (103.6, 1.2, 104.1, 1.5),    # Singapore
+    (103.6, 1.2, 104.1, 1.5),  # Singapore
     (100.4, 13.6, 100.9, 14.0),  # Bangkok outskirts
     (106.6, 10.7, 107.0, 11.0),  # Ho Chi Minh City
-    (103.8, 3.1, 104.3, 3.5),    # Malaysia
+    (103.8, 3.1, 104.3, 3.5),  # Malaysia
     (114.1, 22.2, 114.4, 22.5),  # Hong Kong
     (120.9, 14.5, 121.2, 14.8),  # Manila
     (106.8, -6.3, 107.1, -6.1),  # Jakarta
-    # Europe — varied terrain
-    (2.2, 48.8, 2.5, 49.0),      # Paris suburbs
-    (13.3, 52.4, 13.6, 52.6),    # Berlin
-    (-0.2, 51.4, 0.1, 51.6),     # London
-    (4.8, 52.3, 5.0, 52.5),      # Amsterdam
-    (18.0, 59.3, 18.3, 59.5),    # Stockholm
-    (24.9, 60.1, 25.2, 60.3),    # Helsinki
-    # North America
+    (2.2, 48.8, 2.5, 49.0),  # Paris suburbs
+    (13.3, 52.4, 13.6, 52.6),  # Berlin
+    (-0.2, 51.4, 0.1, 51.6),  # London
+    (4.8, 52.3, 5.0, 52.5),  # Amsterdam
+    (18.0, 59.3, 18.3, 59.5),  # Stockholm
+    (24.9, 60.1, 25.2, 60.3),  # Helsinki
     (-73.9, 40.6, -73.7, 40.8),  # New York outer borough
     (-87.7, 41.8, -87.5, 42.0),  # Chicago
-    (-122.5, 37.7, -122.3, 37.9),# San Francisco
+    (-122.5, 37.7, -122.3, 37.9),  # San Francisco
     (-79.5, 43.6, -79.3, 43.8),  # Toronto
-    # Rural / natural (forests, fields)
-    (-1.6, 52.0, -1.4, 52.2),    # English countryside
-    (7.4, 47.5, 7.6, 47.7),      # Swiss/German forest
+    (-1.6, 52.0, -1.4, 52.2),  # English countryside
+    (7.4, 47.5, 7.6, 47.7),  # Swiss/German forest
     (-64.0, 45.0, -63.8, 45.2),  # Nova Scotia coast
-    (25.0, 65.0, 25.3, 65.2),    # Finnish forest
-    # Middle East / arid
-    (55.2, 25.1, 55.5, 25.3),    # Dubai
-    (46.6, 24.6, 46.9, 24.8),    # Riyadh
-    # East Asia
+    (25.0, 65.0, 25.3, 65.2),  # Finnish forest
+    (55.2, 25.1, 55.5, 25.3),  # Dubai
+    (46.6, 24.6, 46.9, 24.8),  # Riyadh
     (139.6, 35.6, 139.9, 35.8),  # Tokyo suburbs
     (126.9, 37.5, 127.2, 37.7),  # Seoul
     (121.4, 31.1, 121.7, 31.3),  # Shanghai suburbs
@@ -61,7 +58,7 @@ BBOXES = [
 PER_BBOX = 20  # ~500 total (26 bboxes × 20 = 520)
 
 
-def fetch_images(bbox: tuple, token: str, limit: int) -> list[dict]:
+def fetch_images(bbox: tuple[float, ...], token: str, limit: int) -> list[dict]:
     min_lon, min_lat, max_lon, max_lat = bbox
     bbox_str = f"{min_lon},{min_lat},{max_lon},{max_lat}"
     url = "https://graph.mapillary.com/images"
@@ -96,7 +93,7 @@ def scrape_backgrounds(token: str, target: int = 500) -> None:
     collected = len(existing)
     per_bbox = max(1, (target - collected + len(BBOXES) - 1) // len(BBOXES))
 
-    for bbox in tqdm(BBOXES, "Fetching from regions"):
+    for bbox in tqdm(BBOXES, "Fetching from regions", colour="Purple"):
         if collected >= target:
             break
 

@@ -1,13 +1,10 @@
-from cv_dev.consts import IMAGE_PATH, JSON_PATH, CATEGORIES
+from cv_dev.consts import IMAGE_PATH, JSON_PATH, CATEGORIES, OBJECT_BANK_PATH
 
-from pathlib import Path
 from collections import defaultdict
 from PIL import Image
 import numpy as np
 from tqdm import tqdm
 import json
-
-OBJECT_BANK_PATH = Path("cv_dev/object_bank")
 
 
 def extract_objects() -> None:
@@ -28,7 +25,9 @@ def extract_objects() -> None:
     # sam2_l.pt for best quality; swap to sam2_b.pt if VRAM is tight
     model = SAM("sam2_l.pt")
 
-    for image_id, annotations in tqdm(ann_by_image.items(), "Extracting objects"):
+    for image_id, annotations in tqdm(
+        ann_by_image.items(), "Extracting objects", color="Green"
+    ):
         img_pil = Image.open(IMAGE_PATH / file_by_id[image_id]).convert("RGB")
         img_np = np.array(img_pil)
         H, W = img_np.shape[:2]
