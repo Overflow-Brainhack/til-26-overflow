@@ -68,7 +68,9 @@ from typing import NamedTuple, Optional
 
 from constants import (
     Action,
+    BASE_DESTROY_BONUS,
     BASE_MAX_HEALTH,
+    BOMB_ATTACK,
     BOMB_BLAST_RADIUS,
     BOMB_TIMER,
     DIR_VECTOR,
@@ -432,14 +434,38 @@ class HeuristicPolicy(Policy):
     def _bomb_opportunity_score(self, memory: MapMemory, blast: set[tuple[int, int]]) -> float:
         """Compute unified value score for placing a bomb at the current position.
 
-        Score = base_hits * base_bomb_value + agent_hits * agent_bomb_value
+        Score = Σ base_hit_value + agent_hits * agent_bomb_value
                 + (expected_hits * agent_bomb_value if predictive_bomb is on).
+
+        base_hit_value = base_bomb_value + BASE_DESTROY_BONUS when the known
+        enemy base HP is <= BOMB_ATTACK (finishing blow). Unknown health defaults
+        to BASE_MAX_HEALTH (no bonus assumed).
+
+        Predictive contribution is gated: when there are no direct hits the
+        expected-hits value is only added if it exceeds predictive_bomb_threshold.
+        This prevents purely predictive bombs from firing when the enemy is
+        behind a wall and would only reach the blast zone via a long detour —
+        the reachability cloud is inflated by sighting age (horizon + age),
+        making expected_hits misleadingly high for stale sightings.
+        When at least one direct hit exists, the full predictive weight is
+        added unconditionally (the enemy is confirmed to be nearby).
         """
-        base_hits = sum(1 for p in memory.enemy_bases if p in blast)
+        base_score = 0.0
+        base_hits = 0
+        for p in memory.enemy_bases:
+            if p in blast:
+                base_hits += 1
+                base_hp = memory.enemy_base_health.get(p, BASE_MAX_HEALTH)
+                hit_value = self.base_bomb_value
+                if base_hp <= BOMB_ATTACK:
+                    hit_value += BASE_DESTROY_BONUS
+                base_score += hit_value
         agent_hits = sum(1 for p in memory.enemy_agents if p in blast)
-        score = base_hits * self.base_bomb_value + agent_hits * self.agent_bomb_value
+        score = base_score + agent_hits * self.agent_bomb_value
         if self.predictive_bomb:
-            score += self._expected_hits(memory, blast) * self.agent_bomb_value
+            expected = self._expected_hits(memory, blast)
+            if agent_hits > 0 or base_hits > 0 or expected >= self._effective_threshold():
+                score += expected * self.agent_bomb_value
         return score
 
     def _try_attack(self, obs: ParsedObs, memory: MapMemory) -> Optional[int]:
@@ -476,7 +502,9 @@ class HeuristicPolicy(Policy):
                 definite += 1.0
         for p in memory.enemy_bases:
             if p in blast:
-                definite += 2.0  # bases score more (50 pts vs ~20 damage on agent)
+                base_hp = memory.enemy_base_health.get(p, BASE_MAX_HEALTH)
+                # Finishing blow (base HP <= bomb damage) is worth 70+ pts; normal hit ~20 pts.
+                definite += 50.0 if base_hp <= BOMB_ATTACK else 2.0
         if definite >= 1.0:
             return int(Action.PLACE_BOMB)
 
@@ -539,17 +567,16 @@ class HeuristicPolicy(Policy):
         any_enemy_visible = bool(memory.enemy_agents)
         combined_threats = threats | bomb_virtual_threats
 
-        # Enter defend mode when there is a concrete threat OR when an enemy
-        # is visible anywhere (strategic pre-positioning via hotspot scoring).
-        if not combined_threats and not any_enemy_visible:
+        # Only enter defend mode for concrete threats (enemy near base, or an active
+        # enemy bomb near base).  Distant enemies don't trigger defensive posturing —
+        # let collect/explore run while the lane is clear.
+        if not combined_threats:
             return None
 
         edge = self._edge_cost(memory, danger_avoid=danger_now)
 
         if self.smart_defend:
-            best_cell = self._best_defend_cell(
-                obs, memory, edge, any_enemy_visible=any_enemy_visible
-            )
+            best_cell = self._best_defend_cell(obs, memory, edge)
             if best_cell is not None:
                 action = first_action_to(obs.location, obs.direction, {best_cell}, edge)
                 # STAY means we're already at best_cell — fall through to collect/explore
@@ -559,10 +586,6 @@ class HeuristicPolicy(Policy):
                     return self._maybe_wall_break(obs, memory, action)
 
             # No coverage cell found, or already at the optimal position.
-            # Strategic-only mode: fall through to collect/explore.
-            if not combined_threats:
-                return None
-
             # Aggressive fallback: when enemy planted a bomb then retreated, advance
             # toward their current position to cut off the return approach path.
             # When no bomb trail exists, intercept within the base perimeter.
@@ -633,8 +656,6 @@ class HeuristicPolicy(Policy):
         cell: tuple[int, int],
         memory: MapMemory,
         attack_vector: set[tuple[int, int]],
-        *,
-        any_enemy_visible: bool = False,
     ) -> float:
         """Score for a candidate defend position based on attack-vector coverage.
 
@@ -652,11 +673,8 @@ class HeuristicPolicy(Policy):
           bomb whose position is in the covered cells. Enemy placed a bomb here and
           retreated — this is a confirmed approach corridor they will likely reuse.
 
-        Tier 4 — strategic baseline (when any_enemy_visible and cell is a hotspot):
-          returns coverage/max_coverage in (0, 1]. Fires only when tiers 1-3 all
-          produce zero, so it never overrides an active-threat signal. The score is
-          ≤1, well below tier 1-3 floors (~2.5+), so the agent only stays put when
-          it is already at the best hotspot (dist=0, divisor=1).
+        Returns 0.0 when no enemy signal is present so that _best_defend_cell
+        returns None and _try_defend falls through to collect/explore.
         """
         blast = cells_in_blast(memory, cell)
         covered = blast & attack_vector
@@ -690,27 +708,18 @@ class HeuristicPolicy(Policy):
             if not bomb_info.ally and bomb_pos in covered:
                 enemy_score += self.agent_bomb_value * 0.5
 
-        if enemy_score > 0.0:
-            # Coverage count tiebreaks equal enemy scores: more attack paths
-            # blocked = better chokepoint.
-            return float(len(covered)) + enemy_score
+        if enemy_score == 0.0:
+            return 0.0
 
-        # Tier 4: strategic baseline — proactive positioning when no immediate
-        # threat is detected but an enemy is visible somewhere on the map.
-        # Score in (0, 1] so it never overrides a tier 1-3 signal.
-        if any_enemy_visible and cell in self._av_hotspots:
-            max_cov = max(self._av_hotspots.values(), default=1)
-            return self._av_hotspots[cell] / max_cov
-
-        return 0.0
+        # Coverage count tiebreaks equal enemy scores: more attack paths
+        # blocked = better chokepoint.
+        return float(len(covered)) + enemy_score
 
     def _best_defend_cell(
         self,
         obs: ParsedObs,
         memory: MapMemory,
         edge: EdgeCost,
-        *,
-        any_enemy_visible: bool = False,
     ) -> Optional[tuple[int, int]]:
         """Best reachable cell for attack-vector coverage, or None if nothing beats 0.
 
@@ -726,9 +735,7 @@ class HeuristicPolicy(Policy):
         best_score = 0.0
         best_cell: Optional[tuple[int, int]] = None
         for cell, dist in distances.items():
-            raw = self._defend_coverage_score(
-                cell, memory, attack_vector, any_enemy_visible=any_enemy_visible
-            )
+            raw = self._defend_coverage_score(cell, memory, attack_vector)
             if raw <= 0.0:
                 continue
             adjusted = raw / (dist + 1.0)
