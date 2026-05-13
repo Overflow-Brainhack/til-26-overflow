@@ -434,12 +434,23 @@ class HeuristicPolicy(Policy):
 
         Score = base_hits * base_bomb_value + agent_hits * agent_bomb_value
                 + (expected_hits * agent_bomb_value if predictive_bomb is on).
+
+        Predictive contribution is gated: when there are no direct hits the
+        expected-hits value is only added if it exceeds predictive_bomb_threshold.
+        This prevents purely predictive bombs from firing when the enemy is
+        behind a wall and would only reach the blast zone via a long detour —
+        the reachability cloud is inflated by sighting age (horizon + age),
+        making expected_hits misleadingly high for stale sightings.
+        When at least one direct hit exists, the full predictive weight is
+        added unconditionally (the enemy is confirmed to be nearby).
         """
         base_hits = sum(1 for p in memory.enemy_bases if p in blast)
         agent_hits = sum(1 for p in memory.enemy_agents if p in blast)
         score = base_hits * self.base_bomb_value + agent_hits * self.agent_bomb_value
         if self.predictive_bomb:
-            score += self._expected_hits(memory, blast) * self.agent_bomb_value
+            expected = self._expected_hits(memory, blast)
+            if agent_hits > 0 or base_hits > 0 or expected >= self._effective_threshold():
+                score += expected * self.agent_bomb_value
         return score
 
     def _try_attack(self, obs: ParsedObs, memory: MapMemory) -> Optional[int]:
