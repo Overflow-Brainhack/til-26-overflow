@@ -106,7 +106,7 @@ def make_dataset(
         annotations, f"Making dataset in {images_path}", colour="Blue"
     ):
         file_name = list(annotation.keys())[0]
-        img = Image.open(IMAGE_PATH / (file_name + ".jpg"))
+        img = Image.open(images_path / (file_name + ".jpg"))
         bboxes: list[list[float]] = []
         category_ids: list[int] = []
 
@@ -136,11 +136,11 @@ def make_dataset(
         img.save(images_path / (file_name + ".jpg"))
 
 
-def write_yaml(yaml_path: Path) -> None:
+def write_yaml(yaml_path: Path, data_path: Path) -> None:
     with open(yaml_path, "w") as f:
         yaml.dump(
             {
-                "path": str(DATA_PATH),
+                "path": str(data_path),
                 "train": "train/images",
                 "val": "val/images",
                 "names": dict(enumerate(CATEGORIES)),
@@ -194,4 +194,4 @@ if __name__ == "__main__":
         no_aug=True,
     )
 
-    write_yaml(DATA_PATH / "data.yaml")
+    write_yaml(DATA_PATH / "data.yaml", DATA_PATH)

@@ -18,8 +18,8 @@ SYNTHETIC_IMAGE_PATH = Path("data/synthetic_cv/images")
 SYNTHETIC_JSON_PATH = Path("data/synthetic_cv/annotations.json")
 
 # generate_synthetic.py tuning
-SYNTH_MAX_OBJECTS: int = 5       # max objects pasted per image (0–N chosen uniformly)
-SYNTH_MIN_SCALE: float = 0.05    # object width as fraction of background width
+SYNTH_MAX_OBJECTS: int = 5  # max objects pasted per image (0–N chosen uniformly)
+SYNTH_MIN_SCALE: float = 0.05  # object width as fraction of background width
 SYNTH_MAX_SCALE: float = 0.30
 SYNTH_MAX_PLACEMENT_TRIES: int = 20  # retries before skipping an object
 
@@ -32,5 +32,7 @@ NUM_CATEGORIES = len(CATEGORIES)  # 18
 
 TRAIN_PATH = Path("data/cv/train")
 VAL_PATH = Path("data/cv/val")
+SYNTHETIC_TRAIN_PATH = Path("data/synthetic_cv/train")
+SYNTHETIC_VAL_PATH = Path("data/synthetic_cv/val")
 
 TRAIN_OUTPUT = Path(__file__).parent.parent / "cv-training" / "trains"

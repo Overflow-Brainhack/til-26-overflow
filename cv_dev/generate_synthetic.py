@@ -2,8 +2,6 @@ from cv_dev.consts import (
     BACKGROUNDS_PATH,
     OBJECT_BANK_PATH,
     CATEGORIES,
-    FIXED_WIDTH,
-    FIXED_HEIGHT,
     SYNTHETIC_IMAGE_PATH,
     SYNTHETIC_JSON_PATH,
     SYNTH_MAX_OBJECTS,
@@ -11,6 +9,9 @@ from cv_dev.consts import (
     SYNTH_MAX_SCALE,
     SYNTH_MAX_PLACEMENT_TRIES,
 )
+
+TRAIN_DATA_WIDTH = 1920
+TRAIN_DATA_HEIGHT = 1080
 
 import json
 import random
@@ -34,8 +35,8 @@ def _find_placement(
     placed: list[list[float]],
 ) -> tuple[int, int] | None:
     for _ in range(SYNTH_MAX_PLACEMENT_TRIES):
-        x = random.randint(0, max(0, FIXED_WIDTH - obj_w))
-        y = random.randint(0, max(0, FIXED_HEIGHT - obj_h))
+        x = random.randint(0, max(0, 1920 - obj_w))
+        y = random.randint(0, max(0, 1080 - obj_h))
         candidate = [float(x), float(y), float(obj_w), float(obj_h)]
         if not any(_intersects(candidate, p) for p in placed):
             return x, y
@@ -68,9 +69,13 @@ def generate_synthetic() -> None:
     annotations: list[dict] = []
     ann_id = 0
 
-    for image_id, bg_path in enumerate(tqdm(backgrounds, "Generating synthetic images", colour="Green")):
-        bg = Image.open(bg_path).convert("RGB").resize(
-            (FIXED_WIDTH, FIXED_HEIGHT), Image.Resampling.LANCZOS
+    for image_id, bg_path in enumerate(
+        tqdm(backgrounds, "Generating synthetic images", colour="Green")
+    ):
+        bg = (
+            Image.open(bg_path)
+            .convert("RGB")
+            .resize((TRAIN_DATA_WIDTH, TRAIN_DATA_HEIGHT), Image.Resampling.LANCZOS)
         )
 
         n_objects = random.randint(0, SYNTH_MAX_OBJECTS)
@@ -82,7 +87,7 @@ def generate_synthetic() -> None:
 
             # Scale object so its width is SYNTH_MIN_SCALE–SYNTH_MAX_SCALE of bg width
             scale = random.uniform(SYNTH_MIN_SCALE, SYNTH_MAX_SCALE)
-            target_w = max(1, int(FIXED_WIDTH * scale))
+            target_w = max(1, int(TRAIN_DATA_WIDTH * scale))
             aspect = obj.height / obj.width if obj.width > 0 else 1.0
             target_h = max(1, int(target_w * aspect))
 
@@ -101,24 +106,27 @@ def generate_synthetic() -> None:
 
             bbox = [float(x), float(y), float(target_w), float(target_h)]
             placed_bboxes.append(bbox)
-            annotations.append({
-                "id": ann_id,
-                "image_id": image_id,
-                "category_id": CATEGORIES.index(cat),
-                "area": float(target_w * target_h),
-                "bbox": bbox,
-                "iscrowd": 0,
-            })
+            annotations.append(
+                {
+                    "id": ann_id,
+                    "image_id": image_id,
+                    "category_id": CATEGORIES.index(cat),
+                    "area": float(target_w * target_h),
+                    "bbox": bbox,
+                    "iscrowd": 0,
+                }
+            )
             ann_id += 1
 
-        file_name = bg_path.stem
-        bg.save(SYNTHETIC_IMAGE_PATH / f"{file_name}.jpg", "JPEG", quality=95)
-        images_meta.append({
-            "id": image_id,
-            "file_name": file_name,
-            "width": FIXED_WIDTH,
-            "height": FIXED_HEIGHT,
-        })
+        bg.save(SYNTHETIC_IMAGE_PATH / f"{image_id}.jpg", "JPEG", quality=95)
+        images_meta.append(
+            {
+                "id": image_id,
+                "width": TRAIN_DATA_WIDTH,
+                "height": TRAIN_DATA_HEIGHT,
+                "file_name": f"{image_id}.jpg",
+            }
+        )
 
     coco = {
         "images": images_meta,
@@ -128,7 +136,9 @@ def generate_synthetic() -> None:
     with open(SYNTHETIC_JSON_PATH, "w") as f:
         json.dump(coco, f)
 
-    print(f"\nDone. {len(images_meta)} images, {ann_id} annotations → {SYNTHETIC_JSON_PATH}")
+    print(
+        f"\nDone. {len(images_meta)} images, {ann_id} annotations → {SYNTHETIC_JSON_PATH}"
+    )
 
 
 if __name__ == "__main__":

@@ -1,4 +1,10 @@
-from cv_dev.consts import DATA_PATH, TRAIN_OUTPUT, DATASETS_PATH, NUM_CATEGORIES
+from cv_dev.consts import (
+    DATA_PATH,
+    TRAIN_OUTPUT,
+    DATASETS_PATH,
+    NUM_CATEGORIES,
+    SYNTHETIC_DATA_PATH,
+)
 from cv_dev.make_dataset import load_dataset, ImageDataset
 from transformers import (
     DetrForObjectDetection,
@@ -10,6 +16,7 @@ from torchvision.transforms.functional import normalize
 
 from ultralytics import YOLO, RTDETR
 from ultralytics.models.rtdetr.train import RTDETRTrainer
+from pathlib import Path
 
 import os
 import torch
@@ -19,6 +26,7 @@ os.environ["WANDB_DISABLED"] = "true"
 torch.set_float32_matmul_precision("medium")
 
 DATA_YAML = str(DATA_PATH / "data.yaml")
+SYNTHETIC_DATA_YAML = str(SYNTHETIC_DATA_PATH / "data.yaml")
 
 
 def train_yolov11(n_epochs: int):
@@ -79,21 +87,22 @@ def train_yolov26(n_epochs: int):
     )
 
 
-def train_rtdetr(n_epochs: int):
+def train_rtdetr(
+    model: Path, n_epochs: int, resume: bool = False, name: str = "rtdetr-x-finetuned"
+):
     args = dict(
-        # model=TRAIN_OUTPUT / "rtdetr-x-finetuned" / "weights" / "last.pt",
-        model="rtdetr-x.pt",
+        model=model,
         data=DATA_YAML,
         epochs=n_epochs,
         batch=2,
         project=str(TRAIN_OUTPUT),
-        name="rtdetr-x-finetuned",
+        name=name,
         save_period=5,
         device=0,
         workers=0,
         imgsz=1280,
         rect=True,
-        resume=True,
+        resume=resume,
     )
     trainer: RTDETRTrainer = RTDETRTrainer(overrides=args)
     trainer.train()
@@ -193,8 +202,35 @@ def train_detr_hf(n_epochs: int):
     trainer.save_model(output_dir)
 
 
+def train_rtdetr_synth(
+    model: Path,
+    n_epochs: int,
+    resume: bool = False,
+    name: str = "rtdetr-x-finetuned-synth",
+):
+    args = dict(
+        # training from rtdetr-x-40
+        model=str(model),
+        data=SYNTHETIC_DATA_YAML,
+        epochs=n_epochs,
+        batch=2,
+        project=str(TRAIN_OUTPUT),
+        name=name,
+        save_period=5,
+        device=0,
+        workers=0,
+        imgsz=1280,
+        rect=True,
+        resume=resume,
+    )
+    trainer: RTDETRTrainer = RTDETRTrainer(overrides=args)
+    trainer.train()
+
+
 if __name__ == "__main__":
-    # train_yolov11(50)
-    train_yolov26(50)
-    # train_rtdetr(50)
-    # train_detr_hf(50)
+    train_rtdetr_synth(TRAIN_OUTPUT / "rtdetr-x-finetuned/weights/epoch30.pt", 50)
+    train_rtdetr(
+        TRAIN_OUTPUT / "rtdetr-l-finetuned/weights/last.pt",
+        40,
+        name="rtdetr-l-finetuned",
+    )
