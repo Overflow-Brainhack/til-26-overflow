@@ -35,6 +35,7 @@ DEFAULT_POLICY_KWARGS: dict = dict(
     adaptive_wall_break_cost=False,
 
     smart_defend=True,
+    predictive_defend=True,
 
     drift_aware_bomb=True,
     auto_tune_bomb=True,
