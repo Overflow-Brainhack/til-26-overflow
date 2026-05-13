@@ -68,7 +68,9 @@ from typing import NamedTuple, Optional
 
 from constants import (
     Action,
+    BASE_DESTROY_BONUS,
     BASE_MAX_HEALTH,
+    BOMB_ATTACK,
     BOMB_BLAST_RADIUS,
     BOMB_TIMER,
     DIR_VECTOR,
@@ -432,8 +434,12 @@ class HeuristicPolicy(Policy):
     def _bomb_opportunity_score(self, memory: MapMemory, blast: set[tuple[int, int]]) -> float:
         """Compute unified value score for placing a bomb at the current position.
 
-        Score = base_hits * base_bomb_value + agent_hits * agent_bomb_value
+        Score = Σ base_hit_value + agent_hits * agent_bomb_value
                 + (expected_hits * agent_bomb_value if predictive_bomb is on).
+
+        base_hit_value = base_bomb_value + BASE_DESTROY_BONUS when the known
+        enemy base HP is <= BOMB_ATTACK (finishing blow). Unknown health defaults
+        to BASE_MAX_HEALTH (no bonus assumed).
 
         Predictive contribution is gated: when there are no direct hits the
         expected-hits value is only added if it exceeds predictive_bomb_threshold.
@@ -444,9 +450,18 @@ class HeuristicPolicy(Policy):
         When at least one direct hit exists, the full predictive weight is
         added unconditionally (the enemy is confirmed to be nearby).
         """
-        base_hits = sum(1 for p in memory.enemy_bases if p in blast)
+        base_score = 0.0
+        base_hits = 0
+        for p in memory.enemy_bases:
+            if p in blast:
+                base_hits += 1
+                base_hp = memory.enemy_base_health.get(p, BASE_MAX_HEALTH)
+                hit_value = self.base_bomb_value
+                if base_hp <= BOMB_ATTACK:
+                    hit_value += BASE_DESTROY_BONUS
+                base_score += hit_value
         agent_hits = sum(1 for p in memory.enemy_agents if p in blast)
-        score = base_hits * self.base_bomb_value + agent_hits * self.agent_bomb_value
+        score = base_score + agent_hits * self.agent_bomb_value
         if self.predictive_bomb:
             expected = self._expected_hits(memory, blast)
             if agent_hits > 0 or base_hits > 0 or expected >= self._effective_threshold():
@@ -487,7 +502,9 @@ class HeuristicPolicy(Policy):
                 definite += 1.0
         for p in memory.enemy_bases:
             if p in blast:
-                definite += 2.0  # bases score more (50 pts vs ~20 damage on agent)
+                base_hp = memory.enemy_base_health.get(p, BASE_MAX_HEALTH)
+                # Finishing blow (base HP <= bomb damage) is worth 70+ pts; normal hit ~20 pts.
+                definite += 50.0 if base_hp <= BOMB_ATTACK else 2.0
         if definite >= 1.0:
             return int(Action.PLACE_BOMB)
 

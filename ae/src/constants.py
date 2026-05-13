@@ -42,6 +42,10 @@ REWARD_MISSION = 5.0
 REWARD_RECON = 1.0
 REWARD_RESOURCE = 2.0
 
+# Reward bonuses for finishing blows (from bomberman_config.yaml rewards section).
+BASE_DESTROY_BONUS = 50.0
+AGENT_KILL_BONUS = 30.0
+
 
 class Direction(IntEnum):
     RIGHT = 0

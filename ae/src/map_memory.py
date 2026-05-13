@@ -20,6 +20,7 @@ from typing import Any, Optional
 import numpy as np
 
 from constants import (
+    BASE_MAX_HEALTH,
     BASE_VISION_RADIUS,
     DESTR_WALL_CHANNEL,
     DIR_VECTOR,
@@ -77,6 +78,8 @@ class MapMemory:
     current_step: int = 0
     # Inferred from consecutive sightings: enemy_pos -> (dx, dy) velocity unit.
     enemy_velocities: dict[tuple[int, int], tuple[int, int]] = field(default_factory=dict)
+    # Last observed HP for each enemy base (absolute HP, not ratio). Unknown = BASE_MAX_HEALTH.
+    enemy_base_health: dict[tuple[int, int], float] = field(default_factory=dict)
 
     # ── derived ─────────────────────────────────────────────────────────────
     @property
@@ -92,6 +95,7 @@ class MapMemory:
         self.bombs.clear()
         self.enemy_agents.clear()
         self.enemy_velocities.clear()
+        self.enemy_base_health.clear()
         self.current_step = 0
 
     def update(self, obs: ParsedObs) -> None:
@@ -166,6 +170,9 @@ class MapMemory:
         # routing don't target a ghost position. Mirrors the _stamp_walls pattern.
         if cell_view[ViewChannel.ALLY_BASE] > 0.5 or cell_view[ViewChannel.ENEMY_BASE] > 0.5:
             self.base_positions.add(pos)
+            if cell_view[ViewChannel.ENEMY_BASE] > 0.5:
+                health_ratio = float(cell_view[ViewChannel.ENEMY_BASE_HEALTH])
+                self.enemy_base_health[pos] = health_ratio * BASE_MAX_HEALTH
         else:
             self.base_positions.discard(pos)
 
