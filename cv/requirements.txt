@@ -2,6 +2,6 @@
 
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
-ultralytics
+ultralytics>=8.4.48
 pillow
 opencv-python

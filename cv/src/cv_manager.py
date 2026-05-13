@@ -10,8 +10,7 @@ class CVManager:
     def __init__(self):
         # self.model = RTDETR("models/rtdetr-l-30.pt")
         # self.model = RTDETR("models/rtdetr-x-43.pt")
-        # self.model = YOLO("models/yolov11-50.pt")
-        self.model = YOLO("models/yolov26l-35.pt")
+        self.model = RTDETR("models/rtdetr-x-40-synth15-fixed.pt")
 
     def run_ultralytics(self, image: bytes) -> list[dict[str, Any]]:
         im = Image.open(BytesIO(image))

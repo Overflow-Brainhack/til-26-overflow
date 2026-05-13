@@ -87,7 +87,9 @@ def download_image(url: str, dest: Path) -> bool:
 def scrape_backgrounds(token: str) -> None:
     BACKGROUNDS_PATH.mkdir(parents=True, exist_ok=True)
     existing = set(p.stem for p in BACKGROUNDS_PATH.glob("*.jpg"))
-    print(f"Already have {len(existing)} backgrounds — fetching up to {len(QUERIES) * PER_PAGE} more.")
+    print(
+        f"Already have {len(existing)} backgrounds — fetching up to {len(QUERIES) * PER_PAGE} more."
+    )
 
     collected = len(existing)
 
