@@ -1,4 +1,10 @@
-from cv_dev.consts import DATA_PATH, JSON_PATH, RESULTS_PATH, NUM_CATEGORIES
+from cv_dev.consts import (
+    DATA_PATH,
+    JSON_PATH,
+    RESULTS_PATH,
+    NUM_CATEGORIES,
+    TRAIN_OUTPUT,
+)
 
 import base64
 import json
@@ -8,7 +14,6 @@ from pathlib import Path
 from collections.abc import Iterator, Mapping, Sequence
 from collections import defaultdict
 from typing import Any
-import requests
 import itertools
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
@@ -17,7 +22,6 @@ from PIL import Image
 from io import BytesIO
 import torch
 from ultralytics import RTDETR, YOLO
-import numpy as np
 
 os.environ["WANDB_DISABLED"] = "true"
 
@@ -93,7 +97,7 @@ def run_ultralytics(model, batch):
     for b in batch:
         bytes_array = base64.b64decode(b["b64"])
         im = Image.open(BytesIO(bytes_array))
-        results = model(im, verbose=False, imgsz=1024, rect=True)
+        results = model(im, verbose=False, imgsz=1280, rect=True)
         for box in results[0].boxes:
             x1, y1, x2, y2 = box.xyxy[0]  # [x1, y1, x2, y2]
             x = float(x1)
@@ -141,25 +145,14 @@ def main():
         sample_generator(instances, DATA_PATH), n=BATCH_SIZE
     )
 
-    # model = AutoModelForObjectDetection.from_pretrained(r"cv-training\trains\rt-detr-v2-finetuned\checkpoint-60000", num_labels=NUM_CATEGORIES, ignore_mismatched_sizes=True)
-    # processor = AutoImageProcessor.from_pretrained(r"cv-training\trains\rt-detr-v2-finetuned\checkpoint-60000", use_fast=True)
+    # model = YOLO(TRAIN_OUTPUT / "yolo11x-finetuned-2" / "weights" / "best.pt")
+    model = RTDETR(TRAIN_OUTPUT / "rtdetr-x-finetuned" / "weights" / "best.pt")
 
-    # model = YOLO(r"cv-training\trains\yolo-v8-finetuned2\weights\best.pt")
-    model = RTDETR(
-        r"/home/dev/til-26-overflow/runs/detect/cv-training/trains/rtdetr-baidu-finetuned-4/weights/epoch15.pt"
-    )
-
-    # lightning_model = FasterRCNNLightningModule.load_from_checkpoint(
-    #     r"cv-training\trains\faster-rcnn-finetuned\faster-rcnn-epoch=29.ckpt",
-    #     num_classes=NUM_CATEGORIES + 1,  # +1 for background class
-    # )
-    # model = lightning_model.model
     model.eval()
     model.to("cuda" if torch.cuda.is_available() else "cpu")
 
     results = []
     for batch in tqdm(batch_generator, total=math.ceil(len(instances) / BATCH_SIZE)):
-        # results.extend(list(run_rcnn(model, batch)))
         # results.extend(list(run_hf(model, processor, batch)))
         results.extend(list(run_ultralytics(model, batch)))
 

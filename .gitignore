@@ -7,6 +7,7 @@
 **/results/
 **/runs/
 *.pt
+cv-training/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -178,3 +179,4 @@ src/gcloud/*.json
 data
 
 .claude/projects
+cv_dev/object_bank

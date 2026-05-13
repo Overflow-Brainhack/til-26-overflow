@@ -19,6 +19,9 @@ dependencies = [
   "scikit-learn>=1.8.0",
   "albumentations>=2.0.8",
   "ultralytics>=8.4.48",
+  "rembg[gpu]",
+  "timm>=1.0.27",
+  "huggingface>=0.0.1",
 ]
 
 [[tool.uv.index]]
