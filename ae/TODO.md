@@ -134,15 +134,23 @@ of adding it.
   Toggles: `HeuristicPolicy(drift_aware_bomb=..., auto_tune_bomb=...)` /
   `auto_play.py --no-drift-aware-bomb --auto-tune-bomb`.
 
-- ~~Defend stance is naive~~ — implemented as `smart_defend=True` (default) on
-  `HeuristicPolicy`. `_try_defend` now: (1) computes an *intercept* cell
-  `INTERCEPT_STEPS=2` out from the base toward the enemy, navigating there
-  instead of chasing the enemy directly — placing us on their inbound path so
-  `_try_attack` can bomb them the next tick they enter our blast radius;
-  (2) dynamically expands `effective_radius` from 4 → up to 8 as
-  `base_health` drops to zero, so we engage threats earlier when the base is
-  at risk. Toggle: `HeuristicPolicy(smart_defend=...)` /
-  `auto_play.py --no-smart-defend`.
+- ~~Defend stance is naive~~ — `smart_defend=True` (default) redesigned to
+  coverage-based positioning with four scoring tiers and proactive hotspot
+  pre-positioning. `_ensure_av_hotspots()` sweeps all 256 cells once per round
+  (no-op after first call), caching each passable cell's attack-vector coverage
+  count. `_defend_coverage_score()` tiers: (1) 2×agent_bomb_value per enemy in
+  covered cells; (2) velocity-projected bonus (predictive_defend); (3) 0.5×
+  per active enemy bomb in covered cells — confirmed attack corridor; (4)
+  strategic baseline coverage/max_cov in (0,1] when any enemy is visible,
+  enabling proactive movement to hotspots before an attack begins.
+  `_try_defend` now enters defend mode when any enemy is visible (not just
+  within DEFEND_RADIUS), uses bomb positions as virtual threats so the
+  bomb-and-retreat exploit keeps defend active, applies a danger-zone filter to
+  intercept targets so the agent never navigates into a live blast, and switches
+  to aggressive chase (advance on enemy's current position) when the enemy
+  planted a bomb then retreated.
+  Toggles: `HeuristicPolicy(smart_defend=True, predictive_defend=True)` /
+  `auto_play.py --no-smart-defend --no-predictive-defend`.
 
 - ~~Friendly-fire safety check (`_can_escape_after_self_bomb`)~~ — removed
   after confirming `dynamics.py:691-692` skips same-team defenders. Our

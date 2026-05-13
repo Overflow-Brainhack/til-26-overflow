@@ -257,9 +257,15 @@ def main() -> None:
 
     parser.add_argument("--smart-defend", dest="smart_defend",
                         action="store_true", default=_P["smart_defend"],
-                        help="Pre-position between enemy and base when defending; "
-                             "expand defend radius when base health is low")
+                        help="Coverage-based defense: navigate to the cell whose bomb blast covers "
+                             "the most attack-vector cells; expand defend radius when base health is low")
     parser.add_argument("--no-smart-defend", dest="smart_defend",
+                        action="store_false")
+    parser.add_argument("--predictive-defend", dest="predictive_defend",
+                        action="store_true", default=_P["predictive_defend"],
+                        help="Bonus-score defend positions by projecting enemies along their velocity "
+                             "toward the attack vector (requires --smart-defend)")
+    parser.add_argument("--no-predictive-defend", dest="predictive_defend",
                         action="store_false")
 
     parser.add_argument("--drift-aware-bomb", dest="drift_aware_bomb",
@@ -358,6 +364,7 @@ def main() -> None:
             wall_break_cost=args.wall_break_cost,
             adaptive_wall_break_cost=args.adaptive_wall_break_cost,
             smart_defend=args.smart_defend,
+            predictive_defend=args.predictive_defend,
             drift_aware_bomb=args.drift_aware_bomb,
             auto_tune_bomb=args.auto_tune_bomb,
             bomb_tune_target=args.bomb_tune_target,

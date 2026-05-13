@@ -23,7 +23,14 @@ Toggles (`HeuristicPolicy(**kwargs)` / CLI flags in auto_play.py):
                                    wall: effective_cost = wall_break_cost / (1 + tile_value(target)).
                                    Mission tiles (value 5) attract wall-breaking at ~0.83× base cost;
                                    empty cells behind walls keep the full wall_break_cost (default OFF)
-    smart_defend                 — pre-position between enemy and base; expand defend radius when base health is low
+    smart_defend                 — coverage-based defense: navigate to the cell whose bomb blast covers the
+                                   most attack-vector cells (cells from which an enemy bomb would reach our
+                                   base, computed as cells_in_blast(base_pos) by LOS symmetry); also expands
+                                   the effective defend radius as base health drops (default ON)
+    predictive_defend            — when ON (requires smart_defend), project each known enemy forward along
+                                   their observed velocity and bonus-score candidate defend positions that
+                                   will intercept enemies heading into the attack vector; falls back to
+                                   coverage-only scoring for stationary or untracked enemies (default ON)
     drift_aware_bomb             — use velocity-biased enemy position distribution (reduces overcounting)
     auto_tune_bomb               — online EMA that raises/lowers threshold based on observed hit rate
     bomb_tune_target             — target hit rate for auto-tuning (default 0.40)
@@ -62,9 +69,11 @@ from typing import NamedTuple, Optional
 from constants import (
     Action,
     BASE_MAX_HEALTH,
+    BOMB_BLAST_RADIUS,
     BOMB_TIMER,
     DIR_VECTOR,
     Direction,
+    GRID_SIZE,
 )
 from map_memory import MapMemory
 from observation import ParsedObs
@@ -153,6 +162,7 @@ class HeuristicPolicy(Policy):
         wall_break_cost: float = 5.0,
         adaptive_wall_break_cost: bool = False,
         smart_defend: bool = True,
+        predictive_defend: bool = True,
         drift_aware_bomb: bool = True,
         auto_tune_bomb: bool = False,
         bomb_tune_target: float = 0.40,
@@ -176,6 +186,7 @@ class HeuristicPolicy(Policy):
         self.wall_break_cost = wall_break_cost
         self.adaptive_wall_break_cost = adaptive_wall_break_cost
         self.smart_defend = smart_defend
+        self.predictive_defend = predictive_defend
         self.drift_aware_bomb = drift_aware_bomb
         self.auto_tune_bomb = auto_tune_bomb
         self.bomb_tune_target = bomb_tune_target
@@ -208,6 +219,13 @@ class HeuristicPolicy(Policy):
         # Both components must match for a cycle to be confirmed — same action at
         # a different position (e.g. two FORWARD moves in a corridor) is not a loop.
         self._action_history: deque[tuple[int, tuple[int, int]]] = deque(maxlen=loop_window)
+
+        # Precomputed attack-vector hotspots — cell → coverage count. Computed once
+        # per round when ally_base is first known; cheap (256 × 25 LOS checks).
+        # Cleared by setting _av_hotspots_base = None so the next call to
+        # _ensure_av_hotspots rebuilds against the current map state.
+        self._av_hotspots: dict[tuple[int, int], int] = {}
+        self._av_hotspots_base: Optional[tuple[int, int]] = None
 
         # Analysis/debug state — written on every choose() call, read by auto_play.
         self._debug_mode: str = "stay"
@@ -482,39 +500,87 @@ class HeuristicPolicy(Policy):
         memory: MapMemory,
         danger_now: set[tuple[int, int]],
     ) -> Optional[int]:
-        if memory.ally_base is None or not memory.enemy_agents:
+        if memory.ally_base is None:
             return None
-        # Base is permanently destroyed for this episode — defending it gains nothing.
+        # Base permanently destroyed — defending gains nothing.
         if obs.base_health <= 0:
             return None
         bx, by = memory.ally_base
 
-        # Expand the defend radius when base health is low so we intercept
-        # enemies earlier — at full health DEFEND_RADIUS=4; at zero health +4.
+        # Rebuild hotspot cache once per round (no-op after first call).
+        if self.smart_defend:
+            self._ensure_av_hotspots(memory)
+
+        # Expand the defend radius when base health is low.
         if self.smart_defend:
             health_frac = min(1.0, obs.base_health / BASE_MAX_HEALTH)
             effective_radius = DEFEND_RADIUS + int((1.0 - health_frac) * 4)
         else:
             effective_radius = DEFEND_RADIUS
 
+        # Primary threats: enemy agents currently close to the base.
         threats = {
             p for p in memory.enemy_agents
             if abs(p[0] - bx) + abs(p[1] - by) <= effective_radius
         }
-        if not threats:
+
+        # Virtual threats: active enemy bombs near the base — the enemy was at
+        # these cells moments ago and is likely to return.  Filter out cells in
+        # danger_now so the intercept path never navigates into a live blast.
+        bomb_virtual_threats: set[tuple[int, int]] = set()
+        if self.smart_defend:
+            bomb_virtual_threats = {
+                bomb.pos for bomb in memory.bombs.values()
+                if not bomb.ally
+                and abs(bomb.pos[0] - bx) + abs(bomb.pos[1] - by) <= effective_radius + BOMB_BLAST_RADIUS
+                and bomb.pos not in danger_now
+            }
+
+        any_enemy_visible = bool(memory.enemy_agents)
+        combined_threats = threats | bomb_virtual_threats
+
+        # Enter defend mode when there is a concrete threat OR when an enemy
+        # is visible anywhere (strategic pre-positioning via hotspot scoring).
+        if not combined_threats and not any_enemy_visible:
             return None
 
         edge = self._edge_cost(memory, danger_avoid=danger_now)
 
-        # Pre-position between the enemy and our base rather than chasing the
-        # enemy directly. This puts us on their inbound path so _try_attack can
-        # bomb them on the next tick once they enter our blast radius.
         if self.smart_defend:
-            targets = _intercept_cells(threats, memory.ally_base, memory)
-            if not targets:
-                targets = threats
+            best_cell = self._best_defend_cell(
+                obs, memory, edge, any_enemy_visible=any_enemy_visible
+            )
+            if best_cell is not None:
+                action = first_action_to(obs.location, obs.direction, {best_cell}, edge)
+                # STAY means we're already at best_cell — fall through to collect/explore
+                # rather than blocking other strategies with a no-op defend action.
+                if action is not None and action != Action.STAY:
+                    self._debug_target = best_cell
+                    return self._maybe_wall_break(obs, memory, action)
+
+            # No coverage cell found, or already at the optimal position.
+            # Strategic-only mode: fall through to collect/explore.
+            if not combined_threats:
+                return None
+
+            # Aggressive fallback: when enemy planted a bomb then retreated, advance
+            # toward their current position to cut off the return approach path.
+            # When no bomb trail exists, intercept within the base perimeter.
+            if bomb_virtual_threats and any_enemy_visible:
+                chase_targets = set(memory.enemy_agents.keys()) | bomb_virtual_threats
+            else:
+                chase_targets = combined_threats
+
+            targets = _intercept_cells(chase_targets, memory.ally_base, memory) or chase_targets
         else:
-            targets = threats
+            if not combined_threats:
+                return None
+            targets = combined_threats
+
+        # Prefer intercept targets outside active blast zones; accept risk only
+        # if every target is currently dangerous.
+        safe_targets = {t for t in targets if t not in danger_now}
+        targets = safe_targets or targets
 
         action = first_action_to(obs.location, obs.direction, targets, edge)
         if action is None:
@@ -522,6 +588,154 @@ class HeuristicPolicy(Policy):
         ax, ay = obs.location
         self._debug_target = min(targets, key=lambda c: abs(c[0] - ax) + abs(c[1] - ay))
         return self._maybe_wall_break(obs, memory, action)
+
+    # ── smart-defend helpers ─────────────────────────────────────────────────
+
+    def _compute_attack_vector(self, memory: MapMemory) -> set[tuple[int, int]]:
+        """Cells from which an enemy bomb would reach our base.
+
+        By LOS symmetry cells_in_blast is bidirectional: if cell A is in the
+        blast of a bomb at B, then B is in the blast of a bomb at A.  So the
+        attack vector equals cells_in_blast(memory, base_pos) — no extra work.
+        """
+        if memory.ally_base is None:
+            return set()
+        return cells_in_blast(memory, memory.ally_base)
+
+    def _ensure_av_hotspots(self, memory: MapMemory) -> None:
+        """Precompute and cache attack-vector coverage for every passable map cell.
+
+        Runs once per round (when ally_base first becomes known). 256 cells ×
+        25 LOS checks = negligible cost. The novice map is fully known from
+        tick 0 via novice_map.json, so hotspots are accurate immediately.
+
+        A hotspot is any passable cell whose bomb blast covers ≥ 2 attack-vector
+        cells — single-cell coverage is too marginal to navigate toward.
+        """
+        if self._av_hotspots_base == memory.ally_base or memory.ally_base is None:
+            return
+        attack_vector = cells_in_blast(memory, memory.ally_base)
+        hotspots: dict[tuple[int, int], int] = {}
+        for x in range(GRID_SIZE):
+            for y in range(GRID_SIZE):
+                cell = (x, y)
+                # Include all in-bounds cells — wall cells are automatically absent
+                # from reachable_cells() results, so tier-4 scoring never fires for
+                # them even if they appear in this dict.
+                coverage = len(cells_in_blast(memory, cell) & attack_vector)
+                if coverage >= 2:
+                    hotspots[cell] = coverage
+        self._av_hotspots = hotspots
+        self._av_hotspots_base = memory.ally_base
+
+    def _defend_coverage_score(
+        self,
+        cell: tuple[int, int],
+        memory: MapMemory,
+        attack_vector: set[tuple[int, int]],
+        *,
+        any_enemy_visible: bool = False,
+    ) -> float:
+        """Score for a candidate defend position based on attack-vector coverage.
+
+        Scoring tiers (cumulative, highest wins in score/(dist+1) ranking):
+
+        Tier 1 — definite hit: +2 * agent_bomb_value per enemy currently in
+          a covered cell.
+
+        Tier 2 — predictive (requires predictive_defend=True): +agent_bomb_value *
+          (BOMB_TIMER+1-t)/BOMB_TIMER per enemy whose velocity projects them into
+          a covered cell at tick t (1 ≤ t ≤ BOMB_TIMER). Stationary enemies are
+          skipped (Tier 1 already handles them).
+
+        Tier 3 — known attack corridor: +0.5 * agent_bomb_value per active enemy
+          bomb whose position is in the covered cells. Enemy placed a bomb here and
+          retreated — this is a confirmed approach corridor they will likely reuse.
+
+        Tier 4 — strategic baseline (when any_enemy_visible and cell is a hotspot):
+          returns coverage/max_coverage in (0, 1]. Fires only when tiers 1-3 all
+          produce zero, so it never overrides an active-threat signal. The score is
+          ≤1, well below tier 1-3 floors (~2.5+), so the agent only stays put when
+          it is already at the best hotspot (dist=0, divisor=1).
+        """
+        blast = cells_in_blast(memory, cell)
+        covered = blast & attack_vector
+        if not covered:
+            return 0.0
+
+        enemy_score = 0.0
+
+        # Tier 1: definite hits
+        for ep in memory.enemy_agents:
+            if ep in covered:
+                enemy_score += self.agent_bomb_value * 2.0
+
+        # Tier 2: predictive velocity projection
+        if self.predictive_defend:
+            for ep in memory.enemy_agents:
+                vel = memory.enemy_velocities.get(ep, (0, 0))
+                if vel == (0, 0):
+                    continue
+                for t in range(1, BOMB_TIMER + 1):
+                    proj = (ep[0] + vel[0] * t, ep[1] + vel[1] * t)
+                    if not memory.in_bounds(proj):
+                        break
+                    if proj in covered:
+                        enemy_score += self.agent_bomb_value * (BOMB_TIMER + 1 - t) / BOMB_TIMER
+                        break
+
+        # Tier 3: active enemy bomb in coverage — confirmed attack corridor.
+        # Half-weight because it's stale/indirect evidence (enemy already retreated).
+        for bomb_pos, bomb_info in memory.bombs.items():
+            if not bomb_info.ally and bomb_pos in covered:
+                enemy_score += self.agent_bomb_value * 0.5
+
+        if enemy_score > 0.0:
+            # Coverage count tiebreaks equal enemy scores: more attack paths
+            # blocked = better chokepoint.
+            return float(len(covered)) + enemy_score
+
+        # Tier 4: strategic baseline — proactive positioning when no immediate
+        # threat is detected but an enemy is visible somewhere on the map.
+        # Score in (0, 1] so it never overrides a tier 1-3 signal.
+        if any_enemy_visible and cell in self._av_hotspots:
+            max_cov = max(self._av_hotspots.values(), default=1)
+            return self._av_hotspots[cell] / max_cov
+
+        return 0.0
+
+    def _best_defend_cell(
+        self,
+        obs: ParsedObs,
+        memory: MapMemory,
+        edge: EdgeCost,
+        *,
+        any_enemy_visible: bool = False,
+    ) -> Optional[tuple[int, int]]:
+        """Best reachable cell for attack-vector coverage, or None if nothing beats 0.
+
+        Uses the standard value/(distance+1) formula so nearby mediocre cells
+        don't always win over distant high-coverage positions.
+        """
+        attack_vector = self._compute_attack_vector(memory)
+        if not attack_vector:
+            return None
+
+        distances = reachable_cells(obs.location, obs.direction, edge, max_cost=EXPLORE_BUDGET)
+
+        best_score = 0.0
+        best_cell: Optional[tuple[int, int]] = None
+        for cell, dist in distances.items():
+            raw = self._defend_coverage_score(
+                cell, memory, attack_vector, any_enemy_visible=any_enemy_visible
+            )
+            if raw <= 0.0:
+                continue
+            adjusted = raw / (dist + 1.0)
+            if adjusted > best_score:
+                best_score = adjusted
+                best_cell = cell
+        return best_cell
 
     def _try_collect(
         self,
