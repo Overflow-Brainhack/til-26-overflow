@@ -451,7 +451,7 @@ def main() -> None:
                             tile_w, tile_h, grid_offset_x, grid_offset_y,
                             selected_agent, font,
                         )
-                        pygame.display.flip()
+                    pygame.display.flip()
 
                 clock.tick(env.cfg.renderer.render_fps)
         else:

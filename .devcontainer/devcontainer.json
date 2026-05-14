@@ -16,6 +16,7 @@
 	"hostRequirements": {
 		"gpu": true
 	},
+	// "runArgs": ["--env=DISPLAY=:0", "--volume=/tmp/.X11-unix:/tmp/.X11-unix"],
 
 	// Features to add to the dev container. More info: https://containers.dev/features.
 	// "features": {},
