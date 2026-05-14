@@ -1,0 +1,13 @@
+# Install NeMo with ASR-specific dependencies
+nemo_toolkit[asr]
+
+# Install PyTorch Lightning (the 'lightning' package is the modern version)
+lightning
+
+# Install OmegaConf for configuration management
+omegaconf
+
+soundfile
+
+onnxruntime-gpu
+onnx-asr
