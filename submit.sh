@@ -213,7 +213,7 @@ run gcloud ai models upload \
   --display-name="$IMAGE_NAME" \
   --container-image-uri="$REMOTE_REF" \
   --container-health-route="//health" \
-  --container-predict-route="//$ROUTE" \
+  --container-predict-route="/$ROUTE" \
   --container-ports="$PORT" \
   --version-aliases="default"
 
