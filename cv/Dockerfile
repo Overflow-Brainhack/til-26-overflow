@@ -25,6 +25,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copies your source files.
+COPY DEIMv2/ DEIMv2/
 COPY models/ models/
 COPY src .
 

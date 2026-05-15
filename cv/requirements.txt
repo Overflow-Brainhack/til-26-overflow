@@ -5,3 +5,11 @@ uvicorn[standard]==0.34.2
 ultralytics>=8.4.48
 pillow
 opencv-python
+torch
+torchvision
+faster-coco-eval>=1.6.7
+PyYAML
+tensorboard
+scipy
+calflops
+transformers
