@@ -11,14 +11,14 @@ from cv_dev.consts import (
     SYNTH_MAX_PLACEMENT_TRIES,
 )
 
-TRAIN_DATA_WIDTH = 1920
-TRAIN_DATA_HEIGHT = 1080
-
 import json
 import random
 from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
+
+TRAIN_DATA_WIDTH = 1920
+TRAIN_DATA_HEIGHT = 1080
 
 
 def _intersects(a: list[float], b: list[float]) -> bool:
@@ -150,7 +150,9 @@ def generate_synthetic() -> None:
     with open(SYNTHETIC_JSON_PATH, "w") as f:
         json.dump(coco, f)
 
-    print(f"\nDone. {len(images_meta)} images, {ann_id} annotations → {SYNTHETIC_JSON_PATH}")
+    print(
+        f"\nDone. {len(images_meta)} images, {ann_id} annotations → {SYNTHETIC_JSON_PATH}"
+    )
     print(f"\n{'Category':<22} {'Original':>8} {'Generated':>10}")
     print("-" * 42)
     for cat in CATEGORIES:

@@ -42,7 +42,8 @@ def get_dimensions(path: Path) -> dict[str, int]:
 
 
 def make_dataset(
-    images_path: Path,
+    images_out_path: Path,
+    images_in_path: Path,
     labels_path: Path,
     annotations: list[dict[str, list[ProcessedAnnotation]]],
     im_w: int,
@@ -103,10 +104,10 @@ def make_dataset(
         )
 
     for annotation in tqdm(
-        annotations, f"Making dataset in {images_path}", colour="Blue"
+        annotations, f"Making dataset in {images_out_path}", colour="Blue"
     ):
         file_name = list(annotation.keys())[0]
-        img = Image.open(images_path / (file_name + ".jpg"))
+        img = Image.open(images_in_path / (file_name + ".jpg"))
         bboxes: list[list[float]] = []
         category_ids: list[int] = []
 
@@ -133,7 +134,7 @@ def make_dataset(
                 f.write(f"{category_id} {yolo_x} {yolo_y} {yolo_w} {yolo_h}\n")
 
         img = Image.fromarray(img)
-        img.save(images_path / (file_name + ".jpg"))
+        img.save(images_out_path / (file_name + ".jpg"))
 
 
 def write_yaml(yaml_path: Path, data_path: Path) -> None:
@@ -175,6 +176,7 @@ if __name__ == "__main__":
 
     make_dataset(
         TRAIN_PATH / "images",
+        IMAGE_PATH,
         TRAIN_PATH / "labels",
         train_annotations,
         dimensions["width"],
@@ -187,6 +189,7 @@ if __name__ == "__main__":
 
     make_dataset(
         VAL_PATH / "images",
+        IMAGE_PATH,
         VAL_PATH / "labels",
         val_annotations,
         dimensions["width"],

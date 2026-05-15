@@ -20,9 +20,8 @@ from ultralytics.models.rtdetr.train import RTDETRTrainer
 from pathlib import Path
 
 import os
+import shutil
 import subprocess
-import re
-import yaml
 
 import torch
 
@@ -93,13 +92,16 @@ def train_yolov26(n_epochs: int):
 
 
 def train_rtdetr(
-    model: Path, n_epochs: int, resume: bool = False, name: str = "rtdetr-x-finetuned"
+    model: Path | str,
+    n_epochs: int,
+    resume: bool = False,
+    name: str = "rtdetr-x-finetuned",
 ):
     args = dict(
-        model=model,
+        model=str(model),
         data=DATA_YAML,
         epochs=n_epochs,
-        batch=2,
+        batch=4,
         project=str(TRAIN_OUTPUT),
         name=name,
         save_period=5,
@@ -218,7 +220,7 @@ def train_rtdetr_synth(
         model=str(model),
         data=SYNTHETIC_DATA_YAML,
         epochs=n_epochs,
-        batch=2,
+        batch=4,
         project=str(TRAIN_OUTPUT),
         name=name,
         save_period=5,
@@ -253,71 +255,26 @@ def train_deimv2(
     val_img_dir = DEIMV2_DATA_PATH / "val"
     val_json = DEIMV2_DATA_PATH / "val.json"
 
-    # Write our dataset config into the DEIMv2 repo's configs/dataset/
-    dataset_cfg = {
-        "task": "detection",
-        "evaluator": {"type": "CocoEvaluator", "iou_types": ["bbox"]},
-        "num_classes": NUM_CATEGORIES,
-        "remap_mscoco_category": False,
-        "train_dataloader": {
-            "type": "DataLoader",
-            "dataset": {
-                "type": "CocoDetection",
-                "img_folder": str(train_img_dir.resolve()),
-                "ann_file": str(train_json.resolve()),
-                "return_masks": False,
-                "transforms": {"type": "Compose", "ops": None},
-            },
-            "shuffle": True,
-            "num_workers": 4,
-            "drop_last": True,
-            "collate_fn": {"type": "BatchImageCollateFunction"},
-        },
-        "val_dataloader": {
-            "type": "DataLoader",
-            "dataset": {
-                "type": "CocoDetection",
-                "img_folder": str(val_img_dir.resolve()),
-                "ann_file": str(val_json.resolve()),
-                "return_masks": False,
-                "transforms": {"type": "Compose", "ops": None},
-            },
-            "shuffle": False,
-            "num_workers": 4,
-            "drop_last": False,
-            "collate_fn": {"type": "BatchImageCollateFunction"},
-        },
-    }
-    dataset_cfg_path = deimv2_repo / "configs" / "dataset" / "til26.yml"
-    with open(dataset_cfg_path, "w") as f:
-        yaml.dump(
-            dataset_cfg,
-            f,
-            default_flow_style=False,
-            sort_keys=False,
-            allow_unicode=True,
-        )
+    dataset_cfg_path = deimv2_repo / "configs" / "dataset" / "til26_dataset.yml"
+    shutil.copyfile("cv_dev/til26_dataset.yml", dataset_cfg_path)
 
-    # Patch the L model config: swap dataset include + fix num_classes
-    model_cfg_src = deimv2_repo / "configs" / "deimv2" / "deimv2_dinov3_l_coco.yml"
-    model_cfg_text = model_cfg_src.read_text()
-    model_cfg_text = re.sub(r"dataset/\S+\.yml", "dataset/til26.yml", model_cfg_text)
-    model_cfg_text = re.sub(
-        r"num_classes:\s*\d+", f"num_classes: {NUM_CATEGORIES}", model_cfg_text
-    )
+    dataloader_cfg_path = deimv2_repo / "configs" / "base" / "til26_dataloader.yml"
+    shutil.copyfile("cv_dev/til26_dataloader.yml", dataloader_cfg_path)
 
-    our_cfg_path = deimv2_repo / "configs" / "deimv2" / "deimv2_dinov3_l_til26.yml"
-    our_cfg_path.write_text(model_cfg_text)
+    model_cfg_path = deimv2_repo / "configs" / "deimv2" / "deimv2_dinov3_l_til26.yml"
+    shutil.copyfile("cv_dev/deimv2_dinov3_l_til26.yml", model_cfg_path)
 
     cmd = [
+        "uv",
+        "run",
         "torchrun",
         "--master_port=7777",
-        f"--nproc_per_node=1",
+        "--nproc_per_node=1",
         "train.py",
         "-c",
-        str(our_cfg_path.relative_to(deimv2_repo)),
+        str(model_cfg_path.relative_to(deimv2_repo)),
         "-t",
-        "Intellindust/DEIMv2_DINOv3_L_COCO",
+        "/home/dev/til-26-overflow/deimv2-hf.pth",
         "--use-amp",
         "--seed=0",
     ]
@@ -334,9 +291,18 @@ def train_deimv2(
 
 
 if __name__ == "__main__":
-    train_rtdetr_synth(TRAIN_OUTPUT / "rtdetr-x-finetuned/weights/epoch30.pt", 50)
+    # train_rtdetr_synth(TRAIN_OUTPUT / "rtdetr-x-finetuned/weights/epoch30.pt", 50)
+    # train_rtdetr_synth(
+    #     TRAIN_OUTPUT / "rtdetr-l-finetuned-2/weights/epoch20.pt",
+    #     50,
+    #     name="rtdetr-l-finetuned-synth",
+    # )  # train rtdetr-l-50 on 50 synth images
+
     train_rtdetr(
-        TRAIN_OUTPUT / "rtdetr-l-finetuned/weights/last.pt",
-        40,
+        # TRAIN_OUTPUT / "rtdetr-l-finetuned/weights/last.pt",
+        "rtdetr-l.pt",
+        80,
         name="rtdetr-l-finetuned",
     )
+
+    # train_deimv2(Path("/home/dev/DEIMv2/"))
