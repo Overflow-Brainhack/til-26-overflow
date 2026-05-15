@@ -91,7 +91,7 @@ class CVManager:
     def __init__(self):
         # self.model = RTDETR("models/rtdetr-l-70.pt") best
         # self.model = RTDETR("models/rtdetr-x-43.pt")
-        self.model = RTDETR("models/rtdetr-l-20-s40.pt")
+        self.model = RTDETR("models/rtdetr-l-t30.pt")
 
         # self.model = DEIMv2(deimv2_l_config)
         # state_dict = torch.load("models/DEIMv2-l-68.pth", map_location="cpu")
