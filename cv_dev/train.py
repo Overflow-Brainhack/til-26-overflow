@@ -1,4 +1,11 @@
-from cv_dev.consts import DATA_PATH, TRAIN_OUTPUT, DATASETS_PATH, NUM_CATEGORIES
+from cv_dev.consts import (
+    DATA_PATH,
+    TRAIN_OUTPUT,
+    DATASETS_PATH,
+    NUM_CATEGORIES,
+    SYNTHETIC_DATA_PATH,
+    DEIMV2_DATA_PATH,
+)
 from cv_dev.make_dataset import load_dataset, ImageDataset
 from transformers import (
     DetrForObjectDetection,
@@ -10,8 +17,13 @@ from torchvision.transforms.functional import normalize
 
 from ultralytics import YOLO, RTDETR
 from ultralytics.models.rtdetr.train import RTDETRTrainer
+from pathlib import Path
 
 import os
+import subprocess
+import re
+import yaml
+
 import torch
 
 os.environ["WANDB_DISABLED"] = "true"
@@ -19,6 +31,7 @@ os.environ["WANDB_DISABLED"] = "true"
 torch.set_float32_matmul_precision("medium")
 
 DATA_YAML = str(DATA_PATH / "data.yaml")
+SYNTHETIC_DATA_YAML = str(SYNTHETIC_DATA_PATH / "data.yaml")
 
 
 def train_yolov11(n_epochs: int):
@@ -79,21 +92,22 @@ def train_yolov26(n_epochs: int):
     )
 
 
-def train_rtdetr(n_epochs: int):
+def train_rtdetr(
+    model: Path, n_epochs: int, resume: bool = False, name: str = "rtdetr-x-finetuned"
+):
     args = dict(
-        # model=TRAIN_OUTPUT / "rtdetr-x-finetuned" / "weights" / "last.pt",
-        model="rtdetr-x.pt",
+        model=model,
         data=DATA_YAML,
         epochs=n_epochs,
         batch=2,
         project=str(TRAIN_OUTPUT),
-        name="rtdetr-x-finetuned",
+        name=name,
         save_period=5,
         device=0,
         workers=0,
         imgsz=1280,
         rect=True,
-        resume=True,
+        resume=resume,
     )
     trainer: RTDETRTrainer = RTDETRTrainer(overrides=args)
     trainer.train()
@@ -193,8 +207,136 @@ def train_detr_hf(n_epochs: int):
     trainer.save_model(output_dir)
 
 
+def train_rtdetr_synth(
+    model: Path,
+    n_epochs: int,
+    resume: bool = False,
+    name: str = "rtdetr-x-finetuned-synth",
+):
+    args = dict(
+        # training from rtdetr-x-40
+        model=str(model),
+        data=SYNTHETIC_DATA_YAML,
+        epochs=n_epochs,
+        batch=2,
+        project=str(TRAIN_OUTPUT),
+        name=name,
+        save_period=5,
+        device=0,
+        workers=0,
+        imgsz=1280,
+        rect=True,
+        resume=resume,
+    )
+    trainer: RTDETRTrainer = RTDETRTrainer(overrides=args)
+    trainer.train()
+
+
+def train_deimv2(
+    deimv2_repo: Path,
+    resume: bool = False,
+) -> None:
+    """
+    Fine-tune DEIMv2-L (DINOv3 backbone) on our 18-class dataset.
+
+    Requires the DEIMv2 repo cloned locally:
+        git clone https://github.com/Intellindust-AI-Lab/DEIMv2 <deimv2_repo>
+        pip install -r <deimv2_repo>/requirements.txt
+
+    Args:
+        deimv2_repo: path to the cloned DEIMv2 directory
+        resume: resume from the latest checkpoint in the output dir
+    """
+
+    train_img_dir = DEIMV2_DATA_PATH / "train"
+    train_json = DEIMV2_DATA_PATH / "train.json"
+    val_img_dir = DEIMV2_DATA_PATH / "val"
+    val_json = DEIMV2_DATA_PATH / "val.json"
+
+    # Write our dataset config into the DEIMv2 repo's configs/dataset/
+    dataset_cfg = {
+        "task": "detection",
+        "evaluator": {"type": "CocoEvaluator", "iou_types": ["bbox"]},
+        "num_classes": NUM_CATEGORIES,
+        "remap_mscoco_category": False,
+        "train_dataloader": {
+            "type": "DataLoader",
+            "dataset": {
+                "type": "CocoDetection",
+                "img_folder": str(train_img_dir.resolve()),
+                "ann_file": str(train_json.resolve()),
+                "return_masks": False,
+                "transforms": {"type": "Compose", "ops": None},
+            },
+            "shuffle": True,
+            "num_workers": 4,
+            "drop_last": True,
+            "collate_fn": {"type": "BatchImageCollateFunction"},
+        },
+        "val_dataloader": {
+            "type": "DataLoader",
+            "dataset": {
+                "type": "CocoDetection",
+                "img_folder": str(val_img_dir.resolve()),
+                "ann_file": str(val_json.resolve()),
+                "return_masks": False,
+                "transforms": {"type": "Compose", "ops": None},
+            },
+            "shuffle": False,
+            "num_workers": 4,
+            "drop_last": False,
+            "collate_fn": {"type": "BatchImageCollateFunction"},
+        },
+    }
+    dataset_cfg_path = deimv2_repo / "configs" / "dataset" / "til26.yml"
+    with open(dataset_cfg_path, "w") as f:
+        yaml.dump(
+            dataset_cfg,
+            f,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+        )
+
+    # Patch the L model config: swap dataset include + fix num_classes
+    model_cfg_src = deimv2_repo / "configs" / "deimv2" / "deimv2_dinov3_l_coco.yml"
+    model_cfg_text = model_cfg_src.read_text()
+    model_cfg_text = re.sub(r"dataset/\S+\.yml", "dataset/til26.yml", model_cfg_text)
+    model_cfg_text = re.sub(
+        r"num_classes:\s*\d+", f"num_classes: {NUM_CATEGORIES}", model_cfg_text
+    )
+
+    our_cfg_path = deimv2_repo / "configs" / "deimv2" / "deimv2_dinov3_l_til26.yml"
+    our_cfg_path.write_text(model_cfg_text)
+
+    cmd = [
+        "torchrun",
+        "--master_port=7777",
+        f"--nproc_per_node=1",
+        "train.py",
+        "-c",
+        str(our_cfg_path.relative_to(deimv2_repo)),
+        "-t",
+        "Intellindust/DEIMv2_DINOv3_L_COCO",
+        "--use-amp",
+        "--seed=0",
+    ]
+
+    if resume:
+        output_dir = deimv2_repo / "outputs" / "deimv2_dinov3_l_til26"
+        checkpoints = sorted(
+            output_dir.glob("checkpoint*.pth"), key=lambda p: p.stat().st_mtime
+        )
+        if checkpoints:
+            cmd += ["--resume", str(checkpoints[-1])]
+
+    subprocess.run(cmd, cwd=str(deimv2_repo), check=True)
+
+
 if __name__ == "__main__":
-    # train_yolov11(50)
-    train_yolov26(50)
-    # train_rtdetr(50)
-    # train_detr_hf(50)
+    train_rtdetr_synth(TRAIN_OUTPUT / "rtdetr-x-finetuned/weights/epoch30.pt", 50)
+    train_rtdetr(
+        TRAIN_OUTPUT / "rtdetr-l-finetuned/weights/last.pt",
+        40,
+        name="rtdetr-l-finetuned",
+    )

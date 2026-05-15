@@ -25,8 +25,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copies your source files.
-COPY src .
+COPY DEIMv2/ DEIMv2/
 COPY models/ models/
+COPY src .
 
 # Starts your model server.
 CMD uvicorn cv_server:app --port 5002 --host 0.0.0.0
