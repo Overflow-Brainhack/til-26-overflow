@@ -153,6 +153,13 @@ def _run_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> None:
     All agents in a game use the same type so competition strength is equal.
     Scores are averaged across all 6 agents per round (they're all the same type).
     """
+    if novice:
+        print(
+            "\n[WARNING] Novice mode uses a hardcoded env seed — all rounds play the\n"
+            "  same fixed map with the same starting positions. Deterministic agents\n"
+            "  (normal, berserker) will produce identical scores every round (stdev≈0).\n"
+            "  Only random varies. Use --advanced for statistically independent rounds."
+        )
     results: dict[str, list[float]] = {}
 
     for agent_type in AGENT_TYPES:
@@ -222,6 +229,130 @@ def _run_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> None:
 
         best_max_type = max(results, key=lambda t: max(results[t]) if results[t] else float("-inf"))
         print(f"  Best single-round score: [{best_max_type}] ({max(results[best_max_type]):.2f})")
+
+
+def _run_matchup_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> None:
+    """Headless cross-type matchup: for every (focus, opponent) pair run *rounds* rounds.
+
+    agent_0 uses `focus` type; agents 1-5 use `opponent` type. Tracks the focus
+    agent's score and the opponents' mean score separately, then prints a matrix.
+
+    In novice mode the env seed is hardcoded, so all rounds share the same map and
+    starting positions. Deterministic agents (normal, berserker) produce identical
+    scores every round (stdev=0 in the matrix). Only random actually varies.
+    Use --advanced for statistically independent rounds.
+
+    Usage:
+        python ae/test_env/auto_play.py --benchmark-matchup --rounds 20
+        python ae/test_env/auto_play.py --benchmark-matchup --rounds 20 --advanced
+    """
+    if novice:
+        print(
+            "\n[WARNING] Novice mode uses a hardcoded env seed — all rounds play the\n"
+            "  same fixed map. Deterministic agents will show stdev=0 in the matrix.\n"
+            "  Use --advanced for independent rounds across different maps."
+        )
+    # matchups[(focus, opp)] = {"focus": [scores…], "opp": [mean scores…]}
+    matchups: dict[tuple[str, str], dict[str, list[float]]] = {}
+
+    for focus_type in AGENT_TYPES:
+        for opp_type in AGENT_TYPES:
+            key = (focus_type, opp_type)
+            matchups[key] = {"focus": [], "opp": []}
+
+            print(
+                f"\nMatchup: 1×[{focus_type}] vs 5×[{opp_type}]"
+                f" — {rounds} rounds …",
+                flush=True,
+            )
+
+            cfg = default_config()
+            cfg.env.novice = novice
+            env = Bomberman(cfg)
+            seed = random.randint(0, 99999)
+            env.reset(seed=seed)
+
+            n_agents = len(env.possible_agents)
+            type_list = [focus_type] + [opp_type] * (n_agents - 1)
+            factories = _make_factories(env.possible_agents, type_list, policy_kwargs)
+            managers, cache_tmpl = _build_managers(env, factories, None)
+
+            focus_agent = env.possible_agents[0]
+            opp_agents = env.possible_agents[1:]
+
+            for round_idx in range(rounds):
+                while True:
+                    agent = env.agent_selection
+                    if env.terminations[agent] or env.truncations[agent]:
+                        env.step(None)
+                        if all(env.terminations.values()) or all(env.truncations.values()):
+                            break
+                        continue
+                    obs = env.observe(agent)
+                    action = managers[agent].ae(obs)
+                    env.step(int(action))
+
+                episode = getattr(env.dynamics.rewards, "_episode", {})
+                focus_score = float(episode.get(focus_agent, 0.0))
+                opp_scores = [float(episode.get(a, 0.0)) for a in opp_agents]
+                opp_mean = mean(opp_scores)
+                matchups[key]["focus"].append(focus_score)
+                matchups[key]["opp"].append(opp_mean)
+                print(
+                    f"  round {round_idx + 1:3d}"
+                    f"  focus={focus_score:7.1f}"
+                    f"  opp_avg={opp_mean:7.1f}",
+                    flush=True,
+                )
+
+                if round_idx < rounds - 1:
+                    seed = random.randint(0, 99999)
+                    env.reset(seed=seed)
+                    _reset_managers(managers, cache_tmpl)
+
+            env.close()
+
+    # ── results matrix ──────────────────────────────────────────────────────
+    # Each cell: "mean±std". stdev=0 means all rounds were identical (fixed seed).
+    def _cell(scores: list[float]) -> str:
+        if not scores:
+            return "  N/A"
+        m = mean(scores)
+        s = stdev(scores) if len(scores) > 1 else 0.0
+        return f"{m:6.1f}±{s:4.1f}"
+
+    col_w = 14
+    sep = "─" * (16 + col_w * len(AGENT_TYPES))
+    print(f"\n{'═' * len(sep)}")
+    print("MATCHUP RESULTS  — focus-agent score  mean±std  (row=focus, col=opponents)")
+    print("  stdev=0 means every round was identical (fixed novice seed).")
+    print(f"  {'':14s}" + "".join(f"{t:>{col_w}s}" for t in AGENT_TYPES))
+    print(sep)
+    for focus_type in AGENT_TYPES:
+        row = f"  {focus_type:<14s}"
+        for opp_type in AGENT_TYPES:
+            row += f"{_cell(matchups[(focus_type, opp_type)]['focus']):>{col_w}s}"
+        print(row)
+    print(sep)
+    print("  OPPONENT mean score (same layout)")
+    print(f"  {'':14s}" + "".join(f"{t:>{col_w}s}" for t in AGENT_TYPES))
+    print(sep)
+    for focus_type in AGENT_TYPES:
+        row = f"  {focus_type:<14s}"
+        for opp_type in AGENT_TYPES:
+            row += f"{_cell(matchups[(focus_type, opp_type)]['opp']):>{col_w}s}"
+        print(row)
+    print("═" * len(sep))
+
+    # Best performer by mean focus score (off-diagonal: hardest matchup excluded).
+    best = max(
+        ((f, o) for f in AGENT_TYPES for o in AGENT_TYPES if f != o),
+        key=lambda k: mean(matchups[k]["focus"]) if matchups[k]["focus"] else float("-inf"),
+    )
+    print(
+        f"\n  Best cross-type matchup: [{best[0]}] vs [{best[1]}]"
+        f"  (focus mean={mean(matchups[best]['focus']):.2f})"
+    )
 
 
 # ── analysis / history types ────────────────────────────────────────────────
@@ -413,6 +544,15 @@ def main() -> None:
             "then print a score comparison table. No window is opened."
         ),
     )
+    parser.add_argument(
+        "--benchmark-matchup",
+        action="store_true",
+        help=(
+            "Headless: run every (focus, opponent) type pair for --rounds rounds. "
+            "agent_0 uses the focus type; agents 1-5 use the opponent type. "
+            "Prints a results matrix. No window is opened."
+        ),
+    )
 
     # ── heuristic (normal) policy toggles ────────────────────────────────────
     parser.add_argument("--predictive-bomb", dest="predictive_bomb",
@@ -522,6 +662,10 @@ def main() -> None:
     # ── benchmark mode (headless) ─────────────────────────────────────────────
     if args.benchmark:
         _run_benchmark(args.rounds, args.novice, policy_kwargs)
+        return
+
+    if args.benchmark_matchup:
+        _run_matchup_benchmark(args.rounds, args.novice, policy_kwargs)
         return
 
     # ── visual mode ───────────────────────────────────────────────────────────
