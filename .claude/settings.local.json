@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3)"
+      "Bash(python3)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\zedon\\\\Documents\\\\GitHub\\\\til-26-overflow\\\\ae\\\\src\\\\\" -File | Select-Object FullName)"
     ]
   }
 }
