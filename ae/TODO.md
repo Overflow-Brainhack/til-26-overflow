@@ -4,16 +4,6 @@ Items the heuristic agent v1 deliberately does NOT do. Listed roughly in
 priority order; each note explains why it was skipped and the rough cost
 of adding it.
 
-## High value
-
-- **Temporal danger-aware pathfinding.** `pathfinding` currently filters
-  `danger_now` (tick-0 blast cells) from the edge cost, but does not
-  project forward: if a bomb detonates in 3 ticks and our planned path
-  reaches that cell in 2 ticks, we walk into the explosion. Fix: thread
-  the full danger timeline (`project_danger()` output) into the Dijkstra
-  edge cost as a function of accumulated step cost, rejecting edges whose
-  arrival tick falls within any projected blast window.
-
 ## Medium value
 
 - **Action mask isn't fed into BFS.** `pathfinding` uses
@@ -76,6 +66,21 @@ of adding it.
   our base from outside our agent's viewcone).
 
 ## Resolved
+
+- ~~Temporal danger-aware pathfinding~~ — implemented as `temporal_first_action_to`
+  in `pathfinding.py`. The function is a drop-in variant of `first_action_to` that
+  takes the full `project_danger()` timeline and, at each Dijkstra expansion, checks
+  whether `next_pos in danger_timeline[arrival_tick]` where `arrival_tick =
+  round(accumulated_cost + step_cost)`. Since every action costs 1 game tick,
+  accumulated cost equals the tick offset at which the agent reaches a cell.
+  Blocked: moving into a cell at the exact tick a bomb fires there.
+  Allowed: passing through a cell at tick 1 when the bomb fires at tick 3; entering
+  a cell at tick 4 that was blasted at tick 2 (already cleared). Turn actions
+  (LEFT/RIGHT) keep `next_pos == pos` so staying in a cell that becomes dangerous
+  at `cost+1` is also correctly rejected. `_dodge` in `policy.py` now uses
+  `temporal_first_action_to` with the raw edge cost (no wall breaking) and drops
+  the previous `immediate` filter and `dodge_cost` closure, which only blocked
+  tick-0/1 cells and missed all later-tick blast paths.
 
 - ~~Proactive enemy base routing~~ — implemented as `proactive_base_routing=True`
   (opt-in, default OFF) on `HeuristicPolicy`. When enabled, known enemy base

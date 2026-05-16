@@ -98,6 +98,62 @@ def first_action_to(
     return None
 
 
+def temporal_first_action_to(
+    start: tuple[int, int],
+    facing: int,
+    goals: set[tuple[int, int]],
+    edge_cost: EdgeCost,
+    danger_timeline: dict[int, set[tuple[int, int]]],
+    *,
+    turn_cost: float = 1.0,
+    max_cost: float = 200.0,
+) -> Optional[Action]:
+    """Like first_action_to, but rejects edges whose arrival tick is in danger_timeline.
+
+    Each action costs 1 game tick, so accumulated Dijkstra cost equals the tick
+    offset from now at which the agent occupies a cell.  An edge to next_pos is
+    blocked when next_pos in danger_timeline.get(arrival_tick, ()).
+
+    This handles time-displaced blasts correctly: a cell passed through at tick 1
+    is safe even if danger_timeline[3] contains it; a cell entered at tick 3 when
+    danger_timeline[3] contains it is blocked even though it is passable at tick 0.
+    Turn actions (LEFT/RIGHT) keep next_pos == pos, so staying in a cell that becomes
+    dangerous at cost+1 is also correctly rejected.
+    """
+    if start in goals:
+        return Action.STAY
+
+    counter = 0
+    heap: list[tuple[float, int, tuple[int, int], int, Optional[Action]]] = [
+        (0.0, counter, start, facing, None)
+    ]
+    seen: dict[tuple[tuple[int, int], int], float] = {(start, facing): 0.0}
+
+    while heap:
+        cost, _, pos, dirn, first = heapq.heappop(heap)
+        if cost > max_cost:
+            continue
+        if pos in goals:
+            return first
+        if cost > seen.get((pos, dirn), float("inf")):
+            continue
+        for action, next_pos, next_dir, step_cost in _expand(pos, dirn, edge_cost, turn_cost):
+            arrival = cost + step_cost
+            arrival_tick = int(round(arrival))
+            if next_pos in danger_timeline.get(arrival_tick, ()):
+                continue
+            new_cost = arrival
+            if new_cost > max_cost:
+                continue
+            state = (next_pos, next_dir)
+            if new_cost < seen.get(state, float("inf")):
+                seen[state] = new_cost
+                chosen_first = first if first is not None else action
+                counter += 1
+                heapq.heappush(heap, (new_cost, counter, next_pos, next_dir, chosen_first))
+    return None
+
+
 def reachable_cells(
     start: tuple[int, int],
     facing: int,
