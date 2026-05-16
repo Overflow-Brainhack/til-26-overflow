@@ -1,10 +1,10 @@
 """Manages the CV model."""
 
-from ultralytics import RTDETR, YOLO
 from typing import Any
 from io import BytesIO
-from PIL import Image
+from PIL import Image, ImageFilter
 
+import random
 import torch
 import torch.nn as nn
 from torchvision import transforms
@@ -87,32 +87,35 @@ deimv2_l_config = {
 }
 
 
-class CVManager:
+class DeimManager:
     def __init__(self):
-        # self.model = RTDETR("models/rtdetr-l-70.pt") best
-        # self.model = RTDETR("models/rtdetr-x-43.pt")
-        self.model = RTDETR("models/rtdetr-l-t30.pt")
+        self.model = DEIMv2(deimv2_l_config)
+        state_dict = torch.load("models/DEIMv2-l-68.pth", map_location="cpu")
+        if "model" in state_dict:
+            state_dict = state_dict["model"]
+        self.model.load_state_dict(state_dict, strict=True)
+        self.model.to("cuda")
 
-        # self.model = DEIMv2(deimv2_l_config)
-        # state_dict = torch.load("models/DEIMv2-l-68.pth", map_location="cpu")
-        # if "model" in state_dict:
-        #     state_dict = state_dict["model"]
-        # self.model.load_state_dict(state_dict, strict=True)
-        # self.model.to("cuda")
+    def _preprocess(self, image: bytes) -> bytes:
+        """Strip adversarial perturbations: resize jitter, median filter, bit-depth reduction, JPEG recompression."""
+        im = Image.open(BytesIO(image)).convert("RGB")
+        W, H = im.size
 
-    def run_ultralytics(self, image: bytes) -> list[dict[str, Any]]:
-        im = Image.open(BytesIO(image))
-        results = self.model(im, verbose=False, imgsz=1280, rect=True)
-        preds = []
-        for box in results[0].boxes:
-            x1, y1, x2, y2 = box.xyxy[0]
-            preds.append(
-                {
-                    "category_id": int(box.cls[0]),
-                    "bbox": [float(x1), float(y1), float(x2 - x1), float(y2 - y1)],
-                }
-            )
-        return preds
+        # Random resize: bilinear interpolation destroys adversarial pixel-grid alignment
+        scale = random.uniform(0.9, 1.0)
+        im = im.resize((int(W * scale), int(H * scale)), Image.BILINEAR)
+        im = im.resize((W, H), Image.BILINEAR)
+
+        # Median filter: removes structured/salt-and-pepper adversarial noise
+        im = im.filter(ImageFilter.MedianFilter(size=3))
+
+        # Bit-depth reduction to 6 bits: destroys perturbations with amplitude < 4px
+        im = im.point(lambda x: (x >> 2) << 2)
+
+        # JPEG recompression: kills high-frequency residuals
+        buf = BytesIO()
+        im.save(buf, format="JPEG", quality=80)
+        return buf.getvalue()
 
     def run_deim(self, image: bytes) -> list[dict[str, Any]]:
         im = Image.open(BytesIO(image)).convert("RGB")
@@ -172,8 +175,5 @@ class CVManager:
 
     def cv(self, image: bytes) -> list[dict[str, Any]]:
         """Performs object detection on an image."""
-        if isinstance(self.model, RTDETR) or isinstance(self.model, YOLO):
-            return self.run_ultralytics(image)
-        elif isinstance(self.model, DEIMv2):
-            return self.run_deim(image)
-        return []
+        image = self._preprocess(image)
+        return self.run_deim(image)

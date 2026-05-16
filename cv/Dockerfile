@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y \
     libxrender1 \
     libxext6 \
     libgl1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Installs your dependencies.
@@ -25,7 +26,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copies your source files.
-COPY DEIMv2/ DEIMv2/
+# COPY DEIMv2/ DEIMv2/
 COPY models/ models/
 COPY src .
 

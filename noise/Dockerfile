@@ -18,6 +18,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copies your source files.
+COPY object_bank/ object_bank/
 COPY src .
 
 # Starts your model server.

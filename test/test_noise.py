@@ -26,7 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 4
+BATCH_SIZE = 1
 
 load_dotenv()
 TEAM_NAME = os.getenv("TEAM_NAME")
@@ -115,8 +115,8 @@ def score_noise(
 
 
 def main():
-    data_dir = Path(f"/home/jupyter/{TEAM_TRACK}/cv")
-    results_dir = Path(f"/home/jupyter/{TEAM_NAME}")
+    data_dir = Path(f"data/cv")
+    results_dir = Path(f"results/noise")
     results_dir.mkdir(parents=True, exist_ok=True)
 
     # load images

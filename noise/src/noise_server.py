@@ -3,11 +3,11 @@
 # Unless you want to do something special with the server, you shouldn't need
 # to change anything in this file.
 
-
 import base64
 
 from fastapi import FastAPI, Request
 from noise_manager import NoiseManager
+
 
 app = FastAPI()
 manager = NoiseManager()
@@ -31,7 +31,6 @@ async def noise(request: Request) -> dict[str, list[str]]:
 
     predictions = []
     for instance in inputs_json["instances"]:
-
         # Reads the base-64 encoded image and decodes it into bytes.
         image_bytes = base64.b64decode(instance["b64"])
 
