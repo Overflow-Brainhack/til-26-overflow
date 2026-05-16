@@ -1,17 +1,28 @@
-"""Auto-play visualization for the heuristic AE agent.
+"""Auto-play and benchmark for multiple AE agent types.
 
-Adapted from til-26-ae/play.py. Every agent in the round is controlled by
-its own HeuristicPolicy + isolated MapMemory, so you can watch the bots
-play each other.
+Agent types
+-----------
+  normal    — HeuristicPolicy (balanced: dodge, attack, defend, collect, explore)
+  berserker — BerserkerPolicy (rush enemy bases, ignore self-preservation)
+  random    — RandomPolicy (uniform sample over legal actions)
 
-Usage (from repo root, with the dev environment active):
+Visual mode (default):
     python ae/test_env/auto_play.py
+    python ae/test_env/auto_play.py --agent-type berserker
+    python ae/test_env/auto_play.py --agent-types berserker normal normal normal normal normal
     python ae/test_env/auto_play.py --rounds 3 --seed 42 --fps 4
+
+Headless benchmark (compare all three types, no window):
+    python ae/test_env/auto_play.py --benchmark --rounds 30
+    python ae/test_env/auto_play.py --benchmark --rounds 50 --novice
 
 Keys during play:
     Q / ESC   quit
     R         reset to a new round
     T         toggle the tile-respawn-timer overlay
+    SPACE     pause / resume
+    ←→        step through history when paused
+    A         toggle analysis overlay
 """
 
 from __future__ import annotations
@@ -22,6 +33,7 @@ import sys
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+from statistics import mean, stdev
 from typing import Optional
 
 import pygame
@@ -36,19 +48,56 @@ from til_environment.bomberman_env import Bomberman  # noqa: E402
 from til_environment.config import default_config, load_config  # noqa: E402
 
 from ae_manager import DEFAULT_CACHE_PATH, DEFAULT_POLICY_KWARGS, AEManager  # noqa: E402
-from constants import GRID_SIZE  # noqa: E402
+from berserker_policy import BerserkerPolicy  # noqa: E402
+from constants import Action, GRID_SIZE  # noqa: E402
 from map_memory import MapMemory  # noqa: E402
-from policy import HeuristicPolicy  # noqa: E402
+from observation import ParsedObs  # noqa: E402
+from policy import HeuristicPolicy, Policy  # noqa: E402
+
+
+AGENT_TYPES = ("normal", "berserker", "random")
+
+
+class RandomPolicy(Policy):
+    """Picks uniformly at random from legal actions each tick."""
+
+    def choose(self, obs: ParsedObs, memory: MapMemory) -> int:  # noqa: ARG002
+        valid = [i for i in range(len(obs.action_mask)) if obs.action_mask[i]]
+        return int(random.choice(valid)) if valid else int(Action.STAY)
+
+
+def _make_policy(agent_type: str, policy_kwargs: dict) -> Policy:
+    if agent_type == "berserker":
+        return BerserkerPolicy()
+    if agent_type == "random":
+        return RandomPolicy()
+    return HeuristicPolicy(**policy_kwargs)
+
+
+def _make_factories(
+    agents: list[str],
+    types: list[str],
+    policy_kwargs: dict,
+) -> dict[str, callable]:
+    """Return a per-agent-id dict of zero-arg callables that produce a Policy."""
+    out: dict[str, callable] = {}
+    for agent, t in zip(agents, types):
+        t_ = t  # capture loop variable
+        out[agent] = lambda t=t_: _make_policy(t, policy_kwargs)
+    return out
 
 
 def _build_managers(
     env: Bomberman,
-    policy_factory,
-    cache_path,
-) -> dict[str, AEManager]:
-    """One AEManager per agent. Each bot has an isolated MapMemory; if a
-    cache_path is provided and exists, every bot pre-loads it (so round 1
-    starts with full map knowledge)."""
+    per_agent_factories: dict[str, callable],
+    cache_path: Optional[Path],
+) -> tuple[dict[str, AEManager], MapMemory | None]:
+    """One AEManager per agent, each with an isolated MapMemory.
+
+    Returns (managers, cached_template) so callers can pass the template to
+    _reset_managers and restore static knowledge (base positions, walls) that
+    may have been mutated during a round.
+    """
     cached_template: MapMemory | None = None
     if cache_path is not None and cache_path.exists():
         cached_template = MapMemory.load(cache_path)
@@ -58,21 +107,32 @@ def _build_managers(
         mem = MapMemory()
         if cached_template is not None:
             mem.merge_static_from(cached_template)
-        out[agent] = AEManager(policy=policy_factory(), memory=mem)
-    return out
+        out[agent] = AEManager(policy=per_agent_factories[agent](), memory=mem)
+    return out, cached_template
 
 
-def _reset_managers(managers: dict[str, AEManager]) -> None:
+def _reset_managers(
+    managers: dict[str, AEManager],
+    cached_template: MapMemory | None = None,
+) -> None:
+    """Reset per-round dynamic state and restore static knowledge from cache.
+
+    Without the restore step, base positions that were discarded when the agent
+    observed a destroyed base (ENEMY_BASE=0) stay missing in subsequent rounds,
+    even though the bases respawn. The production server avoids this by
+    recreating AEManager (and thus re-loading the cache) on every /reset.
+    """
     for mgr in managers.values():
         mgr._memory.reset_round()
+        if cached_template is not None:
+            mgr._memory.merge_static_from(cached_template)
 
 
-def _print_round_summary(env: Bomberman, round_idx: int) -> None:
-    """Cumulative per-agent reward for the round.
-
-    `env.rewards` is the *step* reward dict, which resets after termination.
-    `env.dynamics.rewards._episode` is the cumulative reward we actually want.
-    """
+def _print_round_summary(
+    env: Bomberman,
+    round_idx: int,
+    agent_types: dict[str, str],
+) -> None:
     episode = getattr(env.dynamics.rewards, "_episode", {})
     print(f"\n── round {round_idx} over ──")
     rewards = sorted(
@@ -81,12 +141,92 @@ def _print_round_summary(env: Bomberman, round_idx: int) -> None:
         reverse=True,
     )
     for a, r in rewards:
-        print(f"  {a}  reward={r:.2f}")
+        t = agent_types.get(a, "normal")
+        print(f"  {a}  [{t:9s}]  reward={r:.2f}")
+
+
+# ── headless benchmark ──────────────────────────────────────────────────────
+
+def _run_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> None:
+    """Headless comparison: run each type for *rounds* rounds, then print table.
+
+    All agents in a game use the same type so competition strength is equal.
+    Scores are averaged across all 6 agents per round (they're all the same type).
+    """
+    results: dict[str, list[float]] = {}
+
+    for agent_type in AGENT_TYPES:
+        print(f"\nBenchmarking [{agent_type}] — {rounds} rounds …", flush=True)
+        cfg = default_config()
+        cfg.env.novice = novice
+
+        env = Bomberman(cfg)
+        seed = random.randint(0, 99999)
+        env.reset(seed=seed)
+
+        n_agents = len(env.possible_agents)
+        factories = _make_factories(
+            env.possible_agents,
+            [agent_type] * n_agents,
+            policy_kwargs,
+        )
+        managers, cache_tmpl = _build_managers(env, factories, None)
+
+        round_scores: list[float] = []
+        for round_idx in range(rounds):
+            # Run one round.
+            while True:
+                agent = env.agent_selection
+                if env.terminations[agent] or env.truncations[agent]:
+                    env.step(None)
+                    if all(env.terminations.values()) or all(env.truncations.values()):
+                        break
+                    continue
+                obs = env.observe(agent)
+                action = managers[agent].ae(obs)
+                env.step(int(action))
+
+            episode = getattr(env.dynamics.rewards, "_episode", {})
+            per_agent = [float(episode.get(a, 0.0)) for a in env.possible_agents]
+            avg = mean(per_agent)
+            best = max(per_agent)
+            round_scores.append(avg)
+            print(f"  round {round_idx + 1:3d}  avg={avg:7.1f}  max={best:7.1f}", flush=True)
+
+            if round_idx < rounds - 1:
+                seed = random.randint(0, 99999)
+                env.reset(seed=seed)
+                _reset_managers(managers, cache_tmpl)
+
+        results[agent_type] = round_scores
+        env.close()
+
+    # ── comparison table ────────────────────────────────────────────────────
+    width = 62
+    print("\n" + "═" * width)
+    print(f"  {'TYPE':10s}  {'MEAN':>8s}  {'MAX':>8s}  {'MIN':>8s}  {'STD':>8s}")
+    print("─" * width)
+    for agent_type, scores in results.items():
+        if not scores:
+            continue
+        s_mean = mean(scores)
+        s_max  = max(scores)
+        s_min  = min(scores)
+        s_std  = stdev(scores) if len(scores) > 1 else 0.0
+        print(f"  {agent_type:10s}  {s_mean:8.2f}  {s_max:8.2f}  {s_min:8.2f}  {s_std:8.2f}")
+    print("═" * width)
+
+    if results:
+        best_type = max(results, key=lambda t: mean(results[t]) if results[t] else float("-inf"))
+        print(f"\n  Best by mean score: [{best_type}]")
+
+        best_max_type = max(results, key=lambda t: max(results[t]) if results[t] else float("-inf"))
+        print(f"  Best single-round score: [{best_max_type}] ({max(results[best_max_type]):.2f})")
 
 
 # ── analysis / history types ────────────────────────────────────────────────
 
-HISTORY_MAXLEN = 300  # max render frames kept for rewind (~2-3 rounds at 4 fps)
+HISTORY_MAXLEN = 300
 
 _MODE_COLORS: dict[str, tuple[int, int, int]] = {
     "frozen":  (150, 150, 255),
@@ -98,12 +238,19 @@ _MODE_COLORS: dict[str, tuple[int, int, int]] = {
     "stay":    (160, 160, 160),
 }
 
+_TYPE_COLORS: dict[str, tuple[int, int, int]] = {
+    "normal":    (100, 200, 255),
+    "berserker": (255,  80,  80),
+    "random":    (200, 200,  80),
+}
+
 
 @dataclass
 class AgentDebugInfo:
     mode: str
     target: Optional[tuple[int, int]]
     pos: tuple[int, int]
+    policy_type: str = "normal"
 
 
 @dataclass
@@ -123,7 +270,10 @@ def _world_to_screen(
             offset_y + pos[1] * tile_h + tile_h // 2)
 
 
-def _collect_debug_info(managers: dict[str, AEManager]) -> dict[str, AgentDebugInfo]:
+def _collect_debug_info(
+    managers: dict[str, AEManager],
+    agent_type_map: dict[str, str],
+) -> dict[str, AgentDebugInfo]:
     out: dict[str, AgentDebugInfo] = {}
     for agent_id, mgr in managers.items():
         pol = mgr._policy
@@ -131,6 +281,7 @@ def _collect_debug_info(managers: dict[str, AEManager]) -> dict[str, AgentDebugI
             mode=getattr(pol, "_debug_mode", "stay"),
             target=getattr(pol, "_debug_target", None),
             pos=getattr(pol, "_debug_pos", (0, 0)),
+            policy_type=agent_type_map.get(agent_id, "normal"),
         )
     return out
 
@@ -143,6 +294,7 @@ def _draw_agent_panel(
 ) -> None:
     lines = [
         f"Agent:  {agent_id}",
+        f"Type:   {info.policy_type}",
         f"Mode:   {info.mode}",
         f"Pos:    {info.pos}",
         f"Target: {info.target if info.target is not None else 'none'}",
@@ -160,9 +312,10 @@ def _draw_agent_panel(
     surface.blit(bg, (sx, sy))
     pygame.draw.rect(surface, (180, 180, 180), (sx, sy, panel_w, panel_h), 1)
 
+    type_color = _TYPE_COLORS.get(info.policy_type, (255, 255, 255))
     mode_color = _MODE_COLORS.get(info.mode, (255, 255, 255))
-    for i, ln in enumerate(lines):
-        color = mode_color if i == 1 else (220, 220, 220)
+    colors = [(220, 220, 220), type_color, mode_color, (220, 220, 220), (220, 220, 220)]
+    for i, (ln, color) in enumerate(zip(lines, colors)):
         txt = font.render(ln, True, color)
         surface.blit(txt, (sx + pad, sy + pad + i * line_h))
 
@@ -177,18 +330,19 @@ def _draw_analysis_overlay(
     selected_agent: Optional[str],
     font: pygame.font.Font,
 ) -> None:
-    for agent_id, info in frame.agent_info.items():
-        color = _MODE_COLORS.get(info.mode, (255, 255, 255))
+    for _, info in frame.agent_info.items():
+        mode_color = _MODE_COLORS.get(info.mode, (255, 255, 255))
+        type_color = _TYPE_COLORS.get(info.policy_type, (255, 255, 255))
         ax, ay = _world_to_screen(info.pos, tile_w, tile_h, offset_x, offset_y)
 
         if info.target is not None:
             tx, ty = _world_to_screen(info.target, tile_w, tile_h, offset_x, offset_y)
-            pygame.draw.line(surface, color, (ax, ay), (tx, ty), 2)
-            pygame.draw.circle(surface, color, (tx, ty), 4, 2)
+            pygame.draw.line(surface, mode_color, (ax, ay), (tx, ty), 2)
+            pygame.draw.circle(surface, mode_color, (tx, ty), 4, 2)
 
         label = info.mode[:3].upper()
         shadow = font.render(label, True, (0, 0, 0))
-        text = font.render(label, True, color)
+        text = font.render(label, True, type_color)
         lx = ax - text.get_width() // 2
         ly = ay - tile_h // 2 - text.get_height() - 2
         surface.blit(shadow, (lx + 1, ly + 1))
@@ -213,139 +367,164 @@ def _draw_pause_hud(
     surface.blit(txt, (sx + 7, 10))
 
 
-_P = DEFAULT_POLICY_KWARGS  # short alias for argparse default= expressions below
+_P = DEFAULT_POLICY_KWARGS
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=str, default=None,
-                        help="Path to a YAML config; defaults to bomberman_config.yaml")
-    parser.add_argument("--seed", type=int, default=None,
-                        help="Initial seed (random if omitted)")
-    parser.add_argument("--rounds", type=int, default=5,
-                        help="Number of rounds to play before quitting")
-    parser.add_argument("--fps", type=int, default=None,
-                        help="Override renderer fps")
-    parser.add_argument("--novice", action="store_true", default=True,
-                        help="Use the fixed novice map (default)")
-    parser.add_argument("--advanced", dest="novice", action="store_false",
-                        help="Use a randomized advanced map")
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
 
-    # Feature toggles — defaults come from DEFAULT_POLICY_KWARGS in ae_manager.py
-    # so this script always mirrors the production container configuration.
+    # ── game / visual options ────────────────────────────────────────────────
+    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--rounds", type=int, default=5,
+                        help="Rounds to play (or benchmark rounds per type)")
+    parser.add_argument("--fps", type=int, default=None)
+    parser.add_argument("--novice", action="store_true", default=True)
+    parser.add_argument("--advanced", dest="novice", action="store_false")
+
+    # ── agent type selection ─────────────────────────────────────────────────
+    parser.add_argument(
+        "--agent-type",
+        choices=AGENT_TYPES,
+        default="normal",
+        metavar="TYPE",
+        help=f"Policy for all agents: {AGENT_TYPES} (default: normal)",
+    )
+    parser.add_argument(
+        "--agent-types",
+        nargs="+",
+        choices=AGENT_TYPES,
+        metavar="TYPE",
+        default=None,
+        help=(
+            "Per-agent types in agent_0…agent_N order. "
+            "Shorter lists are padded with --agent-type. "
+            f"Choices: {AGENT_TYPES}"
+        ),
+    )
+
+    # ── benchmark mode ───────────────────────────────────────────────────────
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help=(
+            "Headless: run each of the three agent types for --rounds rounds, "
+            "then print a score comparison table. No window is opened."
+        ),
+    )
+
+    # ── heuristic (normal) policy toggles ────────────────────────────────────
     parser.add_argument("--predictive-bomb", dest="predictive_bomb",
-                        action="store_true", default=_P["predictive_bomb"],
-                        help="Bomb when an enemy is *likely* to be in blast at detonation")
+                        action="store_true", default=_P["predictive_bomb"])
     parser.add_argument("--no-predictive-bomb", dest="predictive_bomb",
                         action="store_false")
     parser.add_argument("--bomb-threshold", type=float,
-                        default=_P["predictive_bomb_threshold"],
-                        help="Min expected enemy hits required for a predictive bomb")
+                        default=_P["predictive_bomb_threshold"])
 
     parser.add_argument("--wall-breaking", dest="wall_breaking",
-                        action="store_true", default=_P["wall_breaking"],
-                        help="Allow pathfinding to route through destructible walls")
+                        action="store_true", default=_P["wall_breaking"])
     parser.add_argument("--no-wall-breaking", dest="wall_breaking",
                         action="store_false")
-    parser.add_argument("--wall-break-cost", type=float, default=_P["wall_break_cost"],
-                        help="Extra path cost (≈ ticks lost) to break a wall")
+    parser.add_argument("--wall-break-cost", type=float, default=_P["wall_break_cost"])
     parser.add_argument("--adaptive-wall-break-cost", dest="adaptive_wall_break_cost",
-                        action="store_true", default=_P["adaptive_wall_break_cost"],
-                        help="Scale wall-break path cost down by tile value behind the wall")
+                        action="store_true", default=_P["adaptive_wall_break_cost"])
     parser.add_argument("--no-adaptive-wall-break-cost", dest="adaptive_wall_break_cost",
                         action="store_false")
 
     parser.add_argument("--smart-defend", dest="smart_defend",
-                        action="store_true", default=_P["smart_defend"],
-                        help="Coverage-based defense: navigate to the cell whose bomb blast covers "
-                             "the most attack-vector cells; expand defend radius when base health is low")
+                        action="store_true", default=_P["smart_defend"])
     parser.add_argument("--no-smart-defend", dest="smart_defend",
                         action="store_false")
     parser.add_argument("--predictive-defend", dest="predictive_defend",
-                        action="store_true", default=_P["predictive_defend"],
-                        help="Bonus-score defend positions by projecting enemies along their velocity "
-                             "toward the attack vector (requires --smart-defend)")
+                        action="store_true", default=_P["predictive_defend"])
     parser.add_argument("--no-predictive-defend", dest="predictive_defend",
                         action="store_false")
 
     parser.add_argument("--drift-aware-bomb", dest="drift_aware_bomb",
-                        action="store_true", default=_P["drift_aware_bomb"],
-                        help="Use velocity-biased enemy distribution for predictive bombing")
+                        action="store_true", default=_P["drift_aware_bomb"])
     parser.add_argument("--no-drift-aware-bomb", dest="drift_aware_bomb",
                         action="store_false")
 
     parser.add_argument("--auto-tune-bomb", dest="auto_tune_bomb",
-                        action="store_true", default=_P["auto_tune_bomb"],
-                        help="Adaptively tune the bomb threshold via EMA of observed hit rate")
+                        action="store_true", default=_P["auto_tune_bomb"])
     parser.add_argument("--no-auto-tune-bomb", dest="auto_tune_bomb",
                         action="store_false")
-    parser.add_argument("--bomb-tune-target", type=float, default=_P["bomb_tune_target"],
-                        help="Target predictive-bomb hit rate for auto-tuning")
+    parser.add_argument("--bomb-tune-target", type=float, default=_P["bomb_tune_target"])
 
     parser.add_argument("--bomb-economy", dest="bomb_economy",
-                        action="store_true", default=_P["bomb_economy"],
-                        help="Unified value scoring: only bomb when score >= bomb_reserve_threshold")
+                        action="store_true", default=_P["bomb_economy"])
     parser.add_argument("--no-bomb-economy", dest="bomb_economy",
                         action="store_false")
-    parser.add_argument("--base-bomb-value", type=float, default=_P["base_bomb_value"],
-                        help="Value of hitting an enemy base in agent-hit units")
-    parser.add_argument("--agent-bomb-value", type=float, default=_P["agent_bomb_value"],
-                        help="Value of a single definite agent hit")
+    parser.add_argument("--base-bomb-value", type=float, default=_P["base_bomb_value"])
+    parser.add_argument("--agent-bomb-value", type=float, default=_P["agent_bomb_value"])
     parser.add_argument("--bomb-reserve-threshold", type=float,
-                        default=_P["bomb_reserve_threshold"],
-                        help="Minimum score required to place a bomb under economy mode")
+                        default=_P["bomb_reserve_threshold"])
     parser.add_argument("--wall-break-tile-threshold", type=float,
-                        default=_P["wall_break_tile_threshold"],
-                        help="Min tile value behind wall to justify a wall-break bomb; "
-                             "0.0 = always break")
+                        default=_P["wall_break_tile_threshold"])
 
     parser.add_argument("--loop-detection", dest="loop_detection",
-                        action="store_true", default=_P["loop_detection"],
-                        help="Detect and break 2- or 3-step (action, position) cycles")
+                        action="store_true", default=_P["loop_detection"])
     parser.add_argument("--no-loop-detection", dest="loop_detection",
                         action="store_false")
-    parser.add_argument("--loop-window", type=int, default=_P["loop_window"],
-                        help="Past (action, pos) entries retained for cycle detection; "
-                             "must be >= 5 to catch period-3 loops")
+    parser.add_argument("--loop-window", type=int, default=_P["loop_window"])
 
     parser.add_argument("--proactive-base-routing", dest="proactive_base_routing",
-                        action="store_true", default=_P["proactive_base_routing"],
-                        help="Include known enemy base cells in collect scoring")
+                        action="store_true", default=_P["proactive_base_routing"])
     parser.add_argument("--no-proactive-base-routing", dest="proactive_base_routing",
                         action="store_false")
-    parser.add_argument("--base-route-weight", type=float, default=_P["base_route_weight"],
-                        help="Synthetic tile value for enemy base routing "
-                             "(comparable to MISSION=5, RESOURCE=2, RECON=1)")
-
+    parser.add_argument("--base-route-weight", type=float, default=_P["base_route_weight"])
     parser.add_argument("--adaptive-base-weight", dest="adaptive_base_weight",
-                        action="store_true", default=_P["adaptive_base_weight"],
-                        help="Auto-adjust base-route weight based on enemy aggression "
-                             "(requires --proactive-base-routing)")
+                        action="store_true", default=_P["adaptive_base_weight"])
     parser.add_argument("--no-adaptive-base-weight", dest="adaptive_base_weight",
                         action="store_false")
-    parser.add_argument("--base-weight-min", type=float, default=_P["base_weight_min"],
-                        help="Floor weight after a detected attack")
+    parser.add_argument("--base-weight-min", type=float, default=_P["base_weight_min"])
     parser.add_argument("--base-weight-ramp-rate", type=float,
-                        default=_P["base_weight_ramp_rate"],
-                        help="Weight increase per step during the ramp phase")
+                        default=_P["base_weight_ramp_rate"])
     parser.add_argument("--base-weight-attack-cooldown", type=int,
-                        default=_P["base_weight_attack_cooldown"],
-                        help="Steps to hold defensive posture after last attack "
-                             "before ramping resumes")
+                        default=_P["base_weight_attack_cooldown"])
 
     parser.add_argument("--cache", dest="cache_path", type=Path,
-                        default=DEFAULT_CACHE_PATH,
-                        help="Pre-load this novice-map cache (default: ae/src/novice_map.json)")
-    parser.add_argument("--no-cache", dest="cache_path", action="store_const", const=None,
-                        help="Start with empty map memory (for benchmarking)")
-
-    parser.add_argument("--grid-offset-x", type=int, default=0,
-                        help="Pixel X offset of the grid's top-left corner (analysis overlay calibration)")
-    parser.add_argument("--grid-offset-y", type=int, default=0,
-                        help="Pixel Y offset of the grid's top-left corner (analysis overlay calibration)")
+                        default=DEFAULT_CACHE_PATH)
+    parser.add_argument("--no-cache", dest="cache_path", action="store_const", const=None)
+    parser.add_argument("--grid-offset-x", type=int, default=0)
+    parser.add_argument("--grid-offset-y", type=int, default=0)
 
     args = parser.parse_args()
 
+    # Build kwargs for normal (HeuristicPolicy) agents.
+    policy_kwargs = dict(
+        predictive_bomb=args.predictive_bomb,
+        predictive_bomb_threshold=args.bomb_threshold,
+        wall_breaking=args.wall_breaking,
+        wall_break_cost=args.wall_break_cost,
+        adaptive_wall_break_cost=args.adaptive_wall_break_cost,
+        smart_defend=args.smart_defend,
+        predictive_defend=args.predictive_defend,
+        drift_aware_bomb=args.drift_aware_bomb,
+        auto_tune_bomb=args.auto_tune_bomb,
+        bomb_tune_target=args.bomb_tune_target,
+        bomb_economy=args.bomb_economy,
+        base_bomb_value=args.base_bomb_value,
+        agent_bomb_value=args.agent_bomb_value,
+        bomb_reserve_threshold=args.bomb_reserve_threshold,
+        wall_break_tile_threshold=args.wall_break_tile_threshold,
+        loop_detection=args.loop_detection,
+        loop_window=args.loop_window,
+        proactive_base_routing=args.proactive_base_routing,
+        base_route_weight=args.base_route_weight,
+        adaptive_base_weight=args.adaptive_base_weight,
+        base_weight_min=args.base_weight_min,
+        base_weight_ramp_rate=args.base_weight_ramp_rate,
+        base_weight_attack_cooldown=args.base_weight_attack_cooldown,
+    )
+
+    # ── benchmark mode (headless) ─────────────────────────────────────────────
+    if args.benchmark:
+        _run_benchmark(args.rounds, args.novice, policy_kwargs)
+        return
+
+    # ── visual mode ───────────────────────────────────────────────────────────
     cfg = load_config(args.config) if args.config else default_config()
     cfg.env.render_mode = "human"
     cfg.env.novice = args.novice
@@ -356,54 +535,21 @@ def main() -> None:
     seed = args.seed if args.seed is not None else random.randint(0, 99999)
     env.reset(seed=seed)
 
-    def make_policy() -> HeuristicPolicy:
-        return HeuristicPolicy(
-            predictive_bomb=args.predictive_bomb,
-            predictive_bomb_threshold=args.bomb_threshold,
-            wall_breaking=args.wall_breaking,
-            wall_break_cost=args.wall_break_cost,
-            adaptive_wall_break_cost=args.adaptive_wall_break_cost,
-            smart_defend=args.smart_defend,
-            predictive_defend=args.predictive_defend,
-            drift_aware_bomb=args.drift_aware_bomb,
-            auto_tune_bomb=args.auto_tune_bomb,
-            bomb_tune_target=args.bomb_tune_target,
-            bomb_economy=args.bomb_economy,
-            base_bomb_value=args.base_bomb_value,
-            agent_bomb_value=args.agent_bomb_value,
-            bomb_reserve_threshold=args.bomb_reserve_threshold,
-            wall_break_tile_threshold=args.wall_break_tile_threshold,
-            loop_detection=args.loop_detection,
-            loop_window=args.loop_window,
-            proactive_base_routing=args.proactive_base_routing,
-            base_route_weight=args.base_route_weight,
-            adaptive_base_weight=args.adaptive_base_weight,
-            base_weight_min=args.base_weight_min,
-            base_weight_ramp_rate=args.base_weight_ramp_rate,
-            base_weight_attack_cooldown=args.base_weight_attack_cooldown,
-        )
+    # Resolve per-agent type list.
+    n_agents = len(env.possible_agents)
+    raw_types = list(args.agent_types) if args.agent_types else []
+    # Pad to n_agents with the global default.
+    while len(raw_types) < n_agents:
+        raw_types.append(args.agent_type)
+    agent_types_list = raw_types[:n_agents]
+    agent_type_map = dict(zip(env.possible_agents, agent_types_list))
 
-    managers = _build_managers(env, make_policy, args.cache_path)
-    selected_view = env.possible_agents[0]  # camera/highlight follows this agent
+    factories = _make_factories(env.possible_agents, agent_types_list, policy_kwargs)
+    managers, cached_template = _build_managers(env, factories, args.cache_path)
 
-    cache_used = args.cache_path is not None and args.cache_path.exists()
-    features = []
-    features.append(f"predictive_bomb={'on' if args.predictive_bomb else 'off'}"
-                    + (f" (≥{args.bomb_threshold})" if args.predictive_bomb else ""))
-    features.append(f"wall_breaking={'on' if args.wall_breaking else 'off'}"
-                    + (f" (cost={args.wall_break_cost})" if args.wall_breaking else ""))
-    features.append(f"smart_defend={'on' if args.smart_defend else 'off'}")
-    features.append(f"drift_aware={'on' if args.drift_aware_bomb else 'off'}")
-    features.append(f"auto_tune={'on (target={args.bomb_tune_target})' if args.auto_tune_bomb else 'off'}")
-    features.append(f"loop_detection={'on (window=' + str(args.loop_window) + ')' if args.loop_detection else 'off'}")
-    features.append(f"proactive_base_routing={'on (weight=' + str(args.base_route_weight) + ')' if args.proactive_base_routing else 'off'}")
-    if args.adaptive_base_weight:
-        features.append(f"adaptive_base_weight=on (min={args.base_weight_min}, "
-                        f"ramp={args.base_weight_ramp_rate}, cooldown={args.base_weight_attack_cooldown})")
-    features.append(f"map_cache={'on (' + args.cache_path.name + ')' if cache_used else 'off'}")
-    print(f"Auto-play: {len(env.possible_agents)} HeuristicPolicy bots, seed={seed}, "
-          f"novice={args.novice}, rounds={args.rounds}")
-    print(f"Features:  {' · '.join(features)}")
+    type_summary = "  ".join(f"{a}={t}" for a, t in agent_type_map.items())
+    print(f"Auto-play: seed={seed}, novice={args.novice}, rounds={args.rounds}")
+    print(f"Agents:    {type_summary}")
     print("Keys: Q/ESC quit · R reset · T respawn overlay · SPACE pause · ←→ step · A analysis overlay")
 
     pygame.font.init()
@@ -414,31 +560,29 @@ def main() -> None:
     running = True
     rounds_done = 0
 
-    # Analysis / history state
     history: deque[HistoryFrame] = deque(maxlen=HISTORY_MAXLEN)
     history_pos: int = 0
     paused: bool = False
     show_analysis: bool = False
     selected_agent: Optional[str] = None
-    tile_w: int = 32   # updated after first render
+    tile_w: int = 32
     tile_h: int = 32
     grid_offset_x: int = args.grid_offset_x
     grid_offset_y: int = args.grid_offset_y
 
+    selected_view = env.possible_agents[0]
+
     while running and rounds_done < args.rounds:
         if not paused:
-            # ── live mode: advance + render ──────────────────────────────────
             if env.agent_selector.is_first():
-                # Snapshot debug state BEFORE rendering (reflects last tick's decisions).
-                agent_info = _collect_debug_info(managers)
+                agent_info = _collect_debug_info(managers, agent_type_map)
 
                 overlay = env.dynamics.respawn_map if show_respawn else None
                 env.render(selected_agent_id=selected_view, respawn_overlay=overlay)
 
-                # Capture the rendered frame and update tile sizing once.
                 screen = pygame.display.get_surface()
                 if screen is not None:
-                    if tile_w == 32 and tile_h == 32:   # first time
+                    if tile_w == 32 and tile_h == 32:
                         tile_w = max(1, screen.get_width() // GRID_SIZE)
                         tile_h = max(1, screen.get_height() // GRID_SIZE)
                     frame = HistoryFrame(surface=screen.copy(), agent_info=agent_info)
@@ -455,7 +599,6 @@ def main() -> None:
 
                 clock.tick(env.cfg.renderer.render_fps)
         else:
-            # ── paused mode: display historical frame ─────────────────────────
             if history:
                 screen = pygame.display.get_surface()
                 if screen is not None:
@@ -471,7 +614,6 @@ def main() -> None:
                     pygame.display.flip()
             clock.tick(env.cfg.renderer.render_fps)
 
-        # ── event handling ────────────────────────────────────────────────────
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -485,9 +627,9 @@ def main() -> None:
                     (ag for ag, info in frame.agent_info.items() if info.pos == (gx, gy)),
                     None,
                 )
-                selected_agent = hit   # None deselects
+                selected_agent = hit
                 if hit:
-                    print(f"[analysis] selected {hit} at ({gx},{gy})")
+                    print(f"[analysis] selected {hit} ({agent_type_map.get(hit, '?')}) at ({gx},{gy})")
 
             elif event.type == pygame.KEYDOWN:
                 if event.key in (pygame.K_q, pygame.K_ESCAPE):
@@ -495,7 +637,7 @@ def main() -> None:
                 elif event.key == pygame.K_SPACE:
                     paused = not paused
                     if not paused and history:
-                        history_pos = len(history) - 1  # snap back to live
+                        history_pos = len(history) - 1
                     print(f"[{'PAUSED' if paused else 'LIVE'}]")
                 elif event.key == pygame.K_LEFT and paused:
                     history_pos = max(0, history_pos - 1)
@@ -509,7 +651,7 @@ def main() -> None:
                 elif event.key == pygame.K_r:
                     seed = random.randint(0, 99999)
                     env.reset(seed=seed)
-                    _reset_managers(managers)
+                    _reset_managers(managers, cached_template)
                     history.clear()
                     history_pos = 0
                     paused = False
@@ -522,30 +664,30 @@ def main() -> None:
         if not running:
             break
 
-        # When paused: don't advance the simulation.
         if paused:
             continue
 
         agent = env.agent_selection
 
-        # Episode-end housekeeping for this agent.
         if env.terminations[agent] or env.truncations[agent]:
             env.step(None)
             if all(env.terminations.values()) or all(env.truncations.values()):
                 rounds_done += 1
-                _print_round_summary(env, rounds_done)
+                _print_round_summary(env, rounds_done, agent_type_map)
+                # Print auto-tune info only for normal (HeuristicPolicy) agents.
                 if args.auto_tune_bomb:
-                    sample_policy = next(iter(managers.values()))._policy
-                    print(f"  [auto-tune] threshold={sample_policy.tuned_threshold:.3f}  "
-                          f"hit_ema={sample_policy._hit_ema:.3f}")
+                    for mgr in managers.values():
+                        if isinstance(mgr._policy, HeuristicPolicy):
+                            pol = mgr._policy
+                            print(f"  [auto-tune] threshold={pol.tuned_threshold:.3f}  "
+                                  f"hit_ema={pol._hit_ema:.3f}")
+                            break
                 if rounds_done < args.rounds:
                     seed = random.randint(0, 99999)
                     env.reset(seed=seed)
-                    _reset_managers(managers)
+                    _reset_managers(managers, cached_template)
             continue
 
-        # Policy chooses; AEManager catches its own exceptions and falls back
-        # to STAY, so a buggy bot can't take down the whole visualization.
         obs = env.observe(agent)
         action = managers[agent].ae(obs)
         env.step(int(action))

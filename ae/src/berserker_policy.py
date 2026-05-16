@@ -67,7 +67,10 @@ class BerserkerPolicy(Policy):
             if firing_positions:
                 edge_cost = from_can_traverse(memory.passable)
                 action = first_action_to(pos, facing, firing_positions, edge_cost)
-                if action is not None and mask[int(action)]:
+                # Skip STAY: if we're already at a firing position but fell through
+                # to here, we have no bombs — fall through to resource collection
+                # rather than sitting idle waiting for regeneration.
+                if action is not None and action != Action.STAY and mask[int(action)]:
                     return int(action)
 
         # Collect a nearby resource tile to restock bombs faster.
@@ -86,8 +89,16 @@ class BerserkerPolicy(Policy):
         return int(Action.STAY)
 
     def _pick_target(self, memory: MapMemory) -> Optional[tuple[int, int]]:
-        """Weakest (lowest HP) known enemy base, or None if none discovered."""
-        bases = memory.enemy_bases
+        """Weakest (lowest HP) known enemy base, or None if none remain.
+
+        Bases observed at exactly 0 HP are treated as destroyed and excluded —
+        the simulator may keep them visible with health_ratio=0 for one tick
+        before the entity is fully removed from the observation.
+        """
+        bases = {
+            b for b in memory.enemy_bases
+            if memory.enemy_base_health.get(b, 100.0) > 0
+        }
         if not bases:
             return None
         return min(bases, key=lambda b: memory.enemy_base_health.get(b, 100.0))
