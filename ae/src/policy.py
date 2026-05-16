@@ -79,7 +79,7 @@ from constants import (
 )
 from map_memory import MapMemory
 from observation import ParsedObs
-from pathfinding import EdgeCost, first_action_to, next_pos_after, reachable_cells
+from pathfinding import EdgeCost, first_action_to, next_pos_after, reachable_cells, temporal_first_action_to
 from threat import (
     cells_in_blast,
     cells_safe_for_at_least,
@@ -171,7 +171,7 @@ class HeuristicPolicy(Policy):
         bomb_economy: bool = False,
         base_bomb_value: float = 5.0,
         agent_bomb_value: float = 1.0,
-        bomb_reserve_threshold: float = 1.0,
+        bomb_reserve_threshold: float = 1.5,
         wall_break_tile_threshold: float = 0.0,
         loop_detection: bool = True,
         loop_window: int = _LOOP_WINDOW_DEFAULT,
@@ -392,24 +392,18 @@ class HeuristicPolicy(Policy):
         memory: MapMemory,
         timeline: dict[int, set[tuple[int, int]]],
     ) -> Optional[int]:
-        immediate = timeline.get(0, set()) | timeline.get(1, set())
-
         # Dodging never breaks walls — no time for a bomb fuse during evacuation.
         edge = self._edge_cost(memory, allow_walls=False)
-
-        def dodge_cost(a: tuple[int, int], b: tuple[int, int]) -> Optional[float]:
-            base = edge(a, b)
-            if base is None:
-                return None
-            if b in immediate:
-                return None
-            return base
 
         safe = cells_safe_for_at_least(memory, BOMB_TIMER + 1)
         if not safe:
             return self._panic_move(obs, memory, timeline)
 
-        action = first_action_to(obs.location, obs.direction, safe, dodge_cost)
+        # Temporal Dijkstra: each action costs 1 tick, so accumulated cost ==
+        # arrival tick offset. Edges are blocked when the destination cell is
+        # in danger_timeline at that specific tick — catching bombs that fire in
+        # 2-3 ticks along the planned path, not just tick-0/1 blasts.
+        action = temporal_first_action_to(obs.location, obs.direction, safe, edge, timeline)
         if action is not None:
             return int(action)
         return self._panic_move(obs, memory, timeline)

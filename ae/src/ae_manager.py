@@ -44,7 +44,7 @@ DEFAULT_POLICY_KWARGS: dict = dict(
     bomb_economy=True,
     base_bomb_value=5.0,
     agent_bomb_value=1.0,
-    bomb_reserve_threshold=0.5,
+    bomb_reserve_threshold=1.5,
     wall_break_tile_threshold=0.0,
 
     loop_detection=True,
