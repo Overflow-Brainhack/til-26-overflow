@@ -16,7 +16,7 @@ class _LoadState:
     """Tracks corpus-loading state for async, pollable behavior."""
 
     def __init__(self) -> None:
-        self.status: str = "idle"  # idle | loading | loaded | failed
+        self.status: str = "idle"  # idle | loading | loaded | error
         self.error: Optional[str] = None
         self.task: Optional[asyncio.Task] = None
         self.lock = asyncio.Lock()
@@ -34,10 +34,10 @@ def _do_load(documents) -> bool:
 async def _load_task(documents) -> None:
     try:
         ok = await asyncio.to_thread(_do_load, documents)
-        load_state.status = "loaded" if ok else "failed"
+        load_state.status = "loaded" if ok else "error"
     except Exception as e:
         logger.exception("Corpus load failed")
-        load_state.status = "failed"
+        load_state.status = "error"
         load_state.error = str(e)
 
 
@@ -54,7 +54,7 @@ async def nlp(request: Request) -> dict[str, list[dict[str, list[str] | str] | s
                 load_state.status = "loading"
                 await _load_task(documents)
             if documents and not isinstance(documents[0], dict):
-                return {"predictions": ["loaded" if load_state.status == "loaded" else "failed"]}
+                return {"predictions": ["loaded" if load_state.status == "loaded" else "error"]}
             return {"predictions": [{"status": load_state.status}]}
     # Poll: returns current status (subsequent polls).
     if first.get("poll") is not None:

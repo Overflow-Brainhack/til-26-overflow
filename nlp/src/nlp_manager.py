@@ -484,13 +484,13 @@ class NLPManager:
         self.bm25_top_k = int(os.getenv("NLP_BM25_TOP_K", "48"))
         self.dense_top_k = int(os.getenv("NLP_DENSE_TOP_K", "48"))
         self.hybrid_top_k = int(os.getenv("NLP_HYBRID_TOP_K", "48"))
-        self.rerank_top_k = int(os.getenv("NLP_RERANK_TOP_K", "12"))
-        self.sentence_chunk_limit = int(os.getenv("NLP_SENTENCE_CHUNK_LIMIT", "8"))
+        self.rerank_top_k = int(os.getenv("NLP_RERANK_TOP_K", "8"))
+        self.sentence_chunk_limit = int(os.getenv("NLP_SENTENCE_CHUNK_LIMIT", "6"))
         self.rrf_k = int(os.getenv("NLP_RRF_K", "60"))
 
         self.embedding_enabled = os.getenv("NLP_EMBEDDING_ENABLED", "1") != "0"
-        self.embedding_batch_size = int(os.getenv("NLP_EMBEDDING_BATCH_SIZE", "16"))
-        self.embedding_max_length = int(os.getenv("NLP_EMBEDDING_MAX_LENGTH", "1024"))
+        self.embedding_batch_size = int(os.getenv("NLP_EMBEDDING_BATCH_SIZE", "32"))
+        self.embedding_max_length = int(os.getenv("NLP_EMBEDDING_MAX_LENGTH", "512"))
         self.embedding_dim = int(os.getenv("NLP_EMBEDDING_DIM", "512"))
         self.embedding_local_files_only = os.getenv("NLP_EMBEDDING_LOCAL_FILES_ONLY", "1") != "0"
         self.embedding_model_name = os.getenv(
@@ -504,22 +504,23 @@ class NLPManager:
 
         self.reranker_enabled = os.getenv("NLP_RERANKER_ENABLED", "1") != "0"
         self.reranker_model_name = os.getenv("NLP_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
-        self.reranker_batch_size = int(os.getenv("NLP_RERANKER_BATCH_SIZE", "8"))
-        self.reranker_max_length = int(os.getenv("NLP_RERANKER_MAX_LENGTH", "512"))
+        self.reranker_batch_size = int(os.getenv("NLP_RERANKER_BATCH_SIZE", "16"))
+        self.reranker_max_length = int(os.getenv("NLP_RERANKER_MAX_LENGTH", "384"))
         self.reranker_weight = float(os.getenv("NLP_RERANKER_WEIGHT", "0.85"))
 
         self.generator_enabled = os.getenv("NLP_GENERATOR_ENABLED", "1") != "0"
         self.generator_model_name = os.getenv("NLP_GENERATOR_MODEL", self._default_generator_model())
-        self.generator_max_context_chars = int(os.getenv("NLP_GENERATOR_MAX_CONTEXT_CHARS", "3600"))
-        self.generator_max_new_tokens = int(os.getenv("NLP_GENERATOR_MAX_NEW_TOKENS", "64"))
-        self.generator_batch_size = max(1, int(os.getenv("NLP_GENERATOR_BATCH_SIZE", "4")))
+        self.generator_max_context_chars = int(os.getenv("NLP_GENERATOR_MAX_CONTEXT_CHARS", "2400"))
+        self.generator_max_new_tokens = int(os.getenv("NLP_GENERATOR_MAX_NEW_TOKENS", "32"))
+        self.generator_batch_size = max(1, int(os.getenv("NLP_GENERATOR_BATCH_SIZE", "8")))
         self.generator_docs_per_question = max(
             1,
             int(os.getenv("NLP_GENERATOR_DOCS_PER_QUESTION", str(self.output_doc_count))),
         )
-        self.generator_doc_chunk_limit = max(1, int(os.getenv("NLP_GENERATOR_DOC_CHUNK_LIMIT", "3")))
+        self.generator_doc_chunk_limit = max(1, int(os.getenv("NLP_GENERATOR_DOC_CHUNK_LIMIT", "2")))
+        self.generator_candidate_mode = os.getenv("NLP_GENERATOR_CANDIDATE_MODE", "packed").strip().lower()
         self.generator_no_answer_token = os.getenv("NLP_GENERATOR_NO_ANSWER_TOKEN", "NO_ANSWER")
-        self.generator_quantization = os.getenv("NLP_GENERATOR_QUANTIZATION", "auto").strip().lower()
+        self.generator_quantization = os.getenv("NLP_GENERATOR_QUANTIZATION", "none").strip().lower()
         if os.getenv("NLP_GENERATOR_LOAD_IN_4BIT", "0") != "0":
             self.generator_quantization = "4bit"
         elif os.getenv("NLP_GENERATOR_LOAD_IN_8BIT", "0") != "0":
@@ -910,19 +911,46 @@ class NLPManager:
                     **model_kwargs,
                 )
             except Exception:
-                if quantization_config is None:
+                if quantization_config is None and self.device.startswith("cuda"):
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+                    previous_quantization = self.generator_quantization
+                    self.generator_quantization = "4bit"
+                    quantization_config = self._generator_quantization_config()
+                    self.generator_quantization = previous_quantization
+                    if quantization_config is not None:
+                        model_kwargs = self._model_kwargs_for_device(self.device)
+                        model_kwargs["quantization_config"] = quantization_config
+                        model_kwargs["device_map"] = "auto"
+                        use_device_map = True
+                        self.generator_model = AutoModelForCausalLM.from_pretrained(
+                            self.generator_model_name,
+                            local_files_only=self.embedding_local_files_only,
+                            **model_kwargs,
+                        )
+                    else:
+                        raise
+                elif quantization_config is None:
                     raise
-                model_kwargs.pop("quantization_config", None)
-                model_kwargs.pop("device_map", None)
-                use_device_map = False
-                self.generator_model = AutoModelForCausalLM.from_pretrained(
-                    self.generator_model_name,
-                    local_files_only=self.embedding_local_files_only,
-                    **model_kwargs,
-                )
+                else:
+                    model_kwargs.pop("quantization_config", None)
+                    model_kwargs.pop("device_map", None)
+                    use_device_map = False
+                    self.generator_model = AutoModelForCausalLM.from_pretrained(
+                        self.generator_model_name,
+                        local_files_only=self.embedding_local_files_only,
+                        **model_kwargs,
+                    )
 
             if not use_device_map:
                 self.generator_model.to(self.device)
+            try:
+                self.generator_model.config.use_cache = True
+                self.generator_model.generation_config.use_cache = True
+            except Exception:
+                pass
             self.generator_model.eval()
         except Exception:
             self.generator_tokenizer = None
@@ -1181,7 +1209,8 @@ class NLPManager:
                     max_length=self.reranker_max_length,
                 )
                 inputs = self._to_device(inputs)
-                with self.torch.no_grad():
+                inference_mode = getattr(self.torch, "inference_mode", self.torch.no_grad)
+                with inference_mode():
                     logits = self.reranker_model(**inputs, return_dict=True).logits
                 rerank_scores.extend(logits.view(-1).float().detach().cpu().tolist())
 
@@ -1211,14 +1240,28 @@ class NLPManager:
                 break
 
         candidate_groups: list[list[RetrievedChunk]] = []
-        for doc_index in selected_doc_indices[: self.generator_docs_per_question]:
-            group = [
-                item
-                for item in retrieved
-                if item.chunk.doc_id == doc_index
-            ][: self.generator_doc_chunk_limit]
-            if group:
-                candidate_groups.append(group)
+        selected_doc_indices = selected_doc_indices[: self.generator_docs_per_question]
+        if self.generator_candidate_mode in {"separate", "per_doc", "per-document"}:
+            for doc_index in selected_doc_indices:
+                group = [
+                    item
+                    for item in retrieved
+                    if item.chunk.doc_id == doc_index
+                ][: self.generator_doc_chunk_limit]
+                if group:
+                    candidate_groups.append(group)
+        else:
+            packed_group: list[RetrievedChunk] = []
+            for doc_index in selected_doc_indices:
+                packed_group.extend(
+                    [
+                        item
+                        for item in retrieved
+                        if item.chunk.doc_id == doc_index
+                    ][: self.generator_doc_chunk_limit]
+                )
+            if packed_group:
+                candidate_groups.append(packed_group)
 
         if candidate_groups:
             return candidate_groups
@@ -1378,7 +1421,8 @@ class NLPManager:
                 )
                 inputs = self._to_device(inputs)
 
-                with self.torch.no_grad():
+                inference_mode = getattr(self.torch, "inference_mode", self.torch.no_grad)
+                with inference_mode():
                     output_ids = self.generator_model.generate(
                         **inputs,
                         max_new_tokens=self.generator_max_new_tokens,
@@ -1423,7 +1467,8 @@ class NLPManager:
             inputs = self.generator_tokenizer(prompt, return_tensors="pt")
             inputs = self._to_device(inputs)
 
-            with self.torch.no_grad():
+            inference_mode = getattr(self.torch, "inference_mode", self.torch.no_grad)
+            with inference_mode():
                 output_ids = self.generator_model.generate(
                     **inputs,
                     max_new_tokens=self.generator_max_new_tokens,
@@ -1454,7 +1499,7 @@ class NLPManager:
         if allow_no_answer:
             system_prompt = (
                 "/no_think\n"
-                "You answer retrieval questions using only evidence from one candidate document. "
+                "You answer retrieval questions using only the provided evidence. "
                 "Return one concise answer string. Do not explain. "
                 "For arithmetic or comparisons, compute the answer from the evidence. "
                 f"If the evidence does not answer the question, return {self.generator_no_answer_token}. "
@@ -1721,7 +1766,8 @@ class NLPManager:
                 )
                 inputs = self._to_device(inputs)
 
-                with torch.no_grad():
+                inference_mode = getattr(torch, "inference_mode", torch.no_grad)
+                with inference_mode():
                     output = self.embedding_model(**inputs)
 
                 attention_mask = inputs["attention_mask"]
