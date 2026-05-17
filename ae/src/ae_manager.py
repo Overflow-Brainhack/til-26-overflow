@@ -52,7 +52,7 @@ DEFAULT_POLICY_KWARGS: dict = dict(
     loop_window=6,
 
     proactive_base_routing=True,
-    base_route_weight=1.5,
+    base_route_weight=100,
     adaptive_base_weight=True,
     base_weight_min=0.2,
     base_weight_ramp_rate=0.02,

@@ -146,7 +146,7 @@ def main():
     )
 
     # model = YOLO(TRAIN_OUTPUT / "yolo11x-finetuned-2" / "weights" / "best.pt")
-    model = RTDETR(TRAIN_OUTPUT / "rtdetr-x-finetuned" / "weights" / "best.pt")
+    model = RTDETR(TRAIN_OUTPUT / "rtdetr-l-finetuned-2" / "weights" / "best.pt")
 
     model.eval()
     model.to("cuda" if torch.cuda.is_available() else "cpu")

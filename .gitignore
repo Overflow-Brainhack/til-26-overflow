@@ -7,6 +7,8 @@
 **/results/
 **/runs/
 *.pt
+*.pth
+*.nemo
 cv-training/
 
 # Byte-compiled / optimized / DLL files
@@ -180,4 +182,7 @@ data
 
 .claude/projects
 cv_dev/object_bank
+cv_dev/backgrounds
+
 til-26.wiki
+logs/eval_results.jsonl

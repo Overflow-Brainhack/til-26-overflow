@@ -1,0 +1,18 @@
+fighter jet 2469
+tank 2262
+bus 1290
+commercial aircraft 1651
+van 705
+fighter plane 1176
+truck 2172
+light aircraft 870
+yacht 304
+car 851
+helicopter 1571
+cargo ship 363
+drone 958
+missile 805
+cargo aircraft 294
+sailboat 279
+cruise ship 205
+warship 276
