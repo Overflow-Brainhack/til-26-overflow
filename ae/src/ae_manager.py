@@ -18,6 +18,7 @@ from constants import Action
 from map_memory import MapMemory, get_shared_memory
 from observation import parse_observation
 from berserker_policy import BerserkerPolicy
+from policy import HeuristicPolicy
 from policy import Policy
 
 
@@ -82,7 +83,8 @@ class AEManager:
             self._maybe_load_cache(cache_path or DEFAULT_CACHE_PATH)
 
         self._memory.reset_round()
-        self._policy: Policy = policy or BerserkerPolicy()
+        #self._policy: Policy = policy or BerserkerPolicy()
+        self._policy: Policy = policy or HeuristicPolicy(**DEFAULT_POLICY_KWARGS)
 
     def _maybe_load_cache(self, path: Path) -> None:
         if not path.exists():
