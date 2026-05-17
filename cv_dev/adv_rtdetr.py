@@ -29,8 +29,8 @@ class AdversarialRTDETRTrainer(RTDETRTrainer):
         - Epochs ADV_START_EPOCH..end: ADV_FRACTION of batches get FGSM perturbation
     """
 
-    ADV_START_EPOCH: int = 10
-    ADV_END_EPOCH: int = 15
+    ADV_START_EPOCH: int = 40
+    ADV_END_EPOCH: int = 65
     ADV_FRACTION: float = 0.25
     ADV_EPS: float = (
         40.0 / 255.0
@@ -54,7 +54,6 @@ class AdversarialRTDETRTrainer(RTDETRTrainer):
         model parameter gradients are unaffected, keeping the optimizer clean.
         """
         imgs_leaf = imgs.detach().clone().requires_grad_(True)
-        print(imgs_leaf.shape)
 
         self.model.eval()
         try:

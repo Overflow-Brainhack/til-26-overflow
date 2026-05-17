@@ -9,7 +9,7 @@ class RawCategory(TypedDict):
 
 class RawAnnotation(TypedDict):
     id: int
-    image_id: int
+    image_id: int | str
     category_id: int
     area: float
     bbox: list[float]
