@@ -221,7 +221,7 @@ def main():
     print(f"Val images:   {len(instances)}")
     print(f"FGSM epsilon: {args.epsilon:.4f}  ({round(args.epsilon * 255)}/255)")
 
-    model = RTDETR(str(TRAIN_OUTPUT / "rtdetr-l-finetuned-2" / "weights" / "best.pt"))
+    model = RTDETR("cv/models/rtdetr-l-adv-70.pt")
     model.eval()
     model.to(device)
     raw_model = model.model

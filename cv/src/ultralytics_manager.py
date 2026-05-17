@@ -8,8 +8,8 @@ from PIL import Image, ImageFilter
 
 class UltralyticsManager:
     def __init__(self):
-        self.model = RTDETR("models/rtdetr-l-70.pt")
-        # self.model = RTDETR("models/rtdetr-x-43.pt")
+        # self.model = RTDETR("models/rtdetr-l-70.pt")
+        self.model = RTDETR("models/rtdetr-l-adv-70.pt")
 
     def _preprocess(self, image: bytes) -> bytes:
         """Strip adversarial perturbations with minimal accuracy impact."""
@@ -35,6 +35,10 @@ class UltralyticsManager:
                 }
             )
         return preds
+
+    def infer(self, image: bytes) -> list[dict[str, Any]]:
+        """Performs object detection for the noising docker"""
+        return self.run_ultralytics(image)
 
     def cv(self, image: bytes) -> list[dict[str, Any]]:
         """Performs object detection on an image."""

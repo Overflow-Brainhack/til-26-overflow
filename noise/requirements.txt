@@ -6,3 +6,7 @@ pillow
 numpy
 scikit-image
 requests
+ultralytics
+torch
+torchvision
+cupy-cuda13x

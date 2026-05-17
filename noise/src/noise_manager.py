@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import base64
 import io
+from io import BytesIO
 import json
 import random
 from pathlib import Path
 
+import cupy as cp
 import numpy as np
 import requests
 from PIL import Image, ImageFilter
 from skimage.metrics import structural_similarity
+
+import torch
+from ultralytics import RTDETR
 
 
 # ── Budget constants (match eval_thresholds_v2.yaml) ──────────────────────────
@@ -25,26 +30,6 @@ SSIM_INSIDE_MIN = (
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def _fetch_bboxes(image_b64: str) -> list[list[float]]:
-    url = (
-        "http://localhost:5002/cv"
-        if __name__ == "__main__"
-        else "http://host.docker.internal:5002/cv"
-    )
-    try:
-        resp = requests.post(
-            url,
-            data=json.dumps({"instances": [{"key": 0, "b64": image_b64}]}),
-        )
-        preds = resp.json()["predictions"]
-        if not preds or not preds[0]:
-            return []
-        return [det["bbox"] for det in preds[0]]
-    except Exception as e:
-        print(f"[attack] CV server unavailable: {e}")
-        return []
 
 
 def _make_mask(H: int, W: int, boxes: list[list[float]]) -> np.ndarray:
@@ -64,87 +49,72 @@ def _rmse_global(delta: np.ndarray) -> float:
 
 def _rmse_inside(delta: np.ndarray, mask: np.ndarray) -> float:
     sq = (delta**2).mean(axis=-1)  # (H, W)
-    return float(np.sqrt(sq[mask].mean()))
+    return float(sq[mask].mean() ** 0.5)
+
+
+def _dispatch_ssim(*args, **kwargs):
+    if torch.cuda.is_available():
+        return _ssim_torch(*args, **kwargs)
+
+    _, ssim_map = structural_similarity(*args, **kwargs, channel_axis=2, full=True)
+    return ssim_map
+
+
+def _ssim_torch(
+    orig: np.ndarray, adv: np.ndarray, win_size: int = 7, data_range: float = 255.0
+) -> np.ndarray:
+    import torch.nn.functional as F
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    orig_t = torch.from_numpy(orig).permute(2, 0, 1).contiguous().to(device)
+    adv_t = torch.from_numpy(adv).permute(2, 0, 1).contiguous().to(device)
+
+    pad = win_size // 2
+    n_channels = orig_t.size(0)
+    NP = win_size * win_size
+    cov_norm = NP / (NP - 1)
+    C1 = (0.01 * data_range) ** 2
+    C2 = (0.03 * data_range) ** 2
+
+    kernel = (
+        torch.ones(n_channels, 1, win_size, win_size, device=device, dtype=orig_t.dtype)
+        / NP
+    )
+
+    mu1 = F.conv2d(orig_t, kernel, padding=pad, groups=n_channels)
+    mu2 = F.conv2d(adv_t, kernel, padding=pad, groups=n_channels)
+    mu1_sq, mu2_sq, mu1_mu2 = mu1 * mu1, mu2 * mu2, mu1 * mu2
+
+    sigma1_sq = cov_norm * (
+        F.conv2d(orig_t * orig_t, kernel, padding=pad, groups=n_channels) - mu1_sq
+    )
+    sigma2_sq = cov_norm * (
+        F.conv2d(adv_t * adv_t, kernel, padding=pad, groups=n_channels) - mu2_sq
+    )
+    sigma12 = cov_norm * (
+        F.conv2d(orig_t * adv_t, kernel, padding=pad, groups=n_channels) - mu1_mu2
+    )
+
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / (
+        (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+    )
+
+    return ssim_map.permute(1, 2, 0).detach().cpu().numpy()
 
 
 def _ssim_inside(orig: np.ndarray, adv: np.ndarray, mask: np.ndarray) -> float:
     if not mask.any():
         return 1.0
-    _, ssim_map = structural_similarity(
+    ssim_map = _dispatch_ssim(
         orig.astype(np.float32),
         adv.astype(np.float32),
-        channel_axis=2,
         data_range=255.0,
         win_size=7,
-        full=True,
     )
+
     if ssim_map.ndim == 3:
         ssim_map = ssim_map.mean(axis=-1)
     return float(ssim_map[mask].mean())
-
-
-def _gray_overlay(orig: np.ndarray) -> np.ndarray:
-    """Delta that pulls every pixel toward mid-gray (128), destroying contrast."""
-    return 128.0 - orig.astype(np.float32)
-
-
-def _hue_rotate(orig: np.ndarray, degrees: float) -> np.ndarray:
-    """Delta from rotating the HSV hue channel by `degrees`.
-
-    Attacks color-based detection features while leaving luminance and texture
-    largely intact. Grayscale pixels (s=0) are unaffected by construction.
-    """
-    f = orig.astype(np.float32) / 255.0
-    r, g, b = f[..., 0], f[..., 1], f[..., 2]
-
-    max_c = np.maximum(np.maximum(r, g), b)
-    min_c = np.minimum(np.minimum(r, g), b)
-    diff = max_c - min_c + 1e-8
-
-    h = (
-        np.where(
-            max_c == r,
-            (g - b) / diff % 6,
-            np.where(max_c == g, (b - r) / diff + 2, (r - g) / diff + 4),
-        )
-        / 6.0
-    )
-    s = np.where(max_c < 1e-8, 0.0, diff / (max_c + 1e-8))
-    v = max_c
-
-    h = (h + degrees / 360.0) % 1.0
-
-    i = (h * 6).astype(int)
-    frac = h * 6 - i
-    p = v * (1 - s)
-    q = v * (1 - frac * s)
-    t = v * (1 - (1 - frac) * s)
-    i = i % 6
-
-    r2 = np.select([i == 0, i == 1, i == 2, i == 3, i == 4, i == 5], [v, q, p, p, t, v])
-    g2 = np.select([i == 0, i == 1, i == 2, i == 3, i == 4, i == 5], [t, v, v, q, p, p])
-    b2 = np.select([i == 0, i == 1, i == 2, i == 3, i == 4, i == 5], [p, p, t, v, v, q])
-
-    rotated = np.stack([r2, g2, b2], axis=-1) * 255.0
-    return rotated - orig.astype(np.float32)
-
-
-def _mid_freq_noise(H: int, W: int) -> np.ndarray:
-    """Unit-std band-pass noise concentrated in mid spatial frequencies.
-
-    Constructed as the difference of two Gaussian-blurred white noise images.
-    Mid-frequency content survives JPEG recompression and median filtering
-    (both of which act on the high-frequency end), making it persistent against
-    common defender preprocessing stacks.
-    """
-    raw = np.random.randn(H, W, 3).astype(np.float32)
-    # Encode into uint8 range so PIL can filter it; offset cancels in the difference
-    pil = Image.fromarray(np.clip(raw * 40 + 128, 0, 255).astype(np.uint8))
-    light = np.array(pil.filter(ImageFilter.GaussianBlur(radius=2))).astype(np.float32)
-    heavy = np.array(pil.filter(ImageFilter.GaussianBlur(radius=20))).astype(np.float32)
-    band = (light - heavy) / 40.0  # offset cancels; undo amplitude scaling
-    std = band.std()
-    return band / std if std > 1e-8 else band
 
 
 # ── Main attacker class ────────────────────────────────────────────────────────
@@ -168,10 +138,91 @@ class NoiseManager:
         else Path("./object_bank")
     )
 
+    _t_cuda = torch.cuda.is_available()
+
+    def __init__(self):
+        self.model = None
+
+        self._bank_cache = self._load_bank_cache()
+
+    def _load_bank_cache(self) -> dict[str, list[np.ndarray]]:
+        """Pre-load all object-bank PNGs as uint8 (60×60 RGBA) at startup."""
+        TILE = 60
+        cache: dict[str, list[np.ndarray]] = {}
+        if not self._BANK_PATH.exists():
+            print(
+                f"[NoiseManager] Bank path missing: {self._BANK_PATH}, skipping cache"
+            )
+            return cache
+        for cat_dir in self._BANK_PATH.iterdir():
+            if not cat_dir.is_dir():
+                continue
+            imgs = []
+            for png in cat_dir.glob("*.png"):
+                try:
+                    arr = np.array(
+                        Image.open(png)
+                        .convert("RGBA")
+                        .resize((TILE, TILE), Image.LANCZOS),
+                        dtype=np.uint8,
+                    )
+                    imgs.append(arr)
+                except Exception:
+                    continue
+            if imgs:
+                cache[cat_dir.name] = imgs
+        return cache
+
+    def _cv_healthy(self) -> bool:
+        try:
+            url = (
+                "http://localhost:5002/health"
+                if __name__ == "__main__"
+                else "http://host.docker.internal:5002/health"
+            )
+
+            resp = requests.get(url).json()
+
+            return resp.get("message", "") == "health ok"
+        except Exception as _:
+            return False
+
+    def _fetch_bboxes(self, image_b64: str) -> list[list[float]]:
+        if self._cv_healthy():
+            url = (
+                "http://localhost:5002/noise"
+                if __name__ == "__main__"
+                else "http://host.docker.internal:5002/noise"
+            )
+
+            resp = requests.post(
+                url,
+                data=json.dumps({"b64": image_b64}),
+            )
+            preds = resp.json()["detections"]
+            if preds:
+                return [det["bbox"] for det in preds]
+
+        if self.model is None:
+            print("[NoiseManager] CV container unhealthy, loading model")
+            self.model = RTDETR("models/rtdetr-l-70.pt")
+
+        im = Image.open(BytesIO(base64.b64decode(image_b64)))
+        results = self.model.predict(
+            im, verbose=False, imgsz=1280, rect=True, half=True
+        )
+        preds = []
+        for box in results[0].boxes:
+            x1, y1, x2, y2 = box.xyxy[0]
+            preds.append(
+                [float(x1), float(y1), float(x2 - x1), float(y2 - y1)],
+            )
+        return preds
+
     def _inside_attack(
         self, orig: np.ndarray, boxes: list[list[float]], mask: np.ndarray
     ) -> np.ndarray:
-        """Per-bbox pixelation + gray pull + inversion, scaled to fill RMSE budget."""
+        """Per-bbox pixelation + inversion, scaled to fill RMSE budget."""
         H, W = orig.shape[:2]
         delta = np.zeros((H, W, 3), dtype=np.float32)
         if not mask.any():
@@ -199,24 +250,29 @@ class NoiseManager:
 
             augmented[y1:y2, x1:x2] = np.array(pixelated, dtype=np.float32)
 
-        # Structural delta (pixelate + grayscale) + gray pull + colour inversion
+        xp = cp if self._t_cuda > 0 else np
+        if xp is cp:
+            aug_xp = cp.asarray(augmented)
+            orig_xp = cp.asarray(orig, dtype=cp.float32)
+            mask_xp = cp.asarray(mask)
+        else:
+            aug_xp, orig_xp, mask_xp = augmented, orig.astype(np.float32), mask
+
+        # Structural delta (pixelate + grayscale) + colour inversion
         # Inversion (255 - orig) is maximally wrong for colour-based class features
         # while preserving luminance structure (low SSIM cost relative to mAP impact)
-        struct_delta = augmented - orig.astype(np.float32)
-        gray_pull = _gray_overlay(orig)
-        invert_delta = (255.0 - orig.astype(np.float32)) - orig.astype(
-            np.float32
-        )  # = 255 - 2*orig
-        combined = 0.6 * struct_delta + 0.25 * gray_pull + 0.15 * invert_delta
+        struct_delta = aug_xp - orig_xp
+        invert_delta = 255.0 - 2.0 * orig_xp  # = 255 - 2*orig
+        combined = 0.6 * struct_delta + 0.15 * invert_delta
 
-        delta[mask] = combined[mask]
+        delta_xp = xp.zeros((H, W, 3), dtype=xp.float32)
+        delta_xp[mask_xp] = combined[mask_xp]
 
-        # Scale to fill RMSE budget; SSIM enforcement will scale back if needed
-        rmse = _rmse_inside(delta, mask)
+        rmse = _rmse_inside(delta_xp, mask_xp)
         if rmse > 1e-8:
-            delta[mask] *= RMSE_INSIDE_MAX / rmse
+            delta_xp[mask_xp] *= RMSE_INSIDE_MAX / rmse
 
-        return delta
+        return delta_xp.get() if xp is cp else delta_xp
 
     def _enforce_ssim(
         self, orig: np.ndarray, delta: np.ndarray, mask: np.ndarray
@@ -229,11 +285,23 @@ class NoiseManager:
         """
 
         def _ssim_post_jpeg(d: np.ndarray) -> float:
-            adv = np.clip(orig.astype(np.float32) + d, 0, 255).astype(np.uint8)
-            buf = io.BytesIO()
-            Image.fromarray(adv).save(buf, format="JPEG", quality=95)
-            buf.seek(0)
-            adv_jpeg = np.array(Image.open(buf).convert("RGB"), dtype=np.uint8)
+            import torchvision.io as tvio
+
+            t = (
+                torch.from_numpy(orig)
+                .float()
+                .add(torch.from_numpy(d))
+                .clamp_(0, 255)
+                .to(torch.uint8)
+                .permute(2, 0, 1)
+                .contiguous()
+            )
+            if self._t_cuda:
+                device = "cuda"
+            else:
+                device = "cpu"
+            t = tvio.decode_jpeg(tvio.encode_jpeg(t, quality=95), device=device)
+            adv_jpeg = t.permute(1, 2, 0).cpu().numpy()
             return _ssim_inside(orig, adv_jpeg, mask)
 
         if _ssim_post_jpeg(delta) >= SSIM_INSIDE_MIN:
@@ -267,12 +335,12 @@ class NoiseManager:
         0 at corners). Tiles overlapping any bbox are skipped. Objects are pasted
         from center outward until global RMSE reaches 66.
         """
-        if not self._BANK_PATH.exists():
-            print(f"Cannot find {self._BANK_PATH} for object bank spamming.")
+        if not self._bank_cache:
+            print(
+                f"[NoiseManager] Cannot find {self._BANK_PATH} for object bank spamming."
+            )
             return
-        categories = [d for d in self._BANK_PATH.iterdir() if d.is_dir()]
-        if not categories:
-            return
+        cat_names = list(self._bank_cache.keys())
 
         TILE = 60
         RMSE_TARGET = 66.0
@@ -310,20 +378,9 @@ class NoiseManager:
             opacity, py, px = tiles[i]
             i += 1
 
-            cat_dir = random.choice(categories)
-            pngs = list(cat_dir.glob("*.png"))
-            if not pngs:
-                continue
-
-            try:
-                rgba = np.array(
-                    Image.open(random.choice(pngs))
-                    .convert("RGBA")
-                    .resize((TILE, TILE), Image.LANCZOS),
-                    dtype=np.float32,
-                )
-            except Exception:
-                continue
+            rgba = random.choice(self._bank_cache[random.choice(cat_names)]).astype(
+                np.float32
+            )
 
             alpha = rgba[:, :, 3] / 255.0  # (TILE, TILE) natural transparency
             rgb = rgba[:, :, :3]
@@ -354,7 +411,7 @@ class NoiseManager:
         H, W = orig.shape[:2]
 
         b64 = base64.b64encode(image_bytes).decode("ascii")
-        boxes = _fetch_bboxes(b64)
+        boxes = self._fetch_bboxes(b64)
         has_boxes = len(boxes) > 0
         mask = _make_mask(H, W, boxes)
 
