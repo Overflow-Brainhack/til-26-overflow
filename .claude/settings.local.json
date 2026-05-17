@@ -2,9 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(python3)",
-      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\zedon\\\\Documents\\\\GitHub\\\\til-26-overflow\" -Force)",
-      "Bash(Select-Object Name, PSIsContainer)",
-      "Bash(Format-Table -AutoSize)"
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\zedon\\\\Documents\\\\GitHub\\\\til-26-overflow\\\\ae\\\\src\\\\\" -File | Select-Object FullName)",
+      "Bash(cd /c/Users/zedon/Documents/GitHub/til-26-overflow/til-26-ae && find . -type f -name \"*.py\" | head -20)",
+      "Read(//c/c/Users/zedon/Documents/GitHub/til-26-overflow/**)"
     ]
   }
 }
