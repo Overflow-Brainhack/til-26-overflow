@@ -7,6 +7,8 @@ from cv_dev.consts import (
     DEIMV2_DATA_PATH,
 )
 from cv_dev.make_dataset import load_dataset, ImageDataset
+from cv_dev.adv_rtdetr import AdversarialRTDETRTrainer
+
 from transformers import (
     DetrForObjectDetection,
     Trainer,
@@ -112,6 +114,30 @@ def train_rtdetr(
         resume=resume,
     )
     trainer: RTDETRTrainer = RTDETRTrainer(overrides=args)
+    trainer.train()
+
+
+def train_rtdetr_adv(
+    model: Path | str,
+    n_epochs: int,
+    resume: bool = False,
+    name: str = "rtdetr-x-finetuned",
+):
+    args = dict(
+        model=str(model),
+        data=DATA_YAML,
+        epochs=n_epochs,
+        batch=4,
+        project=str(TRAIN_OUTPUT),
+        name=name,
+        save_period=5,
+        device=0,
+        workers=0,
+        imgsz=1280,
+        rect=True,
+        resume=resume,
+    )
+    trainer: AdversarialRTDETRTrainer = AdversarialRTDETRTrainer(overrides=args)
     trainer.train()
 
 
@@ -298,11 +324,19 @@ if __name__ == "__main__":
     #     name="rtdetr-l-finetuned-synth",
     # )  # train rtdetr-l-50 on 50 synth images
 
-    train_rtdetr(
-        # TRAIN_OUTPUT / "rtdetr-l-finetuned/weights/last.pt",
+    # train_rtdetr(
+    #     # TRAIN_OUTPUT / "rtdetr-l-finetuned/weights/last.pt",
+    #     "rtdetr-l.pt",
+    #     80,
+    #     name="rtdetr-l-finetuned",
+    # )
+
+    train_rtdetr_adv(
+        # TRAIN_OUTPUT / "rtdetr-l-finetuned-adv/weights/last.pt",
         "rtdetr-l.pt",
-        80,
-        name="rtdetr-l-finetuned",
+        70,
+        name="rtdetr-l-finetuned-adv",
+        resume=True,
     )
 
     # train_deimv2(Path("/home/dev/DEIMv2/"))
