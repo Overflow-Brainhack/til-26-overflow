@@ -1,0 +1,23 @@
+# Per-challenge tag queues for the Discord auto-submission watcher.
+#
+# Tags are cycled in order — after the last tag is submitted the queue wraps
+# back to the first (infinite loop). A single-entry list resubmits the same
+# tag on every eval result.
+#
+# Images must already be built locally as overflow-<challenge>:<tag> before
+# the watcher tries to submit them (unless SUBMIT_FLAGS includes --build).
+
+[ae]
+tags = ["latest"]
+
+# [cv]
+# tags = ["resnet-baseline", "efficientnet-v2"]
+
+# [nlp]
+# tags = ["latest"]
+
+# [asr]
+# tags = ["latest"]
+
+# [noise]
+# tags = ["latest"]

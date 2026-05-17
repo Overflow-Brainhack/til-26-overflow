@@ -1,3 +1,9 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(ls \"c:\\\\\\\\Users\\\\\\\\zedon\\\\\\\\Documents\\\\\\\\GitHub\\\\\\\\til-26-overflow\\\\\\\\ae\\\\\\\\\")",
+      "Bash(ls \"c:\\\\\\\\Users\\\\\\\\zedon\\\\\\\\Documents\\\\\\\\GitHub\\\\\\\\til-26-overflow\\\\\\\\ae\\\\\\\\src\\\\\\\\\")"
+    ]
+  },
   "systemPrompt": "Always give clear and concise responses. No unnecessary padding or repetition. Get to the point. Always ask for confirmation before executing console/shell commands."
 }

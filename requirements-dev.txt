@@ -18,3 +18,7 @@ scikit-image
 # This is the til_environment package. You'll need this to train and test your
 #AE model. You can import this package using `import til_environment`.
 -e ./til-26-ae
+
+# Discord selfbot for auto-submission watcher (discord_watcher.py)
+discord.py-self>=2.1.0
+google-auth>=2.0.0
