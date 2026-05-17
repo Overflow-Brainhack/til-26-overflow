@@ -1,5 +1,14 @@
-from cv_dev.consts import DATA_PATH, TRAIN_OUTPUT, DATASETS_PATH, NUM_CATEGORIES
+from cv_dev.consts import (
+    DATA_PATH,
+    TRAIN_OUTPUT,
+    DATASETS_PATH,
+    NUM_CATEGORIES,
+    SYNTHETIC_DATA_PATH,
+    DEIMV2_DATA_PATH,
+)
 from cv_dev.make_dataset import load_dataset, ImageDataset
+from cv_dev.adv_rtdetr import AdversarialRTDETRTrainer
+
 from transformers import (
     DetrForObjectDetection,
     Trainer,
@@ -10,8 +19,12 @@ from torchvision.transforms.functional import normalize
 
 from ultralytics import YOLO, RTDETR
 from ultralytics.models.rtdetr.train import RTDETRTrainer
+from pathlib import Path
 
 import os
+import shutil
+import subprocess
+
 import torch
 
 os.environ["WANDB_DISABLED"] = "true"
@@ -19,6 +32,7 @@ os.environ["WANDB_DISABLED"] = "true"
 torch.set_float32_matmul_precision("medium")
 
 DATA_YAML = str(DATA_PATH / "data.yaml")
+SYNTHETIC_DATA_YAML = str(SYNTHETIC_DATA_PATH / "data.yaml")
 
 
 def train_yolov11(n_epochs: int):
@@ -79,23 +93,51 @@ def train_yolov26(n_epochs: int):
     )
 
 
-def train_rtdetr(n_epochs: int):
+def train_rtdetr(
+    model: Path | str,
+    n_epochs: int,
+    resume: bool = False,
+    name: str = "rtdetr-x-finetuned",
+):
     args = dict(
-        # model=TRAIN_OUTPUT / "rtdetr-x-finetuned" / "weights" / "last.pt",
-        model="rtdetr-x.pt",
+        model=str(model),
         data=DATA_YAML,
         epochs=n_epochs,
-        batch=2,
+        batch=4,
         project=str(TRAIN_OUTPUT),
-        name="rtdetr-x-finetuned",
+        name=name,
         save_period=5,
         device=0,
         workers=0,
         imgsz=1280,
         rect=True,
-        resume=True,
+        resume=resume,
     )
     trainer: RTDETRTrainer = RTDETRTrainer(overrides=args)
+    trainer.train()
+
+
+def train_rtdetr_adv(
+    model: Path | str,
+    n_epochs: int,
+    resume: bool = False,
+    name: str = "rtdetr-x-finetuned",
+):
+    args = dict(
+        model=str(model),
+        data=DATA_YAML,
+        epochs=n_epochs,
+        batch=4,
+        project=str(TRAIN_OUTPUT),
+        name=name,
+        save_period=5,
+        device=0,
+        workers=0,
+        imgsz=1280,
+        rect=True,
+        resume=resume,
+    )
+    trainer: AdversarialRTDETRTrainer = AdversarialRTDETRTrainer(overrides=args)
     trainer.train()
 
 
@@ -193,8 +235,108 @@ def train_detr_hf(n_epochs: int):
     trainer.save_model(output_dir)
 
 
+def train_rtdetr_synth(
+    model: Path,
+    n_epochs: int,
+    resume: bool = False,
+    name: str = "rtdetr-x-finetuned-synth",
+):
+    args = dict(
+        # training from rtdetr-x-40
+        model=str(model),
+        data=SYNTHETIC_DATA_YAML,
+        epochs=n_epochs,
+        batch=4,
+        project=str(TRAIN_OUTPUT),
+        name=name,
+        save_period=5,
+        device=0,
+        workers=0,
+        imgsz=1280,
+        rect=True,
+        resume=resume,
+    )
+    trainer: RTDETRTrainer = RTDETRTrainer(overrides=args)
+    trainer.train()
+
+
+def train_deimv2(
+    deimv2_repo: Path,
+    resume: bool = False,
+) -> None:
+    """
+    Fine-tune DEIMv2-L (DINOv3 backbone) on our 18-class dataset.
+
+    Requires the DEIMv2 repo cloned locally:
+        git clone https://github.com/Intellindust-AI-Lab/DEIMv2 <deimv2_repo>
+        pip install -r <deimv2_repo>/requirements.txt
+
+    Args:
+        deimv2_repo: path to the cloned DEIMv2 directory
+        resume: resume from the latest checkpoint in the output dir
+    """
+
+    train_img_dir = DEIMV2_DATA_PATH / "train"
+    train_json = DEIMV2_DATA_PATH / "train.json"
+    val_img_dir = DEIMV2_DATA_PATH / "val"
+    val_json = DEIMV2_DATA_PATH / "val.json"
+
+    dataset_cfg_path = deimv2_repo / "configs" / "dataset" / "til26_dataset.yml"
+    shutil.copyfile("cv_dev/til26_dataset.yml", dataset_cfg_path)
+
+    dataloader_cfg_path = deimv2_repo / "configs" / "base" / "til26_dataloader.yml"
+    shutil.copyfile("cv_dev/til26_dataloader.yml", dataloader_cfg_path)
+
+    model_cfg_path = deimv2_repo / "configs" / "deimv2" / "deimv2_dinov3_l_til26.yml"
+    shutil.copyfile("cv_dev/deimv2_dinov3_l_til26.yml", model_cfg_path)
+
+    cmd = [
+        "uv",
+        "run",
+        "torchrun",
+        "--master_port=7777",
+        "--nproc_per_node=1",
+        "train.py",
+        "-c",
+        str(model_cfg_path.relative_to(deimv2_repo)),
+        "-t",
+        "/home/dev/til-26-overflow/deimv2-hf.pth",
+        "--use-amp",
+        "--seed=0",
+    ]
+
+    if resume:
+        output_dir = deimv2_repo / "outputs" / "deimv2_dinov3_l_til26"
+        checkpoints = sorted(
+            output_dir.glob("checkpoint*.pth"), key=lambda p: p.stat().st_mtime
+        )
+        if checkpoints:
+            cmd += ["--resume", str(checkpoints[-1])]
+
+    subprocess.run(cmd, cwd=str(deimv2_repo), check=True)
+
+
 if __name__ == "__main__":
-    # train_yolov11(50)
-    train_yolov26(50)
-    # train_rtdetr(50)
-    # train_detr_hf(50)
+    # train_rtdetr_synth(TRAIN_OUTPUT / "rtdetr-x-finetuned/weights/epoch30.pt", 50)
+    # train_rtdetr_synth(
+    #     TRAIN_OUTPUT / "rtdetr-l-finetuned-2/weights/epoch20.pt",
+    #     50,
+    #     name="rtdetr-l-finetuned-synth",
+    # )  # train rtdetr-l-50 on 50 synth images
+
+    # train_rtdetr(
+    #     # TRAIN_OUTPUT / "rtdetr-l-finetuned/weights/last.pt",
+    #     "rtdetr-l.pt",
+    #     80,
+    #     name="rtdetr-l-finetuned",
+    # )
+
+    train_rtdetr_adv(
+        # TRAIN_OUTPUT / "rtdetr-l-finetuned-adv/weights/last.pt",
+        "rtdetr-l.pt",
+        70,
+        name="rtdetr-l-finetuned-adv",
+        resume=True,
+    )
+
+    # train_deimv2(Path("/home/dev/DEIMv2/"))

@@ -6,11 +6,12 @@
 import base64
 from typing import Any
 
-from cv_manager import CVManager
+from ultralytics_manager import UltralyticsManager
+from rfdetr_manager import RFDETRManager
 from fastapi import FastAPI, Request
 
 app = FastAPI()
-manager = CVManager()
+manager = RFDETRManager()
 
 
 @app.post("/cv")
@@ -39,6 +40,26 @@ async def cv(request: Request) -> dict[str, list[list[dict[str, Any]]]]:
         predictions.append(detections)
 
     return {"predictions": predictions}
+
+
+@app.post("/noise")
+async def noise(request: Request) -> dict[str, list[dict[str, Any]]]:
+    """Performs CV object detection on image frames.
+
+    Args:
+        request: The API request. Contains a list of images, encoded in
+            base-64.
+
+    Returns:
+        A `dict` with a single key, `"predictions"`, mapping to a `list` of
+        `dict`s containing your CV model's predictions, in the same order as
+        which appears in `request`. See `cv/README.md` for the expected format.
+    """
+
+    inputs_json = await request.json()
+    image_bytes = base64.b64decode(inputs_json["b64"])
+    detections = manager.infer(image_bytes)
+    return {"detections": detections}
 
 
 @app.get("/health")

@@ -12,12 +12,21 @@ ENV PYTHONUNBUFFERED=1
 ENV PIP_ROOT_USER_ACTION=ignore
 WORKDIR /workspace
 
+RUN apt-get update && apt-get install -y \
+    libxcb1 \
+    libxrender1 \
+    libxext6 \
+    libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Installs your dependencies.
 RUN pip install -U pip
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copies your source files.
+COPY object_bank/ object_bank/
+COPY models/ models/
 COPY src .
 
 # Starts your model server.
