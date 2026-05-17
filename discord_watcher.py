@@ -15,6 +15,7 @@ Run:
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -22,7 +23,8 @@ import shutil
 import sys
 import tomllib
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import discord
@@ -43,6 +45,15 @@ RESULT_PATTERN = re.compile(
 )
 
 REPO_ROOT = Path(__file__).parent
+EVAL_LOG_PATH = REPO_ROOT / "logs" / "eval_results.jsonl"
+
+
+def log_eval_result(result: "EvalResult", logger: logging.Logger) -> None:
+    EVAL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"timestamp": datetime.now(timezone.utc).isoformat(), **asdict(result)}
+    with open(EVAL_LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+    logger.info("Recorded eval result to %s", EVAL_LOG_PATH)
 
 # ── data classes ───────────────────────────────────────────────────────────────
 
@@ -408,6 +419,8 @@ class WatcherClient(discord.Client):
             )
             self._logger.warning("Raw content was: %r", message.content)
             return
+
+        log_eval_result(result, self._logger)
 
         watched = self._config.watch_challenges
         if watched and result.challenge not in watched:
