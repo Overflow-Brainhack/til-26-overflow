@@ -8,6 +8,7 @@
 **/runs/
 *.pt
 *.pth
+*.nemo
 cv-training/
 
 # Byte-compiled / optimized / DLL files

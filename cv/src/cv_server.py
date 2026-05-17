@@ -11,7 +11,7 @@ from rfdetr_manager import RFDETRManager
 from fastapi import FastAPI, Request
 
 app = FastAPI()
-manager = UltralyticsManager()
+manager = RFDETRManager()
 
 
 @app.post("/cv")
