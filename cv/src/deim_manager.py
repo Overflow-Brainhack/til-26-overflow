@@ -1,12 +1,14 @@
 """Manages the CV model."""
 
-from typing import Any
-from io import BytesIO
-from PIL import Image, ImageFilter
+from manager import Manager
 
-import random
+from typing import Any, override
+from io import BytesIO
+from PIL import Image
+
 import torch
 import torch.nn as nn
+import numpy as np
 from torchvision import transforms
 from torchvision.ops import batched_nms
 from huggingface_hub import PyTorchModelHubMixin
@@ -87,8 +89,9 @@ deimv2_l_config = {
 }
 
 
-class DeimManager:
+class DeimManager(Manager):
     def __init__(self):
+        super().__init__()
         self.model = DEIMv2(deimv2_l_config)
         state_dict = torch.load("models/DEIMv2-l-68.pth", map_location="cpu")
         if "model" in state_dict:
@@ -96,28 +99,8 @@ class DeimManager:
         self.model.load_state_dict(state_dict, strict=True)
         self.model.to("cuda")
 
-    def _preprocess(self, image: bytes) -> bytes:
-        """Strip adversarial perturbations: resize jitter, median filter, bit-depth reduction, JPEG recompression."""
-        im = Image.open(BytesIO(image)).convert("RGB")
-        W, H = im.size
-
-        # Random resize: bilinear interpolation destroys adversarial pixel-grid alignment
-        scale = random.uniform(0.9, 1.0)
-        im = im.resize((int(W * scale), int(H * scale)), Image.BILINEAR)
-        im = im.resize((W, H), Image.BILINEAR)
-
-        # Median filter: removes structured/salt-and-pepper adversarial noise
-        im = im.filter(ImageFilter.MedianFilter(size=3))
-
-        # Bit-depth reduction to 6 bits: destroys perturbations with amplitude < 4px
-        im = im.point(lambda x: (x >> 2) << 2)
-
-        # JPEG recompression: kills high-frequency residuals
-        buf = BytesIO()
-        im.save(buf, format="JPEG", quality=80)
-        return buf.getvalue()
-
-    def run_deim(self, image: bytes) -> list[dict[str, Any]]:
+    @override
+    def infer(self, image: bytes) -> list[dict[str, int | list[float]]]:
         im = Image.open(BytesIO(image)).convert("RGB")
         original_dimensions = im.size
         transform_dimensions = (640, 640)
@@ -172,8 +155,3 @@ class DeimManager:
                 }
             )
         return preds
-
-    def cv(self, image: bytes) -> list[dict[str, Any]]:
-        """Performs object detection on an image."""
-        image = self._preprocess(image)
-        return self.run_deim(image)

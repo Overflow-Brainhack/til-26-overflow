@@ -8,10 +8,11 @@ from typing import Any
 
 from ultralytics_manager import UltralyticsManager
 from rfdetr_manager import RFDETRManager
+from ec_manager import ECDetManager
 from fastapi import FastAPI, Request
 
 app = FastAPI()
-manager = RFDETRManager()
+manager = ECDetManager()
 
 
 @app.post("/cv")
@@ -44,16 +45,16 @@ async def cv(request: Request) -> dict[str, list[list[dict[str, Any]]]]:
 
 @app.post("/noise")
 async def noise(request: Request) -> dict[str, list[dict[str, Any]]]:
-    """Performs CV object detection on image frames.
+    """Performs CV object detection on image frames for the noiser to utilise
 
     Args:
         request: The API request. Contains a list of images, encoded in
             base-64.
 
     Returns:
-        A `dict` with a single key, `"predictions"`, mapping to a `list` of
+        A `dict` with a single key, `"detections"`, mapping to a `list` of
         `dict`s containing your CV model's predictions, in the same order as
-        which appears in `request`. See `cv/README.md` for the expected format.
+        which appears in `request`.
     """
 
     inputs_json = await request.json()

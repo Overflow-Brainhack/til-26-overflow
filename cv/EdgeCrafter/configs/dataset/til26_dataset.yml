@@ -1,0 +1,37 @@
+task: detection
+evaluator:
+  type: CocoEvaluator
+  iou_types:
+    - bbox
+num_classes: 18
+remap_mscoco_category: false
+train_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: /home/dev/til-26-overflow/data/cv/deimv2/train
+    ann_file: /home/dev/til-26-overflow/data/cv/deimv2/train.json
+    return_masks: false
+    transforms:
+      type: Compose
+      ops: null
+  shuffle: true
+  num_workers: 0
+  drop_last: true
+  collate_fn:
+    type: BatchImageCollateFunction
+val_dataloader:
+  type: DataLoader
+  dataset:
+    type: CocoDetection
+    img_folder: /home/dev/til-26-overflow/data/cv/deimv2/val
+    ann_file: /home/dev/til-26-overflow/data/cv/deimv2/val.json
+    return_masks: false
+    transforms:
+      type: Compose
+      ops: null
+  shuffle: false
+  num_workers: 0
+  drop_last: false
+  collate_fn:
+    type: BatchImageCollateFunction

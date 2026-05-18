@@ -2,7 +2,6 @@
 
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
-cv
 ultralytics>=8.4.48
 pillow
 opencv-python
@@ -10,10 +9,19 @@ torch
 torchvision
 
 # for deimv2
-faster-coco-eval>=1.6.7
+# faster-coco-eval>=1.6.7
+# PyYAML
+# tensorboard
+# scipy
+# calflops
+# transformers
+
+# for ec
+numpy==2.0.1
+pycocotools
 PyYAML
 tensorboard
-scipy
+scipy==1.16.0
 calflops
 transformers
 

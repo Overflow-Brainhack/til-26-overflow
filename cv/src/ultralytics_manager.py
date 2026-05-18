@@ -1,26 +1,20 @@
 """Manages the CV model."""
 
+from manager import Manager
 from ultralytics import RTDETR, YOLO
-from typing import Any
+from typing import Any, override
 from io import BytesIO
 from PIL import Image, ImageFilter
 
 
-class UltralyticsManager:
+class UltralyticsManager(Manager):
     def __init__(self):
-        # self.model = RTDETR("models/rtdetr-l-70.pt")
-        self.model = RTDETR("models/rtdetr-l-adv-70.pt")
+        super().__init__()
+        self.model = RTDETR("models/rtdetr-l-70.pt")
+        # self.model = RTDETR("models/rtdetr-l-adv-70.pt")
 
-    def _preprocess(self, image: bytes) -> bytes:
-        """Strip adversarial perturbations with minimal accuracy impact."""
-        im = Image.open(BytesIO(image)).convert("RGB")
-        # Gaussian blur radius=1: kills sub-pixel adversarial noise, within YOLO blur augment range
-        im = im.filter(ImageFilter.GaussianBlur(radius=1))
-        buf = BytesIO()
-        im.save(buf, format="JPEG", quality=90)
-        return buf.getvalue()
-
-    def run_ultralytics(self, image: bytes) -> list[dict[str, Any]]:
+    @override
+    def infer(self, image: bytes) -> list[dict[str, int | list[float]]]:
         im = Image.open(BytesIO(image))
         results = self.model.predict(
             im, verbose=False, imgsz=1280, rect=True, augment=True, half=True
@@ -35,12 +29,3 @@ class UltralyticsManager:
                 }
             )
         return preds
-
-    def infer(self, image: bytes) -> list[dict[str, Any]]:
-        """Performs object detection for the noising docker"""
-        return self.run_ultralytics(image)
-
-    def cv(self, image: bytes) -> list[dict[str, Any]]:
-        """Performs object detection on an image."""
-        image = self._preprocess(image)
-        return self.run_ultralytics(image)
