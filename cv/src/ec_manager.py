@@ -8,10 +8,8 @@ from PIL import Image
 
 import torch
 import torch.nn as nn
-import numpy as np
 import torchvision.transforms as T
 from torchvision.ops import batched_nms
-from huggingface_hub import PyTorchModelHubMixin
 from EdgeCrafter.engine.core import YAMLConfig
 
 
@@ -44,8 +42,8 @@ class ECDetManager(Manager):
         super().__init__()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = build_model(
-            "EdgeCrafter/configs/ecdet/ecdet_l_til26.yml",
-            "models/ecdet-l-57.pth",
+            "EdgeCrafter/configs/ecdet/ecdet_m_til26.yml",
+            "models/ecdet-m-61.pth",
             self.device,
         )
         self.transforms = self._build_transforms()
@@ -53,7 +51,7 @@ class ECDetManager(Manager):
     def _build_transforms(self):
         return T.Compose(
             [
-                T.Resize((640, 640)),
+                T.Resize((1280, 1280)),
                 T.ToTensor(),
                 T.Normalize(
                     mean=[0.485, 0.456, 0.406],
