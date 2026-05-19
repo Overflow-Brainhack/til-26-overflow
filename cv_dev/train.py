@@ -4,9 +4,8 @@ from cv_dev.consts import (
     DATASETS_PATH,
     NUM_CATEGORIES,
     SYNTHETIC_DATA_PATH,
-    DEIMV2_DATA_PATH,
 )
-from cv_dev.make_dataset import load_dataset, ImageDataset
+from cv_dev.make_torch_dataset import load_dataset, ImageDataset
 from cv_dev.adv_rtdetr import AdversarialRTDETRTrainer
 
 from transformers import (
@@ -260,6 +259,57 @@ def train_rtdetr_synth(
     trainer.train()
 
 
+def train_ec(
+    ec_repo: Path,
+    resume: bool = False,
+) -> None:
+    """
+    Fine-tune ECDet-L/M on our 18-class dataset.
+
+    Requires the EdgeCrafter repo cloned locally:
+        git clone https://github.com/Intellindust-AI-Lab/EdgeCrafter <ec_repo>
+        pip install -r <ec_repo>/requirements.txt
+
+    Args:
+        re_repo: path to the cloned EdgeCrafter directory
+        resume: resume from the latest checkpoint in the output dir
+    """
+
+    dataset_cfg_path = ec_repo / "configs" / "dataset" / "til26_dataset.yml"
+    shutil.copyfile("cv_dev/til26_dataset.yml", dataset_cfg_path)
+
+    model_cfg_path = ec_repo / "configs" / "ecdet" / "ecdet_m_til26.yml"
+    shutil.copyfile("cv_dev/ecdet_m_til26.yml", model_cfg_path)
+
+    cmd = [
+        "uv",
+        "run",
+        "torchrun",
+        "--standalone",
+        "--nproc_per_node=1",
+        "train.py",
+        "-c",
+        str(model_cfg_path.relative_to(ec_repo)),
+        "--use-amp",
+        "--seed=0",
+    ]
+
+    if resume:
+        output_dir = Path(
+            "/home/dev/til-26-overflow/cv-training/trains/ecdet-m-finetuned"
+        )
+        checkpoints = sorted(
+            output_dir.glob("checkpoint*.pth"), key=lambda p: p.stat().st_mtime
+        )
+        if checkpoints:
+            cmd += ["--resume", str(checkpoints[-1])]
+    else:
+        cmd.append("-t")
+        cmd.append("/home/dev/til-26-overflow/ecdet-m-pretrained.pth")
+
+    subprocess.run(cmd, cwd=str(ec_repo), check=True)
+
+
 def train_deimv2(
     deimv2_repo: Path,
     resume: bool = False,
@@ -275,11 +325,6 @@ def train_deimv2(
         deimv2_repo: path to the cloned DEIMv2 directory
         resume: resume from the latest checkpoint in the output dir
     """
-
-    train_img_dir = DEIMV2_DATA_PATH / "train"
-    train_json = DEIMV2_DATA_PATH / "train.json"
-    val_img_dir = DEIMV2_DATA_PATH / "val"
-    val_json = DEIMV2_DATA_PATH / "val.json"
 
     dataset_cfg_path = deimv2_repo / "configs" / "dataset" / "til26_dataset.yml"
     shutil.copyfile("cv_dev/til26_dataset.yml", dataset_cfg_path)
@@ -306,7 +351,7 @@ def train_deimv2(
     ]
 
     if resume:
-        output_dir = deimv2_repo / "outputs" / "deimv2_dinov3_l_til26"
+        output_dir = "/home/dev/til-26-overflow/cv-training/trains/DEIMv2-finetuned"
         checkpoints = sorted(
             output_dir.glob("checkpoint*.pth"), key=lambda p: p.stat().st_mtime
         )
@@ -331,12 +376,14 @@ if __name__ == "__main__":
     #     name="rtdetr-l-finetuned",
     # )
 
-    train_rtdetr_adv(
-        # TRAIN_OUTPUT / "rtdetr-l-finetuned-adv/weights/last.pt",
-        "rtdetr-l.pt",
-        70,
-        name="rtdetr-l-finetuned-adv",
-        resume=True,
-    )
+    # train_rtdetr_adv(
+    #     # TRAIN_OUTPUT / "rtdetr-l-finetuned-adv/weights/last.pt",
+    #     "rtdetr-l.pt",
+    #     70,
+    #     name="rtdetr-l-finetuned-adv",
+    #     resume=True,
+    # )
 
     # train_deimv2(Path("/home/dev/DEIMv2/"))
+
+    train_ec(Path("/home/dev/EdgeCrafter/ecdetseg/"), resume=True)

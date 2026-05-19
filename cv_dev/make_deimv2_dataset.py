@@ -2,8 +2,6 @@ from cv_dev.consts import (
     JSON_PATH,
     IMAGE_PATH,
     DEIMV2_DATA_PATH,
-    SYNTHETIC_IMAGE_PATH,
-    SYNTHETIC_JSON_PATH,
 )
 from cv_dev.utils import process_annotations
 
@@ -58,46 +56,6 @@ def prepare_deimv2_data() -> tuple[Path, Path, Path, Path]:
             dst = dst_dir / img["file_name"]
             if not dst.exists():
                 shutil.copy(src, dst)
-
-    if SYNTHETIC_JSON_PATH.exists():
-        with open(SYNTHETIC_JSON_PATH) as f:
-            synth_data = json.load(f)
-
-        synth_images = synth_data["images"]
-        synth_annotations = synth_data["annotations"]
-        num_images = len(synth_images)
-
-        # Mirror the exact split from make_yolo_dataset.py
-        processed = process_annotations(synth_annotations, num_images)
-        train_processed, val_processed = train_test_split(
-            processed, test_size=0.2, random_state=42
-        )
-
-        train_ids = {k for p in train_processed for k in p}
-        val_ids = {k for p in val_processed for k in p}
-
-        id_to_image = {img["id"]: img for img in synth_images}
-        synth_train_imgs = [
-            id_to_image[i] for i in sorted(train_ids) if i in id_to_image
-        ]
-        synth_val_imgs = [id_to_image[i] for i in sorted(val_ids) if i in id_to_image]
-        synth_train_anns = [a for a in synth_annotations if a["image_id"] in train_ids]
-        synth_val_anns = [a for a in synth_annotations if a["image_id"] in val_ids]
-
-        for imgs, dst_dir in [
-            (synth_train_imgs, train_img_dir),
-            (synth_val_imgs, val_img_dir),
-        ]:
-            for img in tqdm(imgs, f"Copying synth images → {dst_dir.name}"):
-                src = SYNTHETIC_IMAGE_PATH / img["file_name"]
-                dst = dst_dir / img["file_name"]
-                if not dst.exists():
-                    shutil.copy(src, dst)
-
-        train_imgs.extend(synth_train_imgs)
-        train_anns.extend(synth_train_anns)
-        val_imgs.extend(synth_val_imgs)
-        val_anns.extend(synth_val_anns)
 
     train_json = DEIMV2_DATA_PATH / "train.json"
     val_json = DEIMV2_DATA_PATH / "val.json"
