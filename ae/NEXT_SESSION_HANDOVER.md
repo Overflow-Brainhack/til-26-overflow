@@ -326,6 +326,48 @@ Highest priority normal-policy ideas:
    - If bombing for space, prioritize temporary movement along cells in/near the
      bomb's blast area that lead toward destructible walls/opened area.
 
+6. Respawn Memory (Farming High-Value Tiles)
+   - Tiles respawn at a maximum of 40 steps (tile_respawn_steps: 40), modified by Perlin noise. Your current _try_explore just looks for unseen frontier tiles.
+   - The Improvement: Instead of exploring blindly, track the exact coordinates and timestamps of high-value tiles (Mission=5, Resource=2) that were collected.
+   - Implementation: Add a dictionary: self._tile_graveyard: dict[tuple[int, int], int]. When a tile disappears from your vision, log the current_step. In _try_explore or _try_collect, if current_step - graveyard_step > 35, add that coordinate back into the candidate pool as a "Ghost Tile" with a slight penalty to its score. This creates a reliable patrol route where your agent "farms" the most lucrative sections of the map, drastically outscoring an agent that wanders randomly.
+  
+7. Global Temporal Pathing (Safe Routing)
+   - Currently, temporal_first_action_to (which checks if a tile will be dangerous when you step on it) is only used in _dodge. For _try_collect and _try_explore, you use standard Dijkstra (reachable_cells).
+   - The Danger: Your agent might plot a 5-step path to a Mission tile, unaware that step 4 walks directly into an exploding bomb that was just placed.
+   - The Improvement: Unify your pathfinding. Replace all standard Dijkstra calls in _try_collect and _try_explore with temporal pathfinding. Pass the danger_timeline into _try_collect. Ensure that the edge_cost function invalidates any edge where arrival_tick == detonation_tick. This guarantees your agent will path around active fuses while collecting, rather than walking into them and triggering the dodge logic too late.
+
+8. Chokepoint Trapping (Topological Bombing)
+   - Your current predictive bombing (_expected_hits) relies on velocity projection. This works on open terrain but misses guaranteed kills in mazes.
+   - The Improvement: Look at the map topology. The blast radius is a $5 \times 5$ square (radius 2) blocked by indestructible walls. If an enemy walks into a 1-tile wide corridor or a dead-end, you don't need to predict their velocity—you just need to block their exit.Implementation in _try_attack:Add a check for "Escape Routes".Run a quick Breadth-First Search (BFS) from the enemy's position using memory.passable.If the number of safe tiles they can reach within BOMB_TIMER (4 steps) is zero when a bomb is placed at your current location, the expected hit probability is $1.0$.Bypass bomb_economy thresholds for these guaranteed kills and immediately return Action.PLACE_BOMB.
+     
+## Radical and Potentially Gamechanging Ideas
+
+1. The Infinite Death Loop (Spawn Farming)
+   - _Note: user unsure of viability due to bomb economy_
+   - Your current heuristic avoids enemies or tries to bomb them once. But we can turn a single kill into a permanent point-farming loop by exploiting the respawn timer.
+   - The Exploit: The environment dictates that when an agent's HP reaches 0, it freezes for exactly 3 steps, then "respawns at the same tile at full HP". Meanwhile, a bomb takes 4 steps to detonate.
+   - The Execution: The exact tick an enemy dies and becomes frozen, you have a 3-tick window. If you have the bombs to spare, step adjacent to their frozen body on the next tick and drop another bomb. Because the bomb timer is 4 steps and their invulnerability lasts 3, the bomb will detonate the exact moment they respawn.
+   - The Result: You can trap an enemy in an infinite death loop, farming 15 points (a flat attack_kill reward) plus 20 points (attack_damage) over and over until the 200-step limit is reached.
+
+2. The "Locust" Opening (Resource Starvation)
+   - _Note: On paper, this seems reasonable. Prioritise this idea among in the section_
+   - Your bot currently explores frontiers and collects tiles based on immediate value-over-distance. This is standard, but it allows the enemy to collect their own tiles and build an arsenal.
+   - The Exploit: Bombs are expensive. They cost 1.5 resource units, and teams only get a passive 0.1 per step. The only way to get early bombs is to collect Mission (5.0 points) and Resource (2.0 points) tiles.
+   - The Execution: Hardcode an "Opening Phase" for the first 20–30 steps. Your agent should ignore all tiles on its own side of the map and sprint directly into the enemy's half of the grid. By aggressively sweeping their high-value tiles first, you create a massive resource disparity.The Result: You will secure 3 to 4 early bombs while they are stuck waiting 15 turns just to afford one. You can then use your massive bomb advantage to execute the Siege Mode (mentioned previously) while they are completely defenseless.
+
+3. 3D Time-Space Pathfinding ($A^*$ with Time)
+   - Your current temporal_first_action_to only triggers when dodging imminent danger. Otherwise, you rely on a 2D map. This results in highly suboptimal pathing where the bot takes long detours because a tile is currently dangerous, even if it will be safe by the time the bot actually steps there.
+   - The Exploit: The game state is highly predictable up to 4 steps into the future (the maximum fuse of a bomb).
+   - The Execution: Upgrade your pathfinding algorithm from a 2D spatial search to a 3D Time-Space search where each node is a tuple of $(x, y, t)$.If a bomb is placed at step $T$, the affected blast tiles are only marked as impassable at exactly $t = T + 4$.This allows your agent to confidently walk through a bomb's blast radius on $T + 1$ or $T + 2$, knowing it will be safely out of range by $T + 4$.
+   - The Result: Your agent will cut corners tighter than any standard heuristic bot, shaving dozens of steps off travel times over the course of the 200-step game.
+
+5. Structural Corner-Peeking (The "L-Shape" Ambush)
+   - _Note: need to generate scenarios to verify_
+   - Your current predictive bombing relies heavily on enemy velocity, but you can leverage the physics of the environment to guarantee hits without prediction.The Exploit: The bomb blast has a square radius of 2 ($5 \times 5$ cross) but is blocked entirely by indestructible walls.
+   - The Execution: When being chased or intercepting an enemy in a maze-like area, calculate "blind spots." Navigate exactly one tile around an indestructible corner (an L-shape) and drop a bomb. The enemy will follow your path to maintain line-of-sight, walking directly onto the bomb with only 1 or 2 ticks left on the fuse—leaving them zero time to escape.
+   - The Result: You stop relying on the enemy making a mistake and start forcing them into mathematically inescapable grid positions.
+
+
 Endgame note:
 
 - Do **not** add a naive "last 30 steps attack bases" mode.
