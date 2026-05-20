@@ -55,6 +55,7 @@ def log_eval_result(result: "EvalResult", logger: logging.Logger) -> None:
         f.write(json.dumps(entry) + "\n")
     logger.info("Recorded eval result to %s", EVAL_LOG_PATH)
 
+
 # ── data classes ───────────────────────────────────────────────────────────────
 
 
@@ -64,8 +65,8 @@ class Config:
     channel_id: int
     guild_id: int | None
     watch_challenges: frozenset[str]  # empty = watch all valid challenges
-    submit_flags: list[str]           # extra flags prepended to submit.sh
-    dry_run: bool                     # log the command without executing it
+    submit_flags: list[str]  # extra flags prepended to submit.sh
+    dry_run: bool  # log the command without executing it
 
 
 @dataclass
@@ -100,7 +101,9 @@ def load_config() -> Config:
     try:
         channel_id = int(raw_channel)
     except ValueError:
-        raise ValueError(f"DISCORD_CHANNEL_ID must be a numeric snowflake, got: {raw_channel!r}")
+        raise ValueError(
+            f"DISCORD_CHANNEL_ID must be a numeric snowflake, got: {raw_channel!r}"
+        )
 
     raw_guild = os.environ.get("DISCORD_GUILD_ID", "")
     guild_id: int | None = None
@@ -108,11 +111,15 @@ def load_config() -> Config:
         try:
             guild_id = int(raw_guild)
         except ValueError:
-            raise ValueError(f"DISCORD_GUILD_ID must be a numeric snowflake, got: {raw_guild!r}")
+            raise ValueError(
+                f"DISCORD_GUILD_ID must be a numeric snowflake, got: {raw_guild!r}"
+            )
 
     raw_challenges = os.environ.get("WATCH_CHALLENGES", "")
     if raw_challenges:
-        watch_challenges = frozenset(c.strip().lower() for c in raw_challenges.split(",") if c.strip())
+        watch_challenges = frozenset(
+            c.strip().lower() for c in raw_challenges.split(",") if c.strip()
+        )
         unknown = watch_challenges - VALID_CHALLENGES
         if unknown:
             raise ValueError(
@@ -199,7 +206,7 @@ def _gcloud_token_sync() -> str:
 
     request = google.auth.transport.requests.Request()
 
-    #source_creds, _ = google.auth.default(scopes=_SCOPES, quota_project_id=_PROJECT)
+    # source_creds, _ = google.auth.default(scopes=_SCOPES, quota_project_id=_PROJECT)
     source_creds, _ = google.auth.default(scopes=_SCOPES)
     source_creds.refresh(request)
 
@@ -244,8 +251,12 @@ _CHALLENGE_PORTS = {"asr": 5001, "cv": 5002, "noise": 5003, "nlp": 5004, "ae": 5
 
 
 async def _run_streaming(
-    cmd: list[str], logger: logging.Logger, *,
-    stdin_data: bytes | None = None, label: str = "cmd", env: dict | None = None,
+    cmd: list[str],
+    logger: logging.Logger,
+    *,
+    stdin_data: bytes | None = None,
+    label: str = "cmd",
+    env: dict | None = None,
 ) -> int:
     logger.info(">> %s", " ".join(cmd))
     proc = await asyncio.create_subprocess_exec(
@@ -288,19 +299,28 @@ async def run_submit(
     if dry_run:
         logger.info(
             "[dry-run] would build=%s, tag/push %s -> %s, then upload to Vertex AI",
-            build, local_ref, remote_ref,
+            build,
+            local_ref,
+            remote_ref,
         )
         return
 
     if _SUBMIT_LOCK.locked():
         logger.info("Queued behind running submission: %s:%s", challenge, tag)
     async with _SUBMIT_LOCK:
-        await _run_submit_locked(challenge, build, local_ref, remote_ref, port, image_name, logger)
+        await _run_submit_locked(
+            challenge, build, local_ref, remote_ref, port, image_name, logger
+        )
 
 
 async def _run_submit_locked(
-    challenge: str, build: bool, local_ref: str, remote_ref: str,
-    port: int, image_name: str, logger: logging.Logger,
+    challenge: str,
+    build: bool,
+    local_ref: str,
+    remote_ref: str,
+    port: int,
+    image_name: str,
+    logger: logging.Logger,
 ) -> None:
     docker = shutil.which("docker") or shutil.which("docker.exe")
     gcloud = shutil.which("gcloud") or shutil.which("gcloud.cmd")
@@ -311,32 +331,61 @@ async def _run_submit_locked(
         logger.error("gcloud executable not found on PATH")
         return
 
-    token = await _gcloud_token(logger)
-    if not token:
-        logger.error("Could not fetch service-account token — aborting submission")
-        return
+    # token = await _gcloud_token(logger)
+    # if not token:
+    #     logger.error("Could not fetch service-account token — aborting submission")
+    #     return
+
+    gcloud_env = dict(os.environ)
+    gcloud_env["CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT"] = _SERVICE_ACCOUNT
 
     if build:
         logger.info("=== docker build ===")
         rc = await _run_streaming(
             [docker, "build", "--platform", "linux/amd64", "-t", local_ref, challenge],
-            logger, label="build",
+            logger,
+            label="build",
         )
         if rc != 0:
             logger.error("docker build failed (rc=%d) — aborting", rc)
             return
 
     logger.info("=== docker login ===")
+    token_proc = await asyncio.create_subprocess_exec(
+        gcloud,
+        "auth",
+        "print-access-token",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=gcloud_env,
+    )
+    token_stdout, token_stderr = await token_proc.communicate()
+    if token_proc.returncode != 0:
+        logger.error("gcloud auth print-access-token failed: %s", token_stderr.decode())
+        return
+    token = token_stdout.decode().strip()
+
     rc = await _run_streaming(
-        [docker, "login", "-u", "oauth2accesstoken", "--password-stdin", f"https://{_REGISTRY}"],
-        logger, stdin_data=token.encode(), label="login",
+        [
+            docker,
+            "login",
+            "-u",
+            "oauth2accesstoken",
+            "--password-stdin",
+            f"https://{_REGISTRY}",
+        ],
+        logger,
+        stdin_data=token.encode(),
+        label="login",
     )
     if rc != 0:
         logger.error("docker login failed (rc=%d) — aborting", rc)
         return
 
     logger.info("=== docker tag + push ===")
-    rc = await _run_streaming([docker, "tag", local_ref, remote_ref], logger, label="tag")
+    rc = await _run_streaming(
+        [docker, "tag", local_ref, remote_ref], logger, label="tag"
+    )
     if rc != 0:
         logger.error("docker tag failed (rc=%d) — aborting", rc)
         return
@@ -347,11 +396,14 @@ async def _run_submit_locked(
 
     logger.info("=== gcloud ai models upload ===")
     gcloud_env = dict(os.environ)
-    gcloud_env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = token
-    gcloud_env.pop("CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT", None)
+    # gcloud_env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = token
+    # gcloud_env.pop("CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT", None)
     rc = await _run_streaming(
         [
-            gcloud, "ai", "models", "upload",
+            gcloud,
+            "ai",
+            "models",
+            "upload",
             f"--project={_PROJECT}",
             f"--region={_REGION}",
             f"--display-name={image_name}",
@@ -361,7 +413,9 @@ async def _run_submit_locked(
             f"--container-ports={port}",
             "--version-aliases=default",
         ],
-        logger, label="upload", env=gcloud_env,
+        logger,
+        label="upload",
+        env=gcloud_env,
     )
     if rc == 0:
         logger.info("✓ Submitted %s as %s on %s", local_ref, image_name, _REGION)
@@ -405,7 +459,10 @@ class WatcherClient(discord.Client):
     async def on_message(self, message: discord.Message) -> None:
         if message.channel.id != self._config.channel_id:
             return
-        if self._config.guild_id and getattr(message.guild, "id", None) != self._config.guild_id:
+        if (
+            self._config.guild_id
+            and getattr(message.guild, "id", None) != self._config.guild_id
+        ):
             return
         if "evaluation has finished" not in message.content:
             return
@@ -415,7 +472,8 @@ class WatcherClient(discord.Client):
         result = parse_result(message.content)
         if result is None:
             self._logger.warning(
-                "Matched trigger phrase but could not parse result from message id=%d", message.id
+                "Matched trigger phrase but could not parse result from message id=%d",
+                message.id,
             )
             self._logger.warning("Raw content was: %r", message.content)
             return
@@ -466,7 +524,13 @@ class WatcherClient(discord.Client):
             "Submitting %s:%s (queue position %d/%d)", challenge, next_tag, pos + 1, n
         )
         asyncio.create_task(
-            run_submit(challenge, next_tag, self._config.submit_flags, self._config.dry_run, self._logger)
+            run_submit(
+                challenge,
+                next_tag,
+                self._config.submit_flags,
+                self._config.dry_run,
+                self._logger,
+            )
         )
 
     async def _stdin_loop(self) -> None:

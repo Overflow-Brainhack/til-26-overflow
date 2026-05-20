@@ -18,7 +18,7 @@ load_dotenv()
 TEAM_NAME = os.getenv("TEAM_NAME")
 TEAM_TRACK = os.getenv("TEAM_TRACK")
 
-BATCH_SIZE = 16
+BATCH_SIZE = 4
 
 
 class COCOPatched(COCO):

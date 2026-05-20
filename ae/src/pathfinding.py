@@ -19,18 +19,22 @@ from constants import Action, DIR_VECTOR, Direction
 
 
 EdgeCost = Callable[[tuple[int, int], tuple[int, int]], Optional[float]]
+_DIRS = tuple(DIR_VECTOR[Direction(i)] for i in range(4))
+_LEFT = (3, 0, 1, 2)
+_RIGHT = (1, 2, 3, 0)
+_OPPOSITE = (2, 3, 0, 1)
 
 
 def _turn_left(d: int) -> int:
-    return (d - 1) % 4
+    return _LEFT[d]
 
 
 def _turn_right(d: int) -> int:
-    return (d + 1) % 4
+    return _RIGHT[d]
 
 
 def _opposite(d: int) -> int:
-    return (d + 2) % 4
+    return _OPPOSITE[d]
 
 
 def next_pos_after(
@@ -40,10 +44,10 @@ def next_pos_after(
 ) -> tuple[int, int]:
     """Cell the agent ends up in after taking `action` (assuming the move is legal)."""
     if action == Action.FORWARD:
-        dx, dy = DIR_VECTOR[Direction(facing)]
+        dx, dy = _DIRS[facing]
         return (pos[0] + dx, pos[1] + dy)
     if action == Action.BACKWARD:
-        dx, dy = DIR_VECTOR[Direction(_opposite(facing))]
+        dx, dy = _DIRS[_OPPOSITE[facing]]
         return (pos[0] + dx, pos[1] + dy)
     return pos
 
@@ -194,17 +198,19 @@ def _expand(
     edge_cost: EdgeCost,
     turn_cost: float,
 ):
-    fdx, fdy = DIR_VECTOR[Direction(facing)]
+    fdx, fdy = _DIRS[facing]
     fwd = (pos[0] + fdx, pos[1] + fdy)
     fwd_cost = edge_cost(pos, fwd)
     if fwd_cost is not None:
         yield Action.FORWARD, fwd, facing, fwd_cost
 
-    bdx, bdy = DIR_VECTOR[Direction(_opposite(facing))]
+    bdx, bdy = _DIRS[_OPPOSITE[facing]]
     back = (pos[0] + bdx, pos[1] + bdy)
     back_cost = edge_cost(pos, back)
     if back_cost is not None:
-        yield Action.BACKWARD, back, facing, back_cost
+        # ε penalty: backward travel loses visibility (viewcone is 4 ahead vs 2 behind)
+        # and breaks the LEFT+BACKWARD == RIGHT+FORWARD Dijkstra tie that suppressed RIGHT.
+        yield Action.BACKWARD, back, facing, back_cost + 0.01
 
-    yield Action.LEFT, pos, _turn_left(facing), turn_cost
-    yield Action.RIGHT, pos, _turn_right(facing), turn_cost
+    yield Action.RIGHT, pos, _RIGHT[facing], turn_cost
+    yield Action.LEFT, pos, _LEFT[facing], turn_cost

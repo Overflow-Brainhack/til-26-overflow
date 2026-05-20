@@ -11,15 +11,18 @@ first construction. Bundle a captured cache via the Dockerfile's
 `COPY src .` to start round 1 with full map knowledge.
 """
 
+import os
 from pathlib import Path
 from typing import Any, Optional
 
 from constants import Action
 from map_memory import MapMemory, get_shared_memory
 from observation import parse_observation
-from berserker_policy import BerserkerPolicy
-from policy import HeuristicPolicy
 from policy import Policy
+from edited_policy import EditedHeuristicPolicy as HeuristicPolicy
+
+# from berserker_base_policy import BerserkerBasePolicy as HeuristicPolicy
+from rl_attack import load_attack_module
 
 
 # Default cache path: bundled into the Docker image alongside source.
@@ -31,27 +34,21 @@ DEFAULT_CACHE_PATH = Path(__file__).resolve().parent / "novice_map.json"
 DEFAULT_POLICY_KWARGS: dict = dict(
     predictive_bomb=True,
     predictive_bomb_threshold=0.7,
-
     wall_breaking=True,
     wall_break_cost=5.0,
     adaptive_wall_break_cost=False,
-
     smart_defend=True,
     predictive_defend=True,
-
     drift_aware_bomb=True,
     auto_tune_bomb=True,
     bomb_tune_target=0.40,
-
     bomb_economy=True,
     base_bomb_value=5.0,
     agent_bomb_value=1.0,
     bomb_reserve_threshold=1.5,
     wall_break_tile_threshold=0.0,
-
     loop_detection=True,
     loop_window=6,
-
     proactive_base_routing=True,
     base_route_weight=100,
     adaptive_base_weight=True,
@@ -59,6 +56,11 @@ DEFAULT_POLICY_KWARGS: dict = dict(
     base_weight_ramp_rate=0.02,
     base_weight_attack_cooldown=20,
 )
+
+# DEFAULT_POLICY_VARIANT = os.environ.get("AE_POLICY_VARIANT", "normal")
+# DEFAULT_ATTACK_MODEL = os.environ.get("AE_ATTACK_MODEL", "")
+# DEFAULT_ATTACK_BOMB_MARGIN = float(os.environ.get("AE_ATTACK_BOMB_MARGIN", "0.0"))
+# DEFAULT_ATTACK_MODULE_MODE = os.environ.get("AE_ATTACK_MODULE_MODE", "hybrid")
 
 
 class AEManager:
@@ -83,7 +85,7 @@ class AEManager:
             self._maybe_load_cache(cache_path or DEFAULT_CACHE_PATH)
 
         self._memory.reset_round()
-        #self._policy: Policy = policy or BerserkerPolicy()
+        # self._policy: Policy = policy or BerserkerPolicy()
         self._policy: Policy = policy or HeuristicPolicy(**DEFAULT_POLICY_KWARGS)
 
     def _maybe_load_cache(self, path: Path) -> None:

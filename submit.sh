@@ -212,11 +212,10 @@ run gcloud ai models upload \
   --region="$REGION" \
   --display-name="$IMAGE_NAME" \
   --container-image-uri="$REMOTE_REF" \
-  --container-health-route="//health" \
-  --container-predict-route="/$ROUTE" \
+  --container-health-route="/health" \
+  --container-predict-route="$ROUTE" \
   --container-ports="$PORT" \
   --version-aliases="default"
 
 echo
 echo "✓ Submitted $LOCAL_REF as $IMAGE_NAME on $REGION."
-

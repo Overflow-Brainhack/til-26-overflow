@@ -27,19 +27,25 @@ from map_memory import MapMemory
 
 # How many ticks ahead we project bomb risk. Slightly more than max timer.
 LOOKAHEAD_TICKS = BOMB_TIMER + 2
+_BLAST_OFFSETS = tuple(
+    (dx, dy)
+    for dx in range(-BOMB_BLAST_RADIUS, BOMB_BLAST_RADIUS + 1)
+    for dy in range(-BOMB_BLAST_RADIUS, BOMB_BLAST_RADIUS + 1)
+)
+_ALL_CELLS = frozenset((x, y) for x in range(GRID_SIZE) for y in range(GRID_SIZE))
+_CARDINAL_STEPS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 
 
 def cells_in_blast(memory: MapMemory, bomb_pos: tuple[int, int]) -> set[tuple[int, int]]:
     """Return all cells the bomb at bomb_pos would damage if it detonated now."""
     ox, oy = bomb_pos
     out: set[tuple[int, int]] = set()
-    for dx in range(-BOMB_BLAST_RADIUS, BOMB_BLAST_RADIUS + 1):
-        for dy in range(-BOMB_BLAST_RADIUS, BOMB_BLAST_RADIUS + 1):
-            tx, ty = ox + dx, oy + dy
-            if not (0 <= tx < GRID_SIZE and 0 <= ty < GRID_SIZE):
-                continue
-            if _los(memory, (ox, oy), (tx, ty)):
-                out.add((tx, ty))
+    for dx, dy in _BLAST_OFFSETS:
+        tx, ty = ox + dx, oy + dy
+        if not (0 <= tx < GRID_SIZE and 0 <= ty < GRID_SIZE):
+            continue
+        if _los(memory, (ox, oy), (tx, ty)):
+            out.add((tx, ty))
     return out
 
 
@@ -62,20 +68,30 @@ def project_danger(memory: MapMemory) -> dict[int, set[tuple[int, int]]]:
     return timeline
 
 
-def imminent_danger(memory: MapMemory, pos: tuple[int, int]) -> Optional[int]:
+def imminent_danger(
+    memory: MapMemory,
+    pos: tuple[int, int],
+    timeline: Optional[dict[int, set[tuple[int, int]]]] = None,
+) -> Optional[int]:
     """Soonest tick offset at which `pos` is in a blast, or None."""
-    timeline = project_danger(memory)
+    if timeline is None:
+        timeline = project_danger(memory)
     return min((t for t, cells in timeline.items() if pos in cells), default=None)
 
 
-def cells_safe_for_at_least(memory: MapMemory, ticks: int) -> set[tuple[int, int]]:
+def cells_safe_for_at_least(
+    memory: MapMemory,
+    ticks: int,
+    timeline: Optional[dict[int, set[tuple[int, int]]]] = None,
+) -> set[tuple[int, int]]:
     """Cells not in any projected blast within the next `ticks` ticks."""
-    timeline = project_danger(memory)
+    if timeline is None:
+        timeline = project_danger(memory)
     danger: set[tuple[int, int]] = set()
     for t, cells in timeline.items():
         if t <= ticks:
             danger.update(cells)
-    return {(x, y) for x in range(GRID_SIZE) for y in range(GRID_SIZE) if (x, y) not in danger}
+    return set(_ALL_CELLS - danger)
 
 
 def predict_enemy_positions(
@@ -99,7 +115,7 @@ def predict_enemy_positions(
         for _ in range(steps):
             next_frontier: list[tuple[int, int]] = []
             for p in frontier:
-                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                for dx, dy in _CARDINAL_STEPS:
                     n = (p[0] + dx, p[1] + dy)
                     if not memory.in_bounds(n):
                         continue
@@ -147,7 +163,7 @@ def _blast_cell_escape_factor(
     routes counts at 0.25.
     """
     exits = 0
-    for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+    for ddx, ddy in _CARDINAL_STEPS:
         nbr = (cell[0] + ddx, cell[1] + ddy)
         if (
             memory.in_bounds(nbr)

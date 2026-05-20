@@ -2,9 +2,10 @@
 
 Agent types
 -----------
-  normal    — HeuristicPolicy (balanced: dodge, attack, defend, collect, explore)
-  berserker — BerserkerPolicy (rush enemy bases, ignore self-preservation)
-  random    — RandomPolicy (uniform sample over legal actions)
+  normal              — HeuristicPolicy (balanced: dodge, attack, defend, collect, explore)
+  berserker           — BerserkerPolicy (rush enemy bases, ignore self-preservation)
+  berserker_base      — BerserkerBasePolicy (heuristic base, berserker-style aggression)
+  random              — RandomPolicy (uniform sample over legal actions)
 
 Visual mode (default):
     python ae/test_env/auto_play.py
@@ -12,7 +13,7 @@ Visual mode (default):
     python ae/test_env/auto_play.py --agent-types berserker normal normal normal normal normal
     python ae/test_env/auto_play.py --rounds 3 --seed 42 --fps 4
 
-Headless benchmark (compare all three types, no window):
+Headless benchmark (compare selected types, no window):
     python ae/test_env/auto_play.py --benchmark --rounds 30
     python ae/test_env/auto_play.py --benchmark --rounds 50 --novice
 
@@ -48,14 +49,25 @@ from til_environment.bomberman_env import Bomberman  # noqa: E402
 from til_environment.config import default_config, load_config  # noqa: E402
 
 from ae_manager import DEFAULT_CACHE_PATH, DEFAULT_POLICY_KWARGS, AEManager  # noqa: E402
+from berserker_base_policy import BerserkerBasePolicy  # noqa: E402
 from berserker_policy import BerserkerPolicy  # noqa: E402
 from constants import Action, GRID_SIZE  # noqa: E402
+from edited_policy import EditedHeuristicPolicy as HeuristicPolicy  # noqa: E402
+
+# Comment the line below to benchmark the plain edited_policy instead of the
+# experimental clone (mirrors the toggle in ae_manager.py).
+from edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy  # noqa: E402
 from map_memory import MapMemory  # noqa: E402
 from observation import ParsedObs  # noqa: E402
-from policy import HeuristicPolicy, Policy  # noqa: E402
+from policy import Policy  # noqa: E402
 
 
-AGENT_TYPES = ("normal", "berserker", "random")
+AGENT_TYPES = (
+    "normal",
+    "berserker",
+    "berserker_base",
+    "random",
+)
 
 
 class RandomPolicy(Policy):
@@ -66,12 +78,22 @@ class RandomPolicy(Policy):
         return int(random.choice(valid)) if valid else int(Action.STAY)
 
 
-def _make_policy(agent_type: str, policy_kwargs: dict) -> Policy:
-    if agent_type == "berserker":
-        return BerserkerPolicy()
-    if agent_type == "random":
-        return RandomPolicy()
-    return HeuristicPolicy(**policy_kwargs)
+def _make_policy(
+    agent_type: str,
+    policy_kwargs: dict,
+) -> Policy:
+    if agent_type == "normal":
+        policy: Policy = HeuristicPolicy(**policy_kwargs)
+    elif agent_type == "berserker":
+        policy = BerserkerPolicy()
+    elif agent_type == "berserker_base":
+        policy = BerserkerBasePolicy(**policy_kwargs)
+    elif agent_type == "random":
+        policy = RandomPolicy()
+    else:
+        raise ValueError(f"unknown agent type: {agent_type}")
+
+    return policy
 
 
 def _make_factories(
@@ -83,7 +105,10 @@ def _make_factories(
     out: dict[str, callable] = {}
     for agent, t in zip(agents, types):
         t_ = t  # capture loop variable
-        out[agent] = lambda t=t_: _make_policy(t, policy_kwargs)
+        out[agent] = lambda t=t_: _make_policy(
+            t,
+            policy_kwargs,
+        )
     return out
 
 
@@ -147,7 +172,14 @@ def _print_round_summary(
 
 # ── headless benchmark ──────────────────────────────────────────────────────
 
-def _run_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> None:
+
+def _run_benchmark(
+    rounds: int,
+    novice: bool,
+    policy_kwargs: dict,
+    cache_path: Optional[Path],
+    agent_types: tuple[str, ...] = AGENT_TYPES,
+) -> None:
     """Headless comparison: run each type for *rounds* rounds, then print table.
 
     All agents in a game use the same type so competition strength is equal.
@@ -162,7 +194,7 @@ def _run_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> None:
         )
     results: dict[str, list[float]] = {}
 
-    for agent_type in AGENT_TYPES:
+    for agent_type in agent_types:
         print(f"\nBenchmarking [{agent_type}] — {rounds} rounds …", flush=True)
         cfg = default_config()
         cfg.env.novice = novice
@@ -177,7 +209,7 @@ def _run_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> None:
             [agent_type] * n_agents,
             policy_kwargs,
         )
-        managers, cache_tmpl = _build_managers(env, factories, None)
+        managers, cache_tmpl = _build_managers(env, factories, cache_path)
 
         round_scores: list[float] = []
         for round_idx in range(rounds):
@@ -198,7 +230,10 @@ def _run_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> None:
             avg = mean(per_agent)
             best = max(per_agent)
             round_scores.append(avg)
-            print(f"  round {round_idx + 1:3d}  avg={avg:7.1f}  max={best:7.1f}", flush=True)
+            print(
+                f"  round {round_idx + 1:3d}  avg={avg:7.1f}  max={best:7.1f}",
+                flush=True,
+            )
 
             if round_idx < rounds - 1:
                 seed = random.randint(0, 99999)
@@ -217,21 +252,35 @@ def _run_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> None:
         if not scores:
             continue
         s_mean = mean(scores)
-        s_max  = max(scores)
-        s_min  = min(scores)
-        s_std  = stdev(scores) if len(scores) > 1 else 0.0
-        print(f"  {agent_type:10s}  {s_mean:8.2f}  {s_max:8.2f}  {s_min:8.2f}  {s_std:8.2f}")
+        s_max = max(scores)
+        s_min = min(scores)
+        s_std = stdev(scores) if len(scores) > 1 else 0.0
+        print(
+            f"  {agent_type:10s}  {s_mean:8.2f}  {s_max:8.2f}  {s_min:8.2f}  {s_std:8.2f}"
+        )
     print("═" * width)
 
     if results:
-        best_type = max(results, key=lambda t: mean(results[t]) if results[t] else float("-inf"))
+        best_type = max(
+            results, key=lambda t: mean(results[t]) if results[t] else float("-inf")
+        )
         print(f"\n  Best by mean score: [{best_type}]")
 
-        best_max_type = max(results, key=lambda t: max(results[t]) if results[t] else float("-inf"))
-        print(f"  Best single-round score: [{best_max_type}] ({max(results[best_max_type]):.2f})")
+        best_max_type = max(
+            results, key=lambda t: max(results[t]) if results[t] else float("-inf")
+        )
+        print(
+            f"  Best single-round score: [{best_max_type}] ({max(results[best_max_type]):.2f})"
+        )
 
 
-def _run_matchup_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> None:
+def _run_matchup_benchmark(
+    rounds: int,
+    novice: bool,
+    policy_kwargs: dict,
+    cache_path: Optional[Path],
+    agent_types: tuple[str, ...] = AGENT_TYPES,
+) -> None:
     """Headless cross-type matchup: for every (focus, opponent) pair run *rounds* rounds.
 
     agent_0 uses `focus` type; agents 1-5 use `opponent` type. Tracks the focus
@@ -255,14 +304,13 @@ def _run_matchup_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> No
     # matchups[(focus, opp)] = {"focus": [scores…], "opp": [mean scores…]}
     matchups: dict[tuple[str, str], dict[str, list[float]]] = {}
 
-    for focus_type in AGENT_TYPES:
-        for opp_type in AGENT_TYPES:
+    for focus_type in agent_types:
+        for opp_type in agent_types:
             key = (focus_type, opp_type)
             matchups[key] = {"focus": [], "opp": []}
 
             print(
-                f"\nMatchup: 1×[{focus_type}] vs 5×[{opp_type}]"
-                f" — {rounds} rounds …",
+                f"\nMatchup: 1×[{focus_type}] vs 5×[{opp_type}] — {rounds} rounds …",
                 flush=True,
             )
 
@@ -274,8 +322,12 @@ def _run_matchup_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> No
 
             n_agents = len(env.possible_agents)
             type_list = [focus_type] + [opp_type] * (n_agents - 1)
-            factories = _make_factories(env.possible_agents, type_list, policy_kwargs)
-            managers, cache_tmpl = _build_managers(env, factories, None)
+            factories = _make_factories(
+                env.possible_agents,
+                type_list,
+                policy_kwargs,
+            )
+            managers, cache_tmpl = _build_managers(env, factories, cache_path)
 
             focus_agent = env.possible_agents[0]
             opp_agents = env.possible_agents[1:]
@@ -285,7 +337,9 @@ def _run_matchup_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> No
                     agent = env.agent_selection
                     if env.terminations[agent] or env.truncations[agent]:
                         env.step(None)
-                        if all(env.terminations.values()) or all(env.truncations.values()):
+                        if all(env.terminations.values()) or all(
+                            env.truncations.values()
+                        ):
                             break
                         continue
                     obs = env.observe(agent)
@@ -322,32 +376,34 @@ def _run_matchup_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> No
         return f"{m:6.1f}±{s:4.1f}"
 
     col_w = 14
-    sep = "─" * (16 + col_w * len(AGENT_TYPES))
+    sep = "─" * (16 + col_w * len(agent_types))
     print(f"\n{'═' * len(sep)}")
     print("MATCHUP RESULTS  — focus-agent score  mean±std  (row=focus, col=opponents)")
     print("  stdev=0 means every round was identical (fixed novice seed).")
-    print(f"  {'':14s}" + "".join(f"{t:>{col_w}s}" for t in AGENT_TYPES))
+    print(f"  {'':14s}" + "".join(f"{t:>{col_w}s}" for t in agent_types))
     print(sep)
-    for focus_type in AGENT_TYPES:
+    for focus_type in agent_types:
         row = f"  {focus_type:<14s}"
-        for opp_type in AGENT_TYPES:
+        for opp_type in agent_types:
             row += f"{_cell(matchups[(focus_type, opp_type)]['focus']):>{col_w}s}"
         print(row)
     print(sep)
     print("  OPPONENT mean score (same layout)")
-    print(f"  {'':14s}" + "".join(f"{t:>{col_w}s}" for t in AGENT_TYPES))
+    print(f"  {'':14s}" + "".join(f"{t:>{col_w}s}" for t in agent_types))
     print(sep)
-    for focus_type in AGENT_TYPES:
+    for focus_type in agent_types:
         row = f"  {focus_type:<14s}"
-        for opp_type in AGENT_TYPES:
+        for opp_type in agent_types:
             row += f"{_cell(matchups[(focus_type, opp_type)]['opp']):>{col_w}s}"
         print(row)
     print("═" * len(sep))
 
     # Best performer by mean focus score (off-diagonal: hardest matchup excluded).
     best = max(
-        ((f, o) for f in AGENT_TYPES for o in AGENT_TYPES if f != o),
-        key=lambda k: mean(matchups[k]["focus"]) if matchups[k]["focus"] else float("-inf"),
+        ((f, o) for f in agent_types for o in agent_types if f != o),
+        key=lambda k: (
+            mean(matchups[k]["focus"]) if matchups[k]["focus"] else float("-inf")
+        ),
     )
     print(
         f"\n  Best cross-type matchup: [{best[0]}] vs [{best[1]}]"
@@ -360,19 +416,20 @@ def _run_matchup_benchmark(rounds: int, novice: bool, policy_kwargs: dict) -> No
 HISTORY_MAXLEN = 300
 
 _MODE_COLORS: dict[str, tuple[int, int, int]] = {
-    "frozen":  (150, 150, 255),
-    "dodge":   (255,  80,  80),
-    "attack":  (255, 165,   0),
-    "defend":  ( 80,  80, 255),
-    "collect": ( 80, 255,  80),
-    "explore": (200, 200,  80),
-    "stay":    (160, 160, 160),
+    "frozen": (150, 150, 255),
+    "dodge": (255, 80, 80),
+    "attack": (255, 165, 0),
+    "defend": (80, 80, 255),
+    "collect": (80, 255, 80),
+    "explore": (200, 200, 80),
+    "stay": (160, 160, 160),
 }
 
 _TYPE_COLORS: dict[str, tuple[int, int, int]] = {
-    "normal":    (100, 200, 255),
-    "berserker": (255,  80,  80),
-    "random":    (200, 200,  80),
+    "normal": (100, 200, 255),
+    "berserker": (255, 80, 80),
+    "berserker_base": (255, 150, 120),
+    "random": (200, 200, 80),
 }
 
 
@@ -397,8 +454,10 @@ def _world_to_screen(
     offset_x: int = 0,
     offset_y: int = 0,
 ) -> tuple[int, int]:
-    return (offset_x + pos[0] * tile_w + tile_w // 2,
-            offset_y + pos[1] * tile_h + tile_h // 2)
+    return (
+        offset_x + pos[0] * tile_w + tile_w // 2,
+        offset_y + pos[1] * tile_h + tile_h // 2,
+    )
 
 
 def _collect_debug_info(
@@ -480,7 +539,9 @@ def _draw_analysis_overlay(
         surface.blit(text, (lx, ly))
 
     if selected_agent and selected_agent in frame.agent_info:
-        _draw_agent_panel(surface, frame.agent_info[selected_agent], selected_agent, font)
+        _draw_agent_panel(
+            surface, frame.agent_info[selected_agent], selected_agent, font
+        )
 
 
 def _draw_pause_hud(
@@ -502,14 +563,19 @@ _P = DEFAULT_POLICY_KWARGS
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
 
     # ── game / visual options ────────────────────────────────────────────────
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--rounds", type=int, default=5,
-                        help="Rounds to play (or benchmark rounds per type)")
+    parser.add_argument(
+        "--rounds",
+        type=int,
+        default=5,
+        help="Rounds to play (or benchmark rounds per type)",
+    )
     parser.add_argument("--fps", type=int, default=None)
     parser.add_argument("--novice", action="store_true", default=True)
     parser.add_argument("--advanced", dest="novice", action="store_false")
@@ -540,7 +606,7 @@ def main() -> None:
         "--benchmark",
         action="store_true",
         help=(
-            "Headless: run each of the three agent types for --rounds rounds, "
+            "Headless: run selected policy types for --rounds rounds, "
             "then print a score comparison table. No window is opened."
         ),
     )
@@ -553,80 +619,184 @@ def main() -> None:
             "Prints a results matrix. No window is opened."
         ),
     )
-
+    parser.add_argument(
+        "--benchmark-types",
+        nargs="+",
+        choices=AGENT_TYPES,
+        metavar="TYPE",
+        default=None,
+        help=(
+            "Limit --benchmark/--benchmark-matchup to these types. "
+            "Default: all available policy types."
+        ),
+    )
     # ── heuristic (normal) policy toggles ────────────────────────────────────
-    parser.add_argument("--predictive-bomb", dest="predictive_bomb",
-                        action="store_true", default=_P["predictive_bomb"])
-    parser.add_argument("--no-predictive-bomb", dest="predictive_bomb",
-                        action="store_false")
-    parser.add_argument("--bomb-threshold", type=float,
-                        default=_P["predictive_bomb_threshold"])
+    parser.add_argument(
+        "--predictive-bomb",
+        dest="predictive_bomb",
+        action="store_true",
+        default=_P["predictive_bomb"],
+    )
+    parser.add_argument(
+        "--no-predictive-bomb", dest="predictive_bomb", action="store_false"
+    )
+    parser.add_argument(
+        "--bomb-threshold", type=float, default=_P["predictive_bomb_threshold"]
+    )
 
-    parser.add_argument("--wall-breaking", dest="wall_breaking",
-                        action="store_true", default=_P["wall_breaking"])
-    parser.add_argument("--no-wall-breaking", dest="wall_breaking",
-                        action="store_false")
+    parser.add_argument(
+        "--wall-breaking",
+        dest="wall_breaking",
+        action="store_true",
+        default=_P["wall_breaking"],
+    )
+    parser.add_argument(
+        "--no-wall-breaking", dest="wall_breaking", action="store_false"
+    )
     parser.add_argument("--wall-break-cost", type=float, default=_P["wall_break_cost"])
-    parser.add_argument("--adaptive-wall-break-cost", dest="adaptive_wall_break_cost",
-                        action="store_true", default=_P["adaptive_wall_break_cost"])
-    parser.add_argument("--no-adaptive-wall-break-cost", dest="adaptive_wall_break_cost",
-                        action="store_false")
+    parser.add_argument(
+        "--adaptive-wall-break-cost",
+        dest="adaptive_wall_break_cost",
+        action="store_true",
+        default=_P["adaptive_wall_break_cost"],
+    )
+    parser.add_argument(
+        "--no-adaptive-wall-break-cost",
+        dest="adaptive_wall_break_cost",
+        action="store_false",
+    )
 
-    parser.add_argument("--smart-defend", dest="smart_defend",
-                        action="store_true", default=_P["smart_defend"])
-    parser.add_argument("--no-smart-defend", dest="smart_defend",
-                        action="store_false")
-    parser.add_argument("--predictive-defend", dest="predictive_defend",
-                        action="store_true", default=_P["predictive_defend"])
-    parser.add_argument("--no-predictive-defend", dest="predictive_defend",
-                        action="store_false")
+    parser.add_argument(
+        "--smart-defend",
+        dest="smart_defend",
+        action="store_true",
+        default=_P["smart_defend"],
+    )
+    parser.add_argument("--no-smart-defend", dest="smart_defend", action="store_false")
+    parser.add_argument(
+        "--predictive-defend",
+        dest="predictive_defend",
+        action="store_true",
+        default=_P["predictive_defend"],
+    )
+    parser.add_argument(
+        "--no-predictive-defend", dest="predictive_defend", action="store_false"
+    )
 
-    parser.add_argument("--drift-aware-bomb", dest="drift_aware_bomb",
-                        action="store_true", default=_P["drift_aware_bomb"])
-    parser.add_argument("--no-drift-aware-bomb", dest="drift_aware_bomb",
-                        action="store_false")
+    parser.add_argument(
+        "--drift-aware-bomb",
+        dest="drift_aware_bomb",
+        action="store_true",
+        default=_P["drift_aware_bomb"],
+    )
+    parser.add_argument(
+        "--no-drift-aware-bomb", dest="drift_aware_bomb", action="store_false"
+    )
 
-    parser.add_argument("--auto-tune-bomb", dest="auto_tune_bomb",
-                        action="store_true", default=_P["auto_tune_bomb"])
-    parser.add_argument("--no-auto-tune-bomb", dest="auto_tune_bomb",
-                        action="store_false")
-    parser.add_argument("--bomb-tune-target", type=float, default=_P["bomb_tune_target"])
+    parser.add_argument(
+        "--auto-tune-bomb",
+        dest="auto_tune_bomb",
+        action="store_true",
+        default=_P["auto_tune_bomb"],
+    )
+    parser.add_argument(
+        "--no-auto-tune-bomb", dest="auto_tune_bomb", action="store_false"
+    )
+    parser.add_argument(
+        "--bomb-tune-target", type=float, default=_P["bomb_tune_target"]
+    )
 
-    parser.add_argument("--bomb-economy", dest="bomb_economy",
-                        action="store_true", default=_P["bomb_economy"])
-    parser.add_argument("--no-bomb-economy", dest="bomb_economy",
-                        action="store_false")
+    parser.add_argument(
+        "--bomb-economy",
+        dest="bomb_economy",
+        action="store_true",
+        default=_P["bomb_economy"],
+    )
+    parser.add_argument("--no-bomb-economy", dest="bomb_economy", action="store_false")
     parser.add_argument("--base-bomb-value", type=float, default=_P["base_bomb_value"])
-    parser.add_argument("--agent-bomb-value", type=float, default=_P["agent_bomb_value"])
-    parser.add_argument("--bomb-reserve-threshold", type=float,
-                        default=_P["bomb_reserve_threshold"])
-    parser.add_argument("--wall-break-tile-threshold", type=float,
-                        default=_P["wall_break_tile_threshold"])
+    parser.add_argument(
+        "--agent-bomb-value", type=float, default=_P["agent_bomb_value"]
+    )
+    parser.add_argument(
+        "--bomb-reserve-threshold", type=float, default=_P["bomb_reserve_threshold"]
+    )
+    parser.add_argument(
+        "--wall-break-tile-threshold",
+        type=float,
+        default=_P["wall_break_tile_threshold"],
+    )
 
-    parser.add_argument("--loop-detection", dest="loop_detection",
-                        action="store_true", default=_P["loop_detection"])
-    parser.add_argument("--no-loop-detection", dest="loop_detection",
-                        action="store_false")
+    parser.add_argument(
+        "--loop-detection",
+        dest="loop_detection",
+        action="store_true",
+        default=_P["loop_detection"],
+    )
+    parser.add_argument(
+        "--no-loop-detection", dest="loop_detection", action="store_false"
+    )
     parser.add_argument("--loop-window", type=int, default=_P["loop_window"])
 
-    parser.add_argument("--proactive-base-routing", dest="proactive_base_routing",
-                        action="store_true", default=_P["proactive_base_routing"])
-    parser.add_argument("--no-proactive-base-routing", dest="proactive_base_routing",
-                        action="store_false")
-    parser.add_argument("--base-route-weight", type=float, default=_P["base_route_weight"])
-    parser.add_argument("--adaptive-base-weight", dest="adaptive_base_weight",
-                        action="store_true", default=_P["adaptive_base_weight"])
-    parser.add_argument("--no-adaptive-base-weight", dest="adaptive_base_weight",
-                        action="store_false")
+    parser.add_argument(
+        "--proactive-base-routing",
+        dest="proactive_base_routing",
+        action="store_true",
+        default=_P["proactive_base_routing"],
+    )
+    parser.add_argument(
+        "--no-proactive-base-routing",
+        dest="proactive_base_routing",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--base-route-weight", type=float, default=_P["base_route_weight"]
+    )
+    parser.add_argument(
+        "--adaptive-base-weight",
+        dest="adaptive_base_weight",
+        action="store_true",
+        default=_P["adaptive_base_weight"],
+    )
+    parser.add_argument(
+        "--no-adaptive-base-weight", dest="adaptive_base_weight", action="store_false"
+    )
     parser.add_argument("--base-weight-min", type=float, default=_P["base_weight_min"])
-    parser.add_argument("--base-weight-ramp-rate", type=float,
-                        default=_P["base_weight_ramp_rate"])
-    parser.add_argument("--base-weight-attack-cooldown", type=int,
-                        default=_P["base_weight_attack_cooldown"])
-
-    parser.add_argument("--cache", dest="cache_path", type=Path,
-                        default=DEFAULT_CACHE_PATH)
-    parser.add_argument("--no-cache", dest="cache_path", action="store_const", const=None)
+    parser.add_argument(
+        "--base-weight-ramp-rate", type=float, default=_P["base_weight_ramp_rate"]
+    )
+    parser.add_argument(
+        "--base-weight-attack-cooldown",
+        type=int,
+        default=_P["base_weight_attack_cooldown"],
+    )
+    parser.add_argument("--minimum-aggression", type=float, default=2.0)
+    parser.add_argument(
+        "--aggression-ramp-rate",
+        type=float,
+        default=0.08,
+    )
+    parser.add_argument("--defensive-force", type=float, default=0.6)
+    parser.add_argument(
+        "--defense-abandon-margin",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--max-defense-distance",
+        type=int,
+        default=8,
+    )
+    parser.add_argument(
+        "--defense-cooldown-scale",
+        type=float,
+        default=0.5,
+    )
+    parser.add_argument(
+        "--cache", dest="cache_path", type=Path, default=DEFAULT_CACHE_PATH
+    )
+    parser.add_argument(
+        "--no-cache", dest="cache_path", action="store_const", const=None
+    )
     parser.add_argument("--grid-offset-x", type=int, default=0)
     parser.add_argument("--grid-offset-y", type=int, default=0)
 
@@ -657,15 +827,37 @@ def main() -> None:
         base_weight_min=args.base_weight_min,
         base_weight_ramp_rate=args.base_weight_ramp_rate,
         base_weight_attack_cooldown=args.base_weight_attack_cooldown,
+        minimum_aggression=args.minimum_aggression,
+        aggression_ramp_rate=args.aggression_ramp_rate,
+        defensive_force=args.defensive_force,
+        defense_abandon_margin=args.defense_abandon_margin,
+        max_defense_distance=args.max_defense_distance,
+        defense_cooldown_scale=args.defense_cooldown_scale,
     )
 
     # ── benchmark mode (headless) ─────────────────────────────────────────────
+    benchmark_types = (
+        tuple(args.benchmark_types) if args.benchmark_types else AGENT_TYPES
+    )
+
     if args.benchmark:
-        _run_benchmark(args.rounds, args.novice, policy_kwargs)
+        _run_benchmark(
+            args.rounds,
+            args.novice,
+            policy_kwargs,
+            args.cache_path,
+            benchmark_types,
+        )
         return
 
     if args.benchmark_matchup:
-        _run_matchup_benchmark(args.rounds, args.novice, policy_kwargs)
+        _run_matchup_benchmark(
+            args.rounds,
+            args.novice,
+            policy_kwargs,
+            args.cache_path,
+            benchmark_types,
+        )
         return
 
     # ── visual mode ───────────────────────────────────────────────────────────
@@ -688,13 +880,19 @@ def main() -> None:
     agent_types_list = raw_types[:n_agents]
     agent_type_map = dict(zip(env.possible_agents, agent_types_list))
 
-    factories = _make_factories(env.possible_agents, agent_types_list, policy_kwargs)
+    factories = _make_factories(
+        env.possible_agents,
+        agent_types_list,
+        policy_kwargs,
+    )
     managers, cached_template = _build_managers(env, factories, args.cache_path)
 
     type_summary = "  ".join(f"{a}={t}" for a, t in agent_type_map.items())
     print(f"Auto-play: seed={seed}, novice={args.novice}, rounds={args.rounds}")
     print(f"Agents:    {type_summary}")
-    print("Keys: Q/ESC quit · R reset · T respawn overlay · SPACE pause · ←→ step · A analysis overlay")
+    print(
+        "Keys: Q/ESC quit · R reset · T respawn overlay · SPACE pause · ←→ step · A analysis overlay"
+    )
 
     pygame.font.init()
     font = pygame.font.SysFont("monospace", 12, bold=True)
@@ -735,9 +933,14 @@ def main() -> None:
 
                     if show_analysis:
                         _draw_analysis_overlay(
-                            screen, frame,
-                            tile_w, tile_h, grid_offset_x, grid_offset_y,
-                            selected_agent, font,
+                            screen,
+                            frame,
+                            tile_w,
+                            tile_h,
+                            grid_offset_x,
+                            grid_offset_y,
+                            selected_agent,
+                            font,
                         )
                     pygame.display.flip()
 
@@ -750,9 +953,14 @@ def main() -> None:
                     screen.blit(frame.surface, (0, 0))
                     if show_analysis:
                         _draw_analysis_overlay(
-                            screen, frame,
-                            tile_w, tile_h, grid_offset_x, grid_offset_y,
-                            selected_agent, font,
+                            screen,
+                            frame,
+                            tile_w,
+                            tile_h,
+                            grid_offset_x,
+                            grid_offset_y,
+                            selected_agent,
+                            font,
                         )
                     _draw_pause_hud(screen, history_pos, len(history), font)
                     pygame.display.flip()
@@ -768,12 +976,18 @@ def main() -> None:
                 gy = (my - grid_offset_y) // tile_h
                 frame = history[history_pos]
                 hit = next(
-                    (ag for ag, info in frame.agent_info.items() if info.pos == (gx, gy)),
+                    (
+                        ag
+                        for ag, info in frame.agent_info.items()
+                        if info.pos == (gx, gy)
+                    ),
                     None,
                 )
                 selected_agent = hit
                 if hit:
-                    print(f"[analysis] selected {hit} ({agent_type_map.get(hit, '?')}) at ({gx},{gy})")
+                    print(
+                        f"[analysis] selected {hit} ({agent_type_map.get(hit, '?')}) at ({gx},{gy})"
+                    )
 
             elif event.type == pygame.KEYDOWN:
                 if event.key in (pygame.K_q, pygame.K_ESCAPE):
@@ -823,8 +1037,10 @@ def main() -> None:
                     for mgr in managers.values():
                         if isinstance(mgr._policy, HeuristicPolicy):
                             pol = mgr._policy
-                            print(f"  [auto-tune] threshold={pol.tuned_threshold:.3f}  "
-                                  f"hit_ema={pol._hit_ema:.3f}")
+                            print(
+                                f"  [auto-tune] threshold={pol.tuned_threshold:.3f}  "
+                                f"hit_ema={pol._hit_ema:.3f}"
+                            )
                             break
                 if rounds_done < args.rounds:
                     seed = random.randint(0, 99999)

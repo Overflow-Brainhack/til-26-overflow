@@ -27,6 +27,8 @@ dependencies = [
   "huggingface-hub>=1.14.0",
   "tabulate>=0.10.0",
   "opencv-python>=4.13.0.92",
+  "discord.py-self>=2.1.0",
+  "google-auth>=2.0.0",
 ]
 
 [[tool.uv.index]]

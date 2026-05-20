@@ -120,17 +120,18 @@ class MapMemory:
         h, w = view_shape
         if view.shape != (h, w, NUM_CHANNELS):
             return
-        for r in range(h):
-            for c in range(w):
-                if view[r, c, ViewChannel.VISIBLE] < 0.5:
-                    continue
-                wx, wy = world_for_cell(r, c)
-                if not (0 <= wx < GRID_SIZE and 0 <= wy < GRID_SIZE):
-                    continue
-                self.last_seen_step[(wx, wy)] = self.current_step
-                self._stamp_walls(view[r, c], (wx, wy))
-                self._stamp_tile(view[r, c], (wx, wy))
-                self._stamp_entities(view[r, c], (wx, wy))
+        visible_cells = np.argwhere(view[:, :, ViewChannel.VISIBLE] >= 0.5)
+        current_step = self.current_step
+        for r, c in visible_cells:
+            wx, wy = world_for_cell(int(r), int(c))
+            if not (0 <= wx < GRID_SIZE and 0 <= wy < GRID_SIZE):
+                continue
+            pos = (wx, wy)
+            cell_view = view[r, c]
+            self.last_seen_step[pos] = current_step
+            self._stamp_walls(cell_view, pos)
+            self._stamp_tile(cell_view, pos)
+            self._stamp_entities(cell_view, pos)
 
     def _stamp_walls(self, cell_view: np.ndarray, pos: tuple[int, int]) -> None:
         wx, wy = pos
