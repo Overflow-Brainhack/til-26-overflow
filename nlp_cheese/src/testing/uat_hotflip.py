@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import time
 from pathlib import Path
@@ -114,8 +115,13 @@ def hotflip_step(
     embeds = embed_matrix[ids].detach().clone()
     embeds.requires_grad_(True)
     logits = model(inputs_embeds=embeds, attention_mask=attn).logits
-    labels = torch.ones(ids.size(0), dtype=torch.long, device=device)
-    loss = F.cross_entropy(logits, labels)
+    # Hinge loss on the threshold margin: only pairs whose P(eq=1) sits below
+    # 0.9 produce gradient, so the search focuses on borderline pairs instead of
+    # saturating ones already well above the scoring cutoff.
+    # P(eq=1)=0.9  <=>  logit_1 - logit_0 = ln(0.9/0.1) = ln(9) ~= 2.1972.
+    margin = math.log(9.0)
+    diff = logits[:, 1] - logits[:, 0]
+    loss = F.relu(margin - diff).mean()
     loss.backward()
     grads = embeds.grad  # [B, T, H]
 
@@ -151,7 +157,8 @@ def batch_eval_swaps(
     batch_size=512,
     pbar=None,
 ):
-    """Evaluate each swap candidate at position `pos`. Returns list of mean P(eq=1)."""
+    """Evaluate each swap candidate at position `pos`. Returns list of hit@0.9
+    rates — the actual scored metric, so the search optimizes it directly."""
     results = []
     for cand_tok in swap_candidates:
         new_trig = list(trigger_ids)
@@ -164,7 +171,7 @@ def batch_eval_swaps(
             logits = model(input_ids=ids, attention_mask=attn).logits
             p = F.softmax(logits, dim=-1)[:, 1]
             probs.append(p)
-        results.append(torch.cat(probs).mean().item())
+        results.append((torch.cat(probs) >= 0.9).float().mean().item())
         if pbar is not None:
             pbar.update(1)
     return results
@@ -175,7 +182,7 @@ def main():
     ap.add_argument("--trig-len", type=int, default=20)
     ap.add_argument("--iters", type=int, default=5)
     ap.add_argument("--batch", type=int, default=256, help="HotFlip grad batch size")
-    ap.add_argument("--cands-per-pos", type=int, default=30)
+    ap.add_argument("--cands-per-pos", type=int, default=60)
     ap.add_argument("--subset-pairs", type=int, default=128,
                     help="Stage-A: number of pairs to filter candidates on")
     ap.add_argument("--top-stage2", type=int, default=3,
@@ -230,7 +237,7 @@ def main():
         f"mean_prob={s['mean_prob']:.4f}"
     )
 
-    best_score = s["mean_prob"]
+    best_score = s["hit_at_0_9"]
     prefix_ids_all, _ = build_prefix_ids(tok, pairs, len(trigger_ids))
 
     # Fixed stage-A subset for fast candidate filtering.
@@ -239,26 +246,9 @@ def main():
     prefix_ids_subset = [prefix_ids_all[i] for i in subset_idx]
     print(f"stage-A subset: {n_sub} pairs, stage-B top: {args.top_stage2}")
 
-    prev_swaps = 1  # non-zero so we don't trigger restart on iter 0
     iter_bar = tqdm(range(args.iters), desc="iters", ncols=80)
     for it in iter_bar:
         t0 = time.time()
-
-        # Random restart if previous iter found nothing: perturb 2 positions.
-        if it > 0 and prev_swaps == 0:
-            perturb_pos = random.sample(range(len(trigger_ids)), 2)
-            vocab_size = embed_matrix.size(0)
-            for pp in perturb_pos:
-                trigger_ids[pp] = random.randint(0, vocab_size - 1)
-            # recompute best_score for the perturbed trigger
-            s_pert = eval_trigger(
-                model, tok, pairs, trigger_ids, device, desc=f"it{it} restart eval"
-            )
-            best_score = s_pert["mean_prob"]
-            tqdm.write(
-                f"  it={it}: random restart at positions {perturb_pos} "
-                f"(post-perturb mean_prob={best_score:.4f})"
-            )
 
         # Try each position in random order; refresh grad per-position.
         positions = list(range(len(trigger_ids)))
@@ -310,7 +300,7 @@ def main():
                 tqdm.write(
                     f"  it={it} pos={pos:2d}: {old_tok}({tok.decode([old_tok])!r}) "
                     f"-> {best_cand}({tok.decode([best_cand])!r})  "
-                    f"mean_prob={best_pos_score:.4f}"
+                    f"hit@0.9={best_pos_score:.4f}"
                 )
             pos_bar.set_postfix(best=f"{best_score:.4f}", swaps=swaps_taken)
 
@@ -328,7 +318,6 @@ def main():
             hit05=f"{s['equiv_rate']:.3f}",
             mean_p=f"{s['mean_prob']:.3f}",
         )
-        prev_swaps = swaps_taken
 
         with open(args.save, "w") as f:
             json.dump(
