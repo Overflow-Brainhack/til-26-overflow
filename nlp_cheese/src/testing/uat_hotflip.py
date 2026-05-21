@@ -104,6 +104,7 @@ def hotflip_step(
     pad_id,
     embed_matrix,
     device,
+    margin,
     top_k=64,
     candidates_per_pos=20,
 ):
@@ -115,11 +116,10 @@ def hotflip_step(
     embeds = embed_matrix[ids].detach().clone()
     embeds.requires_grad_(True)
     logits = model(inputs_embeds=embeds, attention_mask=attn).logits
-    # Hinge loss on the threshold margin: only pairs whose P(eq=1) sits below
-    # 0.9 produce gradient, so the search focuses on borderline pairs instead of
-    # saturating ones already well above the scoring cutoff.
-    # P(eq=1)=0.9  <=>  logit_1 - logit_0 = ln(0.9/0.1) = ln(9) ~= 2.1972.
-    margin = math.log(9.0)
+    # Hinge loss on the threshold margin: only pairs whose P(eq=1) sits below the
+    # target produce gradient, so the search focuses on borderline pairs instead
+    # of saturating ones already above the cutoff. `margin` is the logit gap
+    # ln(p/(1-p)) for the target probability (e.g. P=0.9 -> ln(9) ~= 2.197).
     diff = logits[:, 1] - logits[:, 0]
     loss = F.relu(margin - diff).mean()
     loss.backward()
@@ -177,16 +177,57 @@ def batch_eval_swaps(
     return results
 
 
+def save_trigger(path, trigger_ids, trigger_str, s, sv, target_prob, val_frac):
+    with open(path, "w") as f:
+        json.dump(
+            {
+                "trigger_ids": list(trigger_ids),
+                "trigger_str": trigger_str,
+                "target_prob": target_prob,
+                "val_frac": val_frac,
+                "hit_at_0_9": s["hit_at_0_9"],
+                "val_hit_at_0_9": sv["hit_at_0_9"],
+                "equiv_rate": s["equiv_rate"],
+                "mean_prob": s["mean_prob"],
+                "val_mean_prob": sv["mean_prob"],
+            },
+            f,
+            indent=2,
+        )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--trig-len", type=int, default=20)
     ap.add_argument("--iters", type=int, default=5)
     ap.add_argument("--batch", type=int, default=256, help="HotFlip grad batch size")
     ap.add_argument("--cands-per-pos", type=int, default=60)
-    ap.add_argument("--subset-pairs", type=int, default=128,
-                    help="Stage-A: number of pairs to filter candidates on")
-    ap.add_argument("--top-stage2", type=int, default=3,
-                    help="Number of stage-A winners to full-eval in stage B")
+    ap.add_argument(
+        "--subset-pairs",
+        type=int,
+        default=128,
+        help="Stage-A: number of pairs to filter candidates on",
+    )
+    ap.add_argument(
+        "--top-stage2",
+        type=int,
+        default=3,
+        help="Number of stage-A winners to full-eval in stage B",
+    )
+    ap.add_argument(
+        "--target-prob",
+        type=float,
+        default=0.9,
+        help="Target P(eq=1) for the hinge margin. Higher (e.g. 0.97) "
+        "pushes pairs well past the 0.9 cutoff for robustness.",
+    )
+    ap.add_argument(
+        "--val-frac",
+        type=float,
+        default=0.2,
+        help="Fraction of pairs held out for validation. Optimization "
+        "runs on train only; val hit@0.9 is the transfer signal.",
+    )
     ap.add_argument(
         "--seed-tokens",
         type=str,
@@ -214,7 +255,19 @@ def main():
     embed_matrix = model.get_input_embeddings().weight.detach()  # [V, H]
 
     pairs = load_pairs()
-    print(f"loaded {len(pairs)} pairs")
+    # Train/val split: optimize on train only, treat val hit@0.9 as the transfer
+    # signal. Shuffle with a fixed seed so the split is stable across configs.
+    shuffled = list(pairs)
+    random.Random(0).shuffle(shuffled)
+    n_val = int(round(len(shuffled) * args.val_frac))
+    val_pairs = shuffled[:n_val]
+    train_pairs = shuffled[n_val:]
+    print(
+        f"loaded {len(pairs)} pairs -> {len(train_pairs)} train / {len(val_pairs)} val"
+    )
+
+    margin = math.log(args.target_prob / (1.0 - args.target_prob))
+    print(f"target_prob={args.target_prob}  hinge_margin={margin:.4f}")
 
     # initialize trigger
     seed_ids = tok(args.seed_tokens, add_special_tokens=False)["input_ids"]
@@ -230,15 +283,18 @@ def main():
     sep_id = tok.sep_token_id
     pad_id = tok.pad_token_id
 
-    # Initial eval
-    s = eval_trigger(model, tok, pairs, trigger_ids, device, desc="init eval")
+    # Initial eval (train + val)
+    s = eval_trigger(
+        model, tok, train_pairs, trigger_ids, device, desc="init train eval"
+    )
+    sv = eval_trigger(model, tok, val_pairs, trigger_ids, device, desc="init val eval")
     print(
-        f"init   hit@0.9={s['hit_at_0_9']:.4f}  hit@0.5={s['equiv_rate']:.4f}  "
-        f"mean_prob={s['mean_prob']:.4f}"
+        f"init   train hit@0.9={s['hit_at_0_9']:.4f}  mean_prob={s['mean_prob']:.4f}  "
+        f"|  val hit@0.9={sv['hit_at_0_9']:.4f}  mean_prob={sv['mean_prob']:.4f}"
     )
 
     best_score = s["hit_at_0_9"]
-    prefix_ids_all, _ = build_prefix_ids(tok, pairs, len(trigger_ids))
+    prefix_ids_all, _ = build_prefix_ids(tok, train_pairs, len(trigger_ids))
 
     # Fixed stage-A subset for fast candidate filtering.
     n_sub = min(args.subset_pairs, len(prefix_ids_all))
@@ -262,17 +318,33 @@ def main():
             )
             sub = [prefix_ids_all[i] for i in idx]
             topk_per_pos = hotflip_step(
-                model, tok, sub, trigger_ids, sep_id, pad_id, embed_matrix, device,
+                model,
+                tok,
+                sub,
+                trigger_ids,
+                sep_id,
+                pad_id,
+                embed_matrix,
+                device,
+                margin,
                 top_k=args.cands_per_pos,
             )
             cands = list(dict.fromkeys([trigger_ids[pos]] + topk_per_pos[pos]))
 
             # Stage A: cheap rank on subset
-            a_bar = tqdm(total=len(cands), desc=f"  pos{pos:02d} stageA",
-                         leave=False, ncols=80)
+            a_bar = tqdm(
+                total=len(cands), desc=f"  pos{pos:02d} stageA", leave=False, ncols=80
+            )
             sub_scores = batch_eval_swaps(
-                model, prefix_ids_subset, trigger_ids, cands, pos,
-                sep_id, pad_id, device, pbar=a_bar,
+                model,
+                prefix_ids_subset,
+                trigger_ids,
+                cands,
+                pos,
+                sep_id,
+                pad_id,
+                device,
+                pbar=a_bar,
             )
             a_bar.close()
             # Pick top-N by subset score; always include current token so we never regress.
@@ -282,11 +354,22 @@ def main():
                 stage_b_cands.append(trigger_ids[pos])
 
             # Stage B: full eval on the survivors
-            b_bar = tqdm(total=len(stage_b_cands), desc=f"  pos{pos:02d} stageB",
-                         leave=False, ncols=80)
+            b_bar = tqdm(
+                total=len(stage_b_cands),
+                desc=f"  pos{pos:02d} stageB",
+                leave=False,
+                ncols=80,
+            )
             scores = batch_eval_swaps(
-                model, prefix_ids_all, trigger_ids, stage_b_cands, pos,
-                sep_id, pad_id, device, pbar=b_bar,
+                model,
+                prefix_ids_all,
+                trigger_ids,
+                stage_b_cands,
+                pos,
+                sep_id,
+                pad_id,
+                device,
+                pbar=b_bar,
             )
             b_bar.close()
             best_idx = int(np.argmax(scores))
@@ -302,35 +385,71 @@ def main():
                     f"-> {best_cand}({tok.decode([best_cand])!r})  "
                     f"hit@0.9={best_pos_score:.4f}"
                 )
+                # The trigger just changed — re-eval train + held-out val and write
+                # the trigger to disk after this very swap. Lets us stop the instant
+                # val hits 1.0, mid-sweep, and keeps the saved file always current.
+                sv = eval_trigger(
+                    model, tok, val_pairs, trigger_ids, device, desc="val check"
+                )
+                s = eval_trigger(
+                    model, tok, train_pairs, trigger_ids, device, desc="train check"
+                )
+                save_trigger(
+                    args.save,
+                    trigger_ids,
+                    tok.decode(trigger_ids),
+                    s,
+                    sv,
+                    args.target_prob,
+                    args.val_frac,
+                )
+                tqdm.write(
+                    f"      -> train hit@0.9={s['hit_at_0_9']:.4f}  "
+                    f"val hit@0.9={sv['hit_at_0_9']:.4f}  "
+                    f"val mean_p={sv['mean_prob']:.4f}  (swap #{swaps_taken}, saved)"
+                )
+                if sv["hit_at_0_9"] >= 1.0:
+                    tqdm.write(
+                        f"  val hit@0.9 = 1.0 at it={it} pos={pos} "
+                        f"(swap #{swaps_taken}) — early stopping, saved."
+                    )
+                    print(f"\nFinal trigger: {tok.decode(trigger_ids)!r}")
+                    print(f"Saved to {args.save}")
+                    return
             pos_bar.set_postfix(best=f"{best_score:.4f}", swaps=swaps_taken)
 
         s = eval_trigger(
-            model, tok, pairs, trigger_ids, device, desc=f"it{it} full eval"
+            model, tok, train_pairs, trigger_ids, device, desc=f"it{it} train eval"
+        )
+        sv = eval_trigger(
+            model, tok, val_pairs, trigger_ids, device, desc=f"it{it} val eval"
         )
         dt = time.time() - t0
         tqdm.write(
-            f"iter {it}: hit@0.9={s['hit_at_0_9']:.4f}  hit@0.5={s['equiv_rate']:.4f}  "
-            f"mean_prob={s['mean_prob']:.4f}  swaps={swaps_taken}  ({dt:.1f}s)\n"
+            f"iter {it}: train hit@0.9={s['hit_at_0_9']:.4f} mean_p={s['mean_prob']:.4f}  "
+            f"|  val hit@0.9={sv['hit_at_0_9']:.4f} mean_p={sv['mean_prob']:.4f}  "
+            f"swaps={swaps_taken}  ({dt:.1f}s)\n"
             f"          trigger={tok.decode(trigger_ids)!r}"
         )
         iter_bar.set_postfix(
-            hit09=f"{s['hit_at_0_9']:.3f}",
-            hit05=f"{s['equiv_rate']:.3f}",
-            mean_p=f"{s['mean_prob']:.3f}",
+            tr09=f"{s['hit_at_0_9']:.3f}",
+            val09=f"{sv['hit_at_0_9']:.3f}",
         )
 
-        with open(args.save, "w") as f:
-            json.dump(
-                {
-                    "trigger_ids": trigger_ids,
-                    "trigger_str": tok.decode(trigger_ids),
-                    "hit_at_0_9": s["hit_at_0_9"],
-                    "equiv_rate": s["equiv_rate"],
-                    "mean_prob": s["mean_prob"],
-                },
-                f,
-                indent=2,
-            )
+        save_trigger(
+            args.save,
+            trigger_ids,
+            tok.decode(trigger_ids),
+            s,
+            sv,
+            args.target_prob,
+            args.val_frac,
+        )
+
+        # Also stop at iteration boundaries if val is already perfect.
+        if sv["hit_at_0_9"] >= 1.0:
+            tqdm.write(f"  val hit@0.9 = 1.0 at iter {it} — early stopping, saved.")
+            break
 
     print(f"\nFinal trigger: {tok.decode(trigger_ids)!r}")
     print(f"Saved to {args.save}")

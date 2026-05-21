@@ -3,6 +3,7 @@
 Reports mean_prob, hit@0.5, hit@0.9 over all (question, gold) pairs in nlp.jsonl.
 The real scorer uses threshold 0.9.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -18,12 +19,6 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 REPO = Path(__file__).resolve().parents[3]
 DEFAULT_MODEL_PATH = REPO / "nlp_cheese" / "nlp_eval_512"
 DATA_PATH = REPO / "data" / "nlp" / "nlp.jsonl"
-
-# Iter-3 trigger from the length-20 HotFlip run (best result).
-ITER3_TRIGGER_IDS = [
-    9820, 3451, 6425, 3806, 8650, 38241, 4555, 1416, 41970, 9820,
-    3451, 6425, 281, 3662, 4764, 4555, 265, 5218, 6300, 3451,
-]
 
 
 def load_pairs():
@@ -47,8 +42,11 @@ def score(model, tok, pairs, candidate_str, device, max_length=128, batch_size=5
             f"Question: {q} Reference: {r} Candidate: {candidate_str}" for q, r in batch
         ]
         enc = tok(
-            texts, max_length=max_length, padding="longest",
-            truncation=True, return_tensors="pt",
+            texts,
+            max_length=max_length,
+            padding="longest",
+            truncation=True,
+            return_tensors="pt",
         ).to(device)
         logits = model(**enc).logits
         probs.extend(F.softmax(logits, dim=-1)[:, 1].tolist())
@@ -64,18 +62,39 @@ def score(model, tok, pairs, candidate_str, device, max_length=128, batch_size=5
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--trigger-str", type=str, default=None,
-                    help="Use this literal candidate string")
-    ap.add_argument("--trigger-ids", type=str, default=None,
-                    help="Comma-separated token ids (decoded via eval tokenizer)")
-    ap.add_argument("--from-json", type=str, default=None,
-                    help="Path to uat_trigger.json saved by uat_hotflip")
-    ap.add_argument("--use-iter3", action="store_true",
-                    help="Use the hardcoded iter-3 trigger ids")
-    ap.add_argument("--model-path", type=str, default=str(DEFAULT_MODEL_PATH),
-                    help="Eval model directory (default: nlp_cheese/nlp_eval)")
-    ap.add_argument("--max-length", type=int, default=128,
-                    help="Tokenizer max_length (test_nlp uses 128; new model may use 512)")
+    ap.add_argument(
+        "--trigger-str",
+        type=str,
+        default=None,
+        help="Use this literal candidate string",
+    )
+    ap.add_argument(
+        "--trigger-ids",
+        type=str,
+        default=None,
+        help="Comma-separated token ids (decoded via eval tokenizer)",
+    )
+    ap.add_argument(
+        "--from-json",
+        type=str,
+        default=None,
+        help="Path to uat_trigger.json saved by uat_hotflip",
+    )
+    ap.add_argument(
+        "--use-iter3", action="store_true", help="Use the hardcoded iter-3 trigger ids"
+    )
+    ap.add_argument(
+        "--model-path",
+        type=str,
+        default=str(DEFAULT_MODEL_PATH),
+        help="Eval model directory (default: nlp_cheese/nlp_eval)",
+    )
+    ap.add_argument(
+        "--max-length",
+        type=int,
+        default=128,
+        help="Tokenizer max_length (test_nlp uses 128; new model may use 512)",
+    )
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -85,7 +104,8 @@ def main():
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
     model = (
         AutoModelForSequenceClassification.from_pretrained(model_path, dtype=dtype)
-        .to(device).eval()
+        .to(device)
+        .eval()
     )
 
     if args.use_iter3:
@@ -103,7 +123,9 @@ def main():
         candidate_str = args.trigger_str
         trigger_ids = None
     else:
-        ap.error("provide one of --trigger-str / --trigger-ids / --from-json / --use-iter3")
+        ap.error(
+            "provide one of --trigger-str / --trigger-ids / --from-json / --use-iter3"
+        )
 
     pairs = load_pairs()
     print(f"loaded {len(pairs)} pairs")
