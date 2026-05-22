@@ -1,0 +1,11 @@
+# Stage 1 — behaviour-clone the heuristic (jump-start)
+uv run ae_rl/train_stage1_bc.py --episodes 64 --epochs 8
+
+# Stage 2 — PPO self-play vs heuristic (warm-starts from stage 1)
+uv run ae_rl/train_stage2_ppo.py --updates 200 --episodes-per-update 8 --learners 3
+
+# Stage 3 — PPO league self-play (warm-starts from stage 2)
+uv run ae_rl/train_stage3_league.py --updates 300 --snapshot-every 25
+
+# Check whether it beats the heuristic baseline
+uv run ae_rl/benchmark.py --rounds 50 --learners 1
