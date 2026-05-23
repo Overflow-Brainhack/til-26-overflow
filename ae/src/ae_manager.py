@@ -11,7 +11,6 @@ first construction. Bundle a captured cache via the Dockerfile's
 `COPY src .` to start round 1 with full map knowledge.
 """
 
-import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,18 +18,16 @@ from constants import Action
 from map_memory import MapMemory, get_shared_memory
 from observation import parse_observation
 from policy import Policy
-from edited_policy import EditedHeuristicPolicy as HeuristicPolicy
 
-# from berserker_base_policy import BerserkerBasePolicy as HeuristicPolicy
-from rl_attack import load_attack_module
+from edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy
 
 
 # Default cache path: bundled into the Docker image alongside source.
 DEFAULT_CACHE_PATH = Path(__file__).resolve().parent / "novice_map.json"
 
-# Production policy configuration.  Every HeuristicPolicy parameter is listed
-# here so auto_play.py can import this dict and drive its argparse defaults from
-# it — one place to edit, both the server and the visualiser stay in sync.
+# Production base-policy configuration.  V2-only experimental toggles live as
+# EditedHeuristicPolicyV2.__init__ defaults and are intentionally not listed
+# here or exposed through auto_play.py's argparse.
 DEFAULT_POLICY_KWARGS: dict = dict(
     predictive_bomb=True,
     predictive_bomb_threshold=0.7,
@@ -57,11 +54,6 @@ DEFAULT_POLICY_KWARGS: dict = dict(
     base_weight_attack_cooldown=20,
 )
 
-# DEFAULT_POLICY_VARIANT = os.environ.get("AE_POLICY_VARIANT", "normal")
-# DEFAULT_ATTACK_MODEL = os.environ.get("AE_ATTACK_MODEL", "")
-# DEFAULT_ATTACK_BOMB_MARGIN = float(os.environ.get("AE_ATTACK_BOMB_MARGIN", "0.0"))
-# DEFAULT_ATTACK_MODULE_MODE = os.environ.get("AE_ATTACK_MODULE_MODE", "hybrid")
-
 
 class AEManager:
     def __init__(
@@ -86,7 +78,7 @@ class AEManager:
 
         self._memory.reset_round()
         # self._policy: Policy = policy or BerserkerPolicy()
-        self._policy: Policy = policy or HeuristicPolicy(**DEFAULT_POLICY_KWARGS)
+        self._policy: Policy = policy or HeuristicPolicy()
 
     def _maybe_load_cache(self, path: Path) -> None:
         if not path.exists():

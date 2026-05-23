@@ -187,3 +187,4 @@ for f in ae_rl/checkpoints/stage2_snapshots/*/*.pt ae_rl/checkpoints/stage3_snap
     echo "=== $f ==="
     uv run ae_rl/benchmark.py --ckpt "$f" --rounds 100 --learners 1
 done | tee /tmp/all_snapshots_benchmark.log
+

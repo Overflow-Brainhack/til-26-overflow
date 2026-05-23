@@ -249,6 +249,37 @@ class MapMemory:
     def in_bounds(self, p: tuple[int, int]) -> bool:
         return 0 <= p[0] < GRID_SIZE and 0 <= p[1] < GRID_SIZE
 
+    def static_map_layer(self) -> np.ndarray:
+        """Encode static map knowledge as a (6, GRID_SIZE, GRID_SIZE) float32 tensor.
+
+        Channels (layout is (c, y, x)):
+          0..3  blocked wall in Direction d ∈ {RIGHT, DOWN, LEFT, UP}
+          4     enemy base present
+          5     ally base present
+        Unknown cells/edges read as 0 (optimistic; matches `passable`).
+        """
+        out = np.zeros((6, GRID_SIZE, GRID_SIZE), dtype=np.float32)
+        dir_by_vec = {DIR_VECTOR[d]: int(d) for d in Direction}
+        for edge in self.blocked_edges:
+            p1, p2 = tuple(edge)
+            dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+            d12 = dir_by_vec.get((dx, dy))
+            d21 = dir_by_vec.get((-dx, -dy))
+            if d12 is None or d21 is None:
+                continue
+            if 0 <= p1[0] < GRID_SIZE and 0 <= p1[1] < GRID_SIZE:
+                out[d12, p1[1], p1[0]] = 1.0
+            if 0 <= p2[0] < GRID_SIZE and 0 <= p2[1] < GRID_SIZE:
+                out[d21, p2[1], p2[0]] = 1.0
+        for (bx, by) in self.base_positions:
+            if not (0 <= bx < GRID_SIZE and 0 <= by < GRID_SIZE):
+                continue
+            if self.ally_base is not None and (bx, by) == self.ally_base:
+                out[5, by, bx] = 1.0
+            else:
+                out[4, by, bx] = 1.0
+        return out
+
     # ── persistence (static state only) ─────────────────────────────────────
 
     def to_static_dict(self) -> dict[str, Any]:

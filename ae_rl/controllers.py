@@ -164,7 +164,12 @@ class NetController:
         self.name = name
         self.deterministic = deterministic
         self.novice = novice
+<<<<<<< Updated upstream
         self._hidden = self.model.initial_hidden(1, device)
+=======
+        # None → first model.act builds initial hidden from the spawn embedding.
+        self._hidden = None
+>>>>>>> Stashed changes
         self._memory = self._fresh_memory()
 
     def _fresh_memory(self) -> MapMemory:
@@ -174,7 +179,11 @@ class NetController:
         return mem
 
     def reset(self) -> None:
+<<<<<<< Updated upstream
         self._hidden = self.model.initial_hidden(1, self.device)
+=======
+        self._hidden = None
+>>>>>>> Stashed changes
         self._memory = self._fresh_memory()
 
     @torch.no_grad()

@@ -125,14 +125,17 @@ def _stack_trajectory(traj: dict) -> dict:
     }
 
 
-def _compute_gae(rewards, values, dones, gamma: float, lam: float):
-    """Per-trajectory GAE. Truncation at the final step is treated as terminal."""
+def _compute_gae(rewards, values, dones, gamma: float, lam: float,
+                 bootstrap_v: float = 0.0):
+    """Per-trajectory GAE. The episode end in this env is truncation, not
+    termination, so we bootstrap with ``bootstrap_v`` (the model's value at the
+    last seen state) instead of treating the cutoff as terminal."""
     t = len(rewards)
     adv = np.zeros(t, dtype=np.float32)
     last = 0.0
     for i in reversed(range(t)):
         nonterminal = 1.0 - dones[i]
-        next_v = values[i + 1] if i + 1 < t else 0.0
+        next_v = values[i + 1] if i + 1 < t else bootstrap_v
         delta = rewards[i] + gamma * next_v * nonterminal - values[i]
         last = delta + gamma * lam * nonterminal * last
         adv[i] = last
@@ -164,7 +167,9 @@ def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
             for a in opp_ids
         }
 
-        hidden = {a: model.initial_hidden(1, device) for a in learner_ids}
+        # hidden=None lets model.act build the initial state from the spawn
+        # embedding (using the first observation's base_location).
+        hidden: dict = {a: None for a in learner_ids}
         traj = {a: _new_trajectory() for a in learner_ids}
         opened = {a: False for a in learner_ids}
         memories = {a: _fresh_learner_memory(episode_novice) for a in learner_ids}
@@ -212,16 +217,29 @@ def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
         for a in learner_ids:
             ep_total = float(episode.get(a, 0.0))
             learner_returns.append(ep_total)
+            # Episodes end via truncation, not termination. Don't dump the
+            # leftover reward onto the final action (it overrepresents that
+            # action's value) and don't mark done=1 (which would zero the GAE
+            # bootstrap). Instead, attribute only the per-turn rewards we
+            # actually observed and let GAE bootstrap with the model's last
+            # value estimate.
             if opened[a]:
-                traj[a]["rewards"].append(ep_total - float(sum(traj[a]["rewards"])))
-                traj[a]["dones"].append(1.0)
+                # Pad rewards/dones up to action length with 0 — final action
+                # is treated as "we saw an action but the game ended before we
+                # observed the reward it caused"; the bootstrap value handles
+                # the "would have earned more if game continued" signal.
+                while len(traj[a]["rewards"]) < len(traj[a]["actions"]):
+                    traj[a]["rewards"].append(0.0)
+                    traj[a]["dones"].append(0.0)
             stacked = _stack_trajectory(traj[a])
             n = len(stacked["actions"])
             for key in ("rewards", "dones"):
                 if len(stacked[key]) != n:
                     stacked[key] = stacked[key][:n]
+            bootstrap_v = float(traj[a]["values"][-1]) if traj[a]["values"] else 0.0
             adv, ret = _compute_gae(stacked["rewards"], stacked["values"],
-                                    stacked["dones"], gamma, lam)
+                                    stacked["dones"], gamma, lam,
+                                    bootstrap_v=bootstrap_v)
             stacked["advantages"] = adv
             stacked["returns"] = ret
             all_trajs.append(stacked)
