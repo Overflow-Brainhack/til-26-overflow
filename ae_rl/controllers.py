@@ -157,19 +157,20 @@ class StochasticHeuristicController(HeuristicController):
 class NetController:
     """A frozen learned policy used as a league opponent."""
 
-    def __init__(self, model, device, name: str = "net", deterministic: bool = False,
-                 novice: bool = True):
+    def __init__(
+        self,
+        model,
+        device,
+        name: str = "net",
+        deterministic: bool = False,
+        novice: bool = True,
+    ):
         self.model = model
         self.device = device
         self.name = name
         self.deterministic = deterministic
         self.novice = novice
-<<<<<<< Updated upstream
         self._hidden = self.model.initial_hidden(1, device)
-=======
-        # None → first model.act builds initial hidden from the spawn embedding.
-        self._hidden = None
->>>>>>> Stashed changes
         self._memory = self._fresh_memory()
 
     def _fresh_memory(self) -> MapMemory:
@@ -179,11 +180,7 @@ class NetController:
         return mem
 
     def reset(self) -> None:
-<<<<<<< Updated upstream
         self._hidden = self.model.initial_hidden(1, self.device)
-=======
-        self._hidden = None
->>>>>>> Stashed changes
         self._memory = self._fresh_memory()
 
     @torch.no_grad()
@@ -198,7 +195,13 @@ class NetController:
         vc, bv, sc, mk, smap = obs_to_arrays(obs, memory=self._memory)
         t = lambda a: torch.as_tensor(a, device=self.device).unsqueeze(0)  # noqa: E731
         action, _, _, _, self._hidden = self.model.act(
-            t(vc), t(bv), t(sc), t(mk), t(smap), self._hidden, deterministic=self.deterministic
+            t(vc),
+            t(bv),
+            t(sc),
+            t(mk),
+            t(smap),
+            self._hidden,
+            deterministic=self.deterministic,
         )
         return int(action.item())
 
@@ -232,8 +235,12 @@ def stochastic_heuristic_spec(
 
 
 def net_spec(path, deterministic: bool = False, novice: bool = True) -> dict:
-    return {"kind": "net", "path": str(path), "deterministic": deterministic,
-            "novice": novice}
+    return {
+        "kind": "net",
+        "path": str(path),
+        "deterministic": deterministic,
+        "novice": novice,
+    }
 
 
 def build_controller(spec: dict, device):
@@ -256,7 +263,11 @@ def build_controller(spec: dict, device):
             for p in model.parameters():
                 p.requires_grad_(False)
             _NET_CACHE[path] = model
-        return NetController(model, device, name=Path(path).stem,
-                             deterministic=spec.get("deterministic", False),
-                             novice=spec.get("novice", True))
+        return NetController(
+            model,
+            device,
+            name=Path(path).stem,
+            deterministic=spec.get("deterministic", False),
+            novice=spec.get("novice", True),
+        )
     raise ValueError(f"unknown opponent spec kind: {kind!r}")

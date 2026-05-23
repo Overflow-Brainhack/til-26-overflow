@@ -25,11 +25,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Categorical
 
-<<<<<<< Updated upstream
 from common import BASE_SHAPE, NUM_ACTIONS, SCALAR_DIM, STATIC_MAP_SHAPE, VIEW_SHAPE
-=======
-from common import BASE_SHAPE, GRID_SIZE, NUM_ACTIONS, SCALAR_DIM, STATIC_MAP_SHAPE, VIEW_SHAPE
->>>>>>> Stashed changes
 
 _MASK_FILL = -1e9
 
@@ -100,14 +96,6 @@ class RecurrentMaskableActorCritic(nn.Module):
         self.gru_layers = gru_layers
         self.gru = nn.GRU(feature_dim, gru_hidden, num_layers=gru_layers)
 
-        # Spawn-position embedding: explicit slot identity into the initial GRU
-        # hidden state. Each (x, y) base-location bucket gets its own learned
-        # vector. On novice the slot↔location map is fixed, so this is a clean
-        # slot-id signal; on advanced it still gives spawn-position conditioning.
-        # Index GRID_SIZE * GRID_SIZE is reserved as "unknown" (zeros).
-        self.spawn_embedding = nn.Embedding(GRID_SIZE * GRID_SIZE + 1, gru_hidden)
-        nn.init.zeros_(self.spawn_embedding.weight[GRID_SIZE * GRID_SIZE])
-
         self.actor = nn.Linear(gru_hidden, NUM_ACTIONS)
         self.critic = nn.Linear(gru_hidden, 1)
 
@@ -115,22 +103,17 @@ class RecurrentMaskableActorCritic(nn.Module):
         # Small actor head → near-uniform initial policy.
         nn.init.orthogonal_(self.actor.weight, gain=0.01)
         nn.init.constant_(self.actor.bias, 0.0)
-        # Small spawn-embedding init: starts as a gentle nudge to the all-zero
-        # baseline so behaviour matches the pre-embedding model on day 1, then
-        # the optimiser grows it.
-        nn.init.normal_(self.spawn_embedding.weight, mean=0.0, std=0.02)
-        nn.init.zeros_(self.spawn_embedding.weight[GRID_SIZE * GRID_SIZE])
 
     @staticmethod
     def _init_weights(m: nn.Module) -> None:
         if isinstance(m, (nn.Linear, nn.Conv2d)):
-            nn.init.orthogonal_(m.weight, gain=2 ** 0.5)
+            nn.init.orthogonal_(m.weight, gain=2**0.5)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0.0)
 
     # ── feature extraction (handles arbitrary leading batch dims) ─────────────
     def _features(self, viewcone, baseview, scalars, staticmap) -> torch.Tensor:
-        lead = viewcone.shape[:-3]              # (...,) before (C, H, W)
+        lead = viewcone.shape[:-3]  # (...,) before (C, H, W)
         c, vh, vw = viewcone.shape[-3:]
         _, bh, bw = baseview.shape[-3:]
         sc_c, sh, sw = staticmap.shape[-3:]
@@ -144,61 +127,30 @@ class RecurrentMaskableActorCritic(nn.Module):
         return f.reshape(*lead, -1) if lead else f.reshape(-1)
 
     def initial_hidden(self, batch: int, device) -> torch.Tensor:
-        """Zero initial hidden state. Used by tests / fallback."""
         return torch.zeros(self.gru_layers, batch, self.gru_hidden, device=device)
-
-    def initial_hidden_from_loc(self, base_locs, device) -> torch.Tensor:
-        """Spawn-conditioned initial hidden state.
-
-        ``base_locs`` is an integer tensor of shape (B, 2) giving each agent's
-        own base (x, y). The returned tensor is shape (gru_layers, B, gru_hidden)
-        — every layer gets the same per-agent embedding. Out-of-range coordinates
-        map to the reserved "unknown" slot (zeros).
-        """
-        if base_locs.dtype != torch.long:
-            base_locs = base_locs.long()
-        x = base_locs[..., 0].clamp(0, GRID_SIZE - 1)
-        y = base_locs[..., 1].clamp(0, GRID_SIZE - 1)
-        valid = ((base_locs[..., 0] >= 0) & (base_locs[..., 0] < GRID_SIZE)
-                 & (base_locs[..., 1] >= 0) & (base_locs[..., 1] < GRID_SIZE))
-        idx = torch.where(valid, x * GRID_SIZE + y,
-                          torch.full_like(x, GRID_SIZE * GRID_SIZE))
-        emb = self.spawn_embedding(idx)                       # (B, gru_hidden)
-        return emb.unsqueeze(0).expand(self.gru_layers, -1, -1).contiguous()
-
-    @staticmethod
-    def _scalars_to_base_loc(scalars_t0: torch.Tensor) -> torch.Tensor:
-        """Recover integer base (x, y) from the first-timestep scalar slice.
-
-        ``common.build_scalars`` writes ``base_location / GRID_SIZE`` into
-        indices 6 and 7, so multiplying and rounding inverts that within ±1.
-        """
-        return (scalars_t0[..., 6:8] * GRID_SIZE).round().long()
 
     # ── single-step acting (rollout) ──────────────────────────────────────────
     @torch.no_grad()
-<<<<<<< Updated upstream
-    def act(self, viewcone, baseview, scalars, mask, staticmap, hidden, deterministic: bool = False):
+    def act(
+        self,
+        viewcone,
+        baseview,
+        scalars,
+        mask,
+        staticmap,
+        hidden,
+        deterministic: bool = False,
+    ):
         """One timestep for a batch of B agents.
 
         Shapes: viewcone (B, C, H, W); baseview (B, C, H, W); scalars (B, D);
         mask (B, A); staticmap (B, Cs, Gs, Gs); hidden (layers, B, gru_hidden).
         Returns action (B,), logp (B,), value (B,), entropy (B,), new_hidden.
         """
-=======
-    def act(self, viewcone, baseview, scalars, mask, staticmap, hidden=None,
-            deterministic: bool = False):
-        """One timestep for a batch of B agents.
-
-        ``hidden=None`` → initial hidden is built from the spawn embedding
-        using ``scalars`` (which carry the agent's own base_location).
-        """
-        if hidden is None:
-            base_locs = self._scalars_to_base_loc(scalars)
-            hidden = self.initial_hidden_from_loc(base_locs, viewcone.device)
->>>>>>> Stashed changes
-        feat = self._features(viewcone, baseview, scalars, staticmap).unsqueeze(0)   # (1, B, F)
-        out, new_hidden = self.gru(feat, hidden)                          # (1, B, H)
+        feat = self._features(viewcone, baseview, scalars, staticmap).unsqueeze(
+            0
+        )  # (1, B, F)
+        out, new_hidden = self.gru(feat, hidden)  # (1, B, H)
         out = out.squeeze(0)
         logits = masked_logits(self.actor(out), mask)
         dist = Categorical(logits=logits)
@@ -207,27 +159,25 @@ class RecurrentMaskableActorCritic(nn.Module):
         return action, dist.log_prob(action), value, dist.entropy(), new_hidden
 
     # ── full-sequence evaluation (BPTT for PPO / BC) ──────────────────────────
-    def forward_sequence(self, viewcone, baseview, scalars, mask, staticmap, hidden=None):
+    def forward_sequence(
+        self, viewcone, baseview, scalars, mask, staticmap, hidden=None
+    ):
         """Run the GRU over a (T, B, …) sequence.
 
-        ``hidden=None`` → initial hidden is derived from each sequence's first
-        timestep base_location via the spawn embedding.
+        Returns logits (T, B, A), values (T, B), final_hidden.
         """
         t, b = viewcone.shape[0], viewcone.shape[1]
         if hidden is None:
-<<<<<<< Updated upstream
             hidden = self.initial_hidden(b, viewcone.device)
-=======
-            base_locs = self._scalars_to_base_loc(scalars[0])       # (B, 2)
-            hidden = self.initial_hidden_from_loc(base_locs, viewcone.device)
->>>>>>> Stashed changes
-        feat = self._features(viewcone, baseview, scalars, staticmap)        # (T, B, F)
-        out, hidden = self.gru(feat, hidden)                      # (T, B, H)
+        feat = self._features(viewcone, baseview, scalars, staticmap)  # (T, B, F)
+        out, hidden = self.gru(feat, hidden)  # (T, B, H)
         logits = masked_logits(self.actor(out), mask)
         values = self.critic(out).squeeze(-1)
         return logits, values, hidden
 
-    def evaluate_actions(self, viewcone, baseview, scalars, mask, staticmap, actions, hidden=None):
+    def evaluate_actions(
+        self, viewcone, baseview, scalars, mask, staticmap, actions, hidden=None
+    ):
         """For PPO: return logp (T, B), entropy (T, B), values (T, B) for taken actions."""
         logits, values, _ = self.forward_sequence(
             viewcone, baseview, scalars, mask, staticmap, hidden
@@ -236,7 +186,9 @@ class RecurrentMaskableActorCritic(nn.Module):
         return dist.log_prob(actions), dist.entropy(), values
 
 
-def save_checkpoint(path, model: RecurrentMaskableActorCritic, meta: dict | None = None):
+def save_checkpoint(
+    path, model: RecurrentMaskableActorCritic, meta: dict | None = None
+):
     torch.save(
         {
             "model_state": model.state_dict(),
@@ -251,7 +203,9 @@ def save_checkpoint(path, model: RecurrentMaskableActorCritic, meta: dict | None
     )
 
 
-def load_checkpoint(path, device, eval_mode: bool = False) -> RecurrentMaskableActorCritic:
+def load_checkpoint(
+    path, device, eval_mode: bool = False
+) -> RecurrentMaskableActorCritic:
     ckpt = torch.load(path, map_location=device, weights_only=False)
     arch = ckpt.get("arch", {})
     model = RecurrentMaskableActorCritic(
@@ -270,8 +224,10 @@ def load_checkpoint(path, device, eval_mode: bool = False) -> RecurrentMaskableA
     own.update(loadable)
     model.load_state_dict(own)
     if skipped:
-        print(f"[load_checkpoint] partial load: kept {len(loadable)}/{len(state)} tensors; "
-              f"skipped (shape mismatch or unknown): {skipped[:6]}{'…' if len(skipped) > 6 else ''}")
+        print(
+            f"[load_checkpoint] partial load: kept {len(loadable)}/{len(state)} tensors; "
+            f"skipped (shape mismatch or unknown): {skipped[:6]}{'…' if len(skipped) > 6 else ''}"
+        )
     if eval_mode:
         model.eval()
     return model
