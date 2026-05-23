@@ -27,7 +27,16 @@ def ppo_update(
     value_coef: float = 0.5,
     entropy_coef: float = 0.01,
     max_grad_norm: float = 0.5,
+    value_only: bool = False,
 ) -> dict:
+    """One PPO update over the rollout batch.
+
+    ``value_only=True`` runs a critic warm-up: only the value loss is optimised.
+    Pair it with freezing every parameter except ``model.critic`` (done by the
+    caller) so the BC-trained actor/trunk is left untouched while the value head
+    learns to predict returns — giving subsequent real PPO updates sane
+    advantages instead of advantages derived from a random critic.
+    """
     model.train()
     b = batch.num_seqs
 
@@ -35,6 +44,7 @@ def ppo_update(
     bv = batch.baseview.to(device)
     sc = batch.scalars.to(device)
     mk = batch.mask.to(device)
+    sm = batch.staticmap.to(device)
     act = batch.actions.to(device)
     logp_old = batch.logp.to(device)
     adv = batch.advantages.to(device)
@@ -50,7 +60,7 @@ def ppo_update(
             idx = torch.as_tensor(cols, device=device)
 
             logp, ent, values = model.evaluate_actions(
-                vc[:, idx], bv[:, idx], sc[:, idx], mk[:, idx], act[:, idx]
+                vc[:, idx], bv[:, idx], sc[:, idx], mk[:, idx], sm[:, idx], act[:, idx]
             )
             mb_adv = adv[:, idx]
             mb_ret = ret[:, idx]
@@ -67,7 +77,10 @@ def ppo_update(
             v_loss = torch.max((values - mb_ret) ** 2, (v_clip - mb_ret) ** 2).mean()
 
             entropy = ent.mean()
-            loss = policy_loss + value_coef * v_loss - entropy_coef * entropy
+            if value_only:
+                loss = v_loss
+            else:
+                loss = policy_loss + value_coef * v_loss - entropy_coef * entropy
 
             optimizer.zero_grad()
             loss.backward()

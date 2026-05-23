@@ -68,6 +68,7 @@ def main():
     bv = torch.as_tensor(data["baseview"])
     sc = torch.as_tensor(data["scalars"])
     mk = torch.as_tensor(data["mask"])
+    sm = torch.as_tensor(data["staticmap"])
     act = torch.as_tensor(data["actions"])
 
     model = RecurrentMaskableActorCritic().to(device)
@@ -83,6 +84,7 @@ def main():
             logits, _, _ = model.forward_sequence(
                 vc[:, cols].to(device), bv[:, cols].to(device),
                 sc[:, cols].to(device), mk[:, cols].to(device),
+                sm[:, cols].to(device),
             )
             target = act[:, cols].to(device)
             # NLL of the teacher action under the masked policy.

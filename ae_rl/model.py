@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Categorical
 
-from common import BASE_SHAPE, NUM_ACTIONS, SCALAR_DIM, VIEW_SHAPE
+from common import BASE_SHAPE, NUM_ACTIONS, SCALAR_DIM, STATIC_MAP_SHAPE, VIEW_SHAPE
 
 _MASK_FILL = -1e9
 
@@ -67,18 +67,26 @@ class RecurrentMaskableActorCritic(nn.Module):
         gru_layers: int = 1,
         cnn_hidden: int = 32,
         scalar_hidden: int = 64,
+        static_cnn_hidden: int = 16,
     ):
         super().__init__()
         c, vh, vw = VIEW_SHAPE
         _, bh, bw = BASE_SHAPE
+        sc_c, sh, sw = STATIC_MAP_SHAPE
 
         self.agent_cnn = _SpatialEncoder(c, vh, vw, cnn_hidden)
         self.base_cnn = _SpatialEncoder(c, bh, bw, cnn_hidden)
+        self.static_cnn = _SpatialEncoder(sc_c, sh, sw, static_cnn_hidden)
         self.scalar_mlp = nn.Sequential(
             nn.Linear(SCALAR_DIM, scalar_hidden),
             nn.ReLU(inplace=True),
         )
-        fused_in = self.agent_cnn.out_dim + self.base_cnn.out_dim + scalar_hidden
+        fused_in = (
+            self.agent_cnn.out_dim
+            + self.base_cnn.out_dim
+            + self.static_cnn.out_dim
+            + scalar_hidden
+        )
         self.fuse = nn.Sequential(
             nn.Linear(fused_in, feature_dim),
             nn.ReLU(inplace=True),
@@ -104,16 +112,18 @@ class RecurrentMaskableActorCritic(nn.Module):
                 nn.init.constant_(m.bias, 0.0)
 
     # ── feature extraction (handles arbitrary leading batch dims) ─────────────
-    def _features(self, viewcone, baseview, scalars) -> torch.Tensor:
+    def _features(self, viewcone, baseview, scalars, staticmap) -> torch.Tensor:
         lead = viewcone.shape[:-3]              # (...,) before (C, H, W)
         c, vh, vw = viewcone.shape[-3:]
         _, bh, bw = baseview.shape[-3:]
+        sc_c, sh, sw = staticmap.shape[-3:]
         n = int(torch.tensor(lead).prod().item()) if lead else 1
 
         v = self.agent_cnn(viewcone.reshape(n, c, vh, vw))
         b = self.base_cnn(baseview.reshape(n, c, bh, bw))
+        m = self.static_cnn(staticmap.reshape(n, sc_c, sh, sw))
         s = self.scalar_mlp(scalars.reshape(n, scalars.shape[-1]))
-        f = self.fuse(torch.cat([v, b, s], dim=-1))
+        f = self.fuse(torch.cat([v, b, m, s], dim=-1))
         return f.reshape(*lead, -1) if lead else f.reshape(-1)
 
     def initial_hidden(self, batch: int, device) -> torch.Tensor:
@@ -121,14 +131,14 @@ class RecurrentMaskableActorCritic(nn.Module):
 
     # ── single-step acting (rollout) ──────────────────────────────────────────
     @torch.no_grad()
-    def act(self, viewcone, baseview, scalars, mask, hidden, deterministic: bool = False):
+    def act(self, viewcone, baseview, scalars, mask, staticmap, hidden, deterministic: bool = False):
         """One timestep for a batch of B agents.
 
         Shapes: viewcone (B, C, H, W); baseview (B, C, H, W); scalars (B, D);
-        mask (B, A); hidden (layers, B, gru_hidden).
+        mask (B, A); staticmap (B, Cs, Gs, Gs); hidden (layers, B, gru_hidden).
         Returns action (B,), logp (B,), value (B,), entropy (B,), new_hidden.
         """
-        feat = self._features(viewcone, baseview, scalars).unsqueeze(0)   # (1, B, F)
+        feat = self._features(viewcone, baseview, scalars, staticmap).unsqueeze(0)   # (1, B, F)
         out, new_hidden = self.gru(feat, hidden)                          # (1, B, H)
         out = out.squeeze(0)
         logits = masked_logits(self.actor(out), mask)
@@ -138,7 +148,7 @@ class RecurrentMaskableActorCritic(nn.Module):
         return action, dist.log_prob(action), value, dist.entropy(), new_hidden
 
     # ── full-sequence evaluation (BPTT for PPO / BC) ──────────────────────────
-    def forward_sequence(self, viewcone, baseview, scalars, mask, hidden=None):
+    def forward_sequence(self, viewcone, baseview, scalars, mask, staticmap, hidden=None):
         """Run the GRU over a (T, B, …) sequence.
 
         Returns logits (T, B, A), values (T, B), final_hidden.
@@ -146,15 +156,17 @@ class RecurrentMaskableActorCritic(nn.Module):
         t, b = viewcone.shape[0], viewcone.shape[1]
         if hidden is None:
             hidden = self.initial_hidden(b, viewcone.device)
-        feat = self._features(viewcone, baseview, scalars)        # (T, B, F)
+        feat = self._features(viewcone, baseview, scalars, staticmap)        # (T, B, F)
         out, hidden = self.gru(feat, hidden)                      # (T, B, H)
         logits = masked_logits(self.actor(out), mask)
         values = self.critic(out).squeeze(-1)
         return logits, values, hidden
 
-    def evaluate_actions(self, viewcone, baseview, scalars, mask, actions, hidden=None):
+    def evaluate_actions(self, viewcone, baseview, scalars, mask, staticmap, actions, hidden=None):
         """For PPO: return logp (T, B), entropy (T, B), values (T, B) for taken actions."""
-        logits, values, _ = self.forward_sequence(viewcone, baseview, scalars, mask, hidden)
+        logits, values, _ = self.forward_sequence(
+            viewcone, baseview, scalars, mask, staticmap, hidden
+        )
         dist = Categorical(logits=logits)
         return dist.log_prob(actions), dist.entropy(), values
 
@@ -182,7 +194,19 @@ def load_checkpoint(path, device, eval_mode: bool = False) -> RecurrentMaskableA
         gru_hidden=arch.get("gru_hidden", 256),
         gru_layers=arch.get("gru_layers", 1),
     ).to(device)
-    model.load_state_dict(ckpt["model_state"])
+    state = ckpt["model_state"]
+    # Tolerate partial loads (e.g. an old checkpoint missing static_cnn or whose
+    # fuse layer has a smaller input than the new architecture). Missing/shape-
+    # mismatched tensors are left at their fresh initialisation so we can still
+    # warm-start most of the network from a prior run.
+    own = model.state_dict()
+    loadable = {k: v for k, v in state.items() if k in own and own[k].shape == v.shape}
+    skipped = [k for k in state if k not in loadable]
+    own.update(loadable)
+    model.load_state_dict(own)
+    if skipped:
+        print(f"[load_checkpoint] partial load: kept {len(loadable)}/{len(state)} tensors; "
+              f"skipped (shape mismatch or unknown): {skipped[:6]}{'…' if len(skipped) > 6 else ''}")
     if eval_mode:
         model.eval()
     return model

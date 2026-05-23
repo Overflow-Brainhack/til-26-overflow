@@ -32,9 +32,20 @@ from tqdm.auto import tqdm
 
 import common  # noqa: F401  (path bootstrap)
 from common import obs_to_arrays
-from controllers import build_controller
+from controllers import _CACHE_TEMPLATE, build_controller
+from map_memory import MapMemory
+from observation import parse_observation
 from til_environment.bomberman_env import Bomberman
 from til_environment.config import default_config
+
+
+def _fresh_learner_memory(novice: bool) -> MapMemory:
+    """Per-learner MapMemory. Novice gets the bundled static cache so it starts
+    with the same map knowledge the heuristic has."""
+    mem = MapMemory()
+    if novice and _CACHE_TEMPLATE is not None:
+        mem.merge_static_from(_CACHE_TEMPLATE)
+    return mem
 
 
 def make_env(novice: bool = True) -> Bomberman:
@@ -42,6 +53,28 @@ def make_env(novice: bool = True) -> Bomberman:
     cfg.env.novice = novice
     cfg.env.render_mode = None
     return Bomberman(cfg)
+
+
+def _make_env_pool(novice: bool = True, advanced_prob: float = 0.0) -> dict[bool, Bomberman]:
+    if novice and advanced_prob > 0.0:
+        return {True: make_env(True), False: make_env(False)}
+    return {novice: make_env(novice)}
+
+
+def _select_env(envs: dict[bool, Bomberman], advanced_prob: float, rng) -> Bomberman:
+    if True in envs and False in envs:
+        novice = not (rng.random() < advanced_prob)
+        return novice, envs[novice]
+    novice, env = next(iter(envs.items()))
+    return novice, env
+
+
+def _spec_for_map(spec: dict, novice: bool) -> dict:
+    if spec.get("kind") not in {"heuristic", "stochastic_heuristic"}:
+        return spec
+    out = dict(spec)
+    out["use_cache"] = novice
+    return out
 
 
 def default_workers() -> int:
@@ -56,6 +89,7 @@ class RolloutBatch:
     baseview: torch.Tensor
     scalars: torch.Tensor
     mask: torch.Tensor
+    staticmap: torch.Tensor
     actions: torch.Tensor
     logp: torch.Tensor
     values: torch.Tensor
@@ -71,7 +105,7 @@ class RolloutBatch:
 
 def _new_trajectory() -> dict:
     return {k: [] for k in (
-        "viewcone", "baseview", "scalars", "mask",
+        "viewcone", "baseview", "scalars", "mask", "staticmap",
         "actions", "logp", "values", "rewards", "dones",
     )}
 
@@ -82,6 +116,7 @@ def _stack_trajectory(traj: dict) -> dict:
         "baseview": np.stack(traj["baseview"]).astype(np.float32),
         "scalars": np.stack(traj["scalars"]).astype(np.float32),
         "mask": np.stack(traj["mask"]).astype(np.float32),
+        "staticmap": np.stack(traj["staticmap"]).astype(np.float32),
         "actions": np.asarray(traj["actions"], dtype=np.int64),
         "logp": np.asarray(traj["logp"], dtype=np.float32),
         "values": np.asarray(traj["values"], dtype=np.float32),
@@ -106,8 +141,9 @@ def _compute_gae(rewards, values, dones, gamma: float, lam: float):
 
 # ── core episode loops (process-agnostic) ─────────────────────────────────────
 @torch.no_grad()
-def _collect_selfplay_episodes(env, model, device, opponent_specs, n_learners,
-                               gamma, lam, n_episodes, rng):
+def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
+                               gamma, lam, n_episodes, rng, advanced_prob=0.0,
+                               learner_slots=None):
     """Run *n_episodes* self-play games. Returns (trajs, learner_returns, opp_returns)."""
     model.eval()
     all_trajs: list[dict] = []
@@ -115,15 +151,23 @@ def _collect_selfplay_episodes(env, model, device, opponent_specs, n_learners,
     opp_returns: list[float] = []
 
     for _ in range(n_episodes):
+        episode_novice, env = _select_env(envs, advanced_prob, rng)
         env.reset(seed=rng.randint(0, 2_000_000_000))
         agents = list(env.possible_agents)
-        learner_ids = set(rng.sample(agents, n_learners))
+        eligible = [a for a in (learner_slots or agents) if a in agents]
+        if len(eligible) < n_learners:
+            eligible = agents
+        learner_ids = set(rng.sample(eligible, n_learners))
         opp_ids = [a for a in agents if a not in learner_ids]
-        controllers = {a: build_controller(rng.choice(opponent_specs), device) for a in opp_ids}
+        controllers = {
+            a: build_controller(_spec_for_map(rng.choice(opponent_specs), episode_novice), device)
+            for a in opp_ids
+        }
 
         hidden = {a: model.initial_hidden(1, device) for a in learner_ids}
         traj = {a: _new_trajectory() for a in learner_ids}
         opened = {a: False for a in learner_ids}
+        memories = {a: _fresh_learner_memory(episode_novice) for a in learner_ids}
 
         while True:
             agent = env.agent_selection
@@ -140,16 +184,22 @@ def _collect_selfplay_episodes(env, model, device, opponent_specs, n_learners,
                 if opened[agent]:
                     traj[agent]["rewards"].append(reward)
                     traj[agent]["dones"].append(0.0)
-                vc, bv, sc, mk = obs_to_arrays(obs)
+                mem = memories[agent]
+                try:
+                    mem.update(parse_observation(obs))
+                except Exception:
+                    pass
+                vc, bv, sc, mk, smap = obs_to_arrays(obs, memory=mem)
                 tv = lambda a: torch.as_tensor(a, device=device).unsqueeze(0)  # noqa: E731
                 action, logp, value, _, hidden[agent] = model.act(
-                    tv(vc), tv(bv), tv(sc), tv(mk), hidden[agent]
+                    tv(vc), tv(bv), tv(sc), tv(mk), tv(smap), hidden[agent]
                 )
                 a_int = int(action.item())
                 traj[agent]["viewcone"].append(vc)
                 traj[agent]["baseview"].append(bv)
                 traj[agent]["scalars"].append(sc)
                 traj[agent]["mask"].append(mk)
+                traj[agent]["staticmap"].append(smap)
                 traj[agent]["actions"].append(a_int)
                 traj[agent]["logp"].append(float(logp.item()))
                 traj[agent]["values"].append(float(value.item()))
@@ -181,7 +231,7 @@ def _collect_selfplay_episodes(env, model, device, opponent_specs, n_learners,
     return all_trajs, learner_returns, opp_returns
 
 
-def _collect_teacher_episodes(env, n_episodes, rng):
+def _collect_teacher_episodes(env, n_episodes, rng, novice: bool = True):
     """Every agent driven by the heuristic teacher; records (obs, action) per agent."""
     from controllers import HeuristicController
 
@@ -190,7 +240,9 @@ def _collect_teacher_episodes(env, n_episodes, rng):
         env.reset(seed=rng.randint(0, 2_000_000_000))
         agents = list(env.possible_agents)
         controllers = {a: HeuristicController() for a in agents}
-        rec = {a: {"viewcone": [], "baseview": [], "scalars": [], "mask": [], "actions": []}
+        memories = {a: _fresh_learner_memory(novice) for a in agents}
+        rec = {a: {"viewcone": [], "baseview": [], "scalars": [], "mask": [],
+                   "staticmap": [], "actions": []}
                for a in agents}
         while True:
             agent = env.agent_selection
@@ -201,11 +253,17 @@ def _collect_teacher_episodes(env, n_episodes, rng):
                 continue
             obs = env.observe(agent)
             action = int(controllers[agent].act(obs))
-            vc, bv, sc, mk = obs_to_arrays(obs)
+            mem = memories[agent]
+            try:
+                mem.update(parse_observation(obs))
+            except Exception:
+                pass
+            vc, bv, sc, mk, smap = obs_to_arrays(obs, memory=mem)
             rec[agent]["viewcone"].append(vc)
             rec[agent]["baseview"].append(bv)
             rec[agent]["scalars"].append(sc)
             rec[agent]["mask"].append(mk)
+            rec[agent]["staticmap"].append(smap)
             rec[agent]["actions"].append(action)
             env.step(action)
         for a in agents:
@@ -220,35 +278,40 @@ _SP: dict = {}   # self-play worker globals
 _TE: dict = {}   # teacher worker globals
 
 
-def _sp_worker_init(opponent_specs, n_learners, novice, gamma, lam):
+def _sp_worker_init(opponent_specs, n_learners, novice, advanced_prob, gamma, lam, learner_slots):
     torch.set_num_threads(1)
     from model import RecurrentMaskableActorCritic
     _SP.update(
         device=torch.device("cpu"),
         model=RecurrentMaskableActorCritic().to("cpu").eval(),
-        env=make_env(novice),
+        envs=_make_env_pool(novice, advanced_prob),
         specs=opponent_specs, n_learners=n_learners, gamma=gamma, lam=lam,
+        advanced_prob=advanced_prob, learner_slots=learner_slots,
     )
 
 
 def _sp_worker_task(args):
     state_dict, n_episodes, seed = args
+    random.seed(seed)
     _SP["model"].load_state_dict(state_dict)
     rng = random.Random(seed)
     return _collect_selfplay_episodes(
-        _SP["env"], _SP["model"], _SP["device"], _SP["specs"],
+        _SP["envs"], _SP["model"], _SP["device"], _SP["specs"],
         _SP["n_learners"], _SP["gamma"], _SP["lam"], n_episodes, rng,
+        _SP["advanced_prob"], _SP["learner_slots"],
     )
 
 
 def _te_worker_init(novice):
     torch.set_num_threads(1)
-    _TE.update(env=make_env(novice))
+    _TE.update(env=make_env(novice), novice=novice)
 
 
 def _te_worker_task(args):
     n_episodes, seed = args
-    return _collect_teacher_episodes(_TE["env"], n_episodes, random.Random(seed))
+    return _collect_teacher_episodes(
+        _TE["env"], n_episodes, random.Random(seed), novice=_TE["novice"]
+    )
 
 
 def _split(n: int, k: int) -> list[int]:
@@ -267,7 +330,8 @@ def _normalise_and_assemble(trajs: list[dict]) -> RolloutBatch:
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
     return RolloutBatch(
         viewcone=stack("viewcone"), baseview=stack("baseview"), scalars=stack("scalars"),
-        mask=stack("mask"), actions=stack("actions"), logp=stack("logp"),
+        mask=stack("mask"), staticmap=stack("staticmap"),
+        actions=stack("actions"), logp=stack("logp"),
         values=stack("values"), rewards=stack("rewards"), dones=stack("dones"),
         advantages=adv, returns=stack("returns"),
     )
@@ -285,6 +349,8 @@ class SelfPlayCollector:
         opponent_specs,
         n_learners: int = 3,
         novice: bool = True,
+        advanced_prob: float = 0.0,
+        learner_slots: list[str] | None = None,
         gamma: float = 0.99,
         lam: float = 0.95,
         num_workers: int = 1,
@@ -293,12 +359,14 @@ class SelfPlayCollector:
         self.device = device
         self.opponent_specs = list(opponent_specs)
         self.n_learners = max(1, min(n_learners, common.NUM_AGENTS))
+        self.learner_slots = list(learner_slots or [])
         self.novice = novice
+        self.advanced_prob = max(0.0, min(1.0, float(advanced_prob)))
         self.gamma = gamma
         self.lam = lam
         self.num_workers = max(1, int(num_workers))
         self._pool = None
-        self.env = make_env(novice) if self.num_workers == 1 else None
+        self.envs = _make_env_pool(novice, self.advanced_prob) if self.num_workers == 1 else None
 
     # Allow Stage 3 to swap in a larger opponent pool after a league snapshot.
     def set_opponent_specs(self, specs) -> None:
@@ -311,7 +379,10 @@ class SelfPlayCollector:
             self._pool = ctx.Pool(
                 processes=self.num_workers,
                 initializer=_sp_worker_init,
-                initargs=(self.opponent_specs, self.n_learners, self.novice, self.gamma, self.lam),
+                initargs=(
+                    self.opponent_specs, self.n_learners, self.novice,
+                    self.advanced_prob, self.gamma, self.lam, self.learner_slots,
+                ),
             )
 
     def _close_pool(self):
@@ -356,8 +427,9 @@ class SelfPlayCollector:
             it = tqdm(it, desc="  collect", leave=False, unit="game")
         for _ in it:
             tj, l, o = _collect_selfplay_episodes(
-                self.env, self.model, self.device, self.opponent_specs,
+                self.envs, self.model, self.device, self.opponent_specs,
                 self.n_learners, self.gamma, self.lam, 1, rng,
+                self.advanced_prob, self.learner_slots,
             )
             trajs.extend(tj); lr.extend(l); opr.extend(o)
         return trajs, lr, opr
@@ -366,6 +438,8 @@ class SelfPlayCollector:
         batch = _normalise_and_assemble(trajs)
         stats = {
             "learner_return_mean": float(np.mean(learner_returns)) if learner_returns else 0.0,
+            "learner_return_std": float(np.std(learner_returns)) if learner_returns else 0.0,
+            "learner_return_min": float(np.min(learner_returns)) if learner_returns else 0.0,
             "learner_return_max": float(np.max(learner_returns)) if learner_returns else 0.0,
             "opp_return_mean": float(np.mean(opp_returns)) if opp_returns else 0.0,
             "n_seqs": batch.num_seqs,
@@ -390,7 +464,7 @@ def collect_teacher_dataset(teacher_factory=None, n_episodes: int = 48, novice: 
         if progress:
             it = tqdm(it, desc="  teacher games", unit="game")
         for _ in it:
-            seqs.extend(_collect_teacher_episodes(env, 1, random))
+            seqs.extend(_collect_teacher_episodes(env, 1, random, novice=novice))
     else:
         ctx = mp.get_context("spawn")
         chunks = _split(n_episodes, num_workers)
@@ -410,5 +484,6 @@ def collect_teacher_dataset(teacher_factory=None, n_episodes: int = 48, novice: 
         "baseview": np.stack([s["baseview"][:t] for s in seqs], axis=1).astype(np.float32),
         "scalars": np.stack([s["scalars"][:t] for s in seqs], axis=1).astype(np.float32),
         "mask": np.stack([s["mask"][:t] for s in seqs], axis=1).astype(np.float32),
+        "staticmap": np.stack([s["staticmap"][:t] for s in seqs], axis=1).astype(np.float32),
         "actions": np.stack([s["actions"][:t] for s in seqs], axis=1).astype(np.int64),
     }

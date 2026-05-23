@@ -29,13 +29,19 @@ if str(AE_SRC) not in sys.path:
 
 CKPT_DIR = HERE / "checkpoints"
 LEAGUE_DIR = CKPT_DIR / "league"
+STAGE2_SNAPSHOT_DIR = CKPT_DIR / "stage2_snapshots"
+STAGE3_SNAPSHOT_DIR = CKPT_DIR / "stage3_snapshots"
 CKPT_DIR.mkdir(parents=True, exist_ok=True)
 LEAGUE_DIR.mkdir(parents=True, exist_ok=True)
+STAGE2_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+STAGE3_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Stage checkpoint filenames (latest snapshot per stage).
 STAGE1_CKPT = CKPT_DIR / "stage1_bc.pt"
 STAGE2_CKPT = CKPT_DIR / "stage2_ppo.pt"
 STAGE3_CKPT = CKPT_DIR / "stage3_league.pt"
+STAGE2_BEST_CKPT = CKPT_DIR / "stage2_ppo_best.pt"
+STAGE3_BEST_CKPT = CKPT_DIR / "stage3_league_best.pt"
 
 # Normalisation constants — imported from the (now importable) ae/src/constants.
 from constants import (  # noqa: E402
@@ -140,15 +146,20 @@ def _fix_view(arr, shape) -> np.ndarray:
     return out
 
 
-def obs_to_arrays(obs: dict):
+STATIC_MAP_CHANNELS = 6
+
+
+def obs_to_arrays(obs: dict, memory=None):
     """Convert a raw env observation dict into model-ready numpy arrays.
 
     Returns
     -------
-    viewcone : (NUM_CHANNELS, VIEWCONE_LENGTH, VIEWCONE_WIDTH) float32  (channel-first)
-    baseview : (NUM_CHANNELS, BASE_VIEW_SIDE, BASE_VIEW_SIDE)   float32  (channel-first)
-    scalars  : (SCALAR_DIM,) float32
-    mask     : (NUM_ACTIONS,) float32  (1 = legal)
+    viewcone   : (NUM_CHANNELS, VIEWCONE_LENGTH, VIEWCONE_WIDTH) float32  (C, H, W)
+    baseview   : (NUM_CHANNELS, BASE_VIEW_SIDE, BASE_VIEW_SIDE)   float32  (C, H, W)
+    scalars    : (SCALAR_DIM,) float32
+    mask       : (NUM_ACTIONS,) float32  (1 = legal)
+    static_map : (STATIC_MAP_CHANNELS, GRID_SIZE, GRID_SIZE) float32. Zeros
+                 when ``memory`` is None.
     """
     vc = _fix_view(obs.get("agent_viewcone"), (VIEWCONE_LENGTH, VIEWCONE_WIDTH, NUM_CHANNELS))
     bv = _fix_view(obs.get("base_viewcone"), (BASE_VIEW_SIDE, BASE_VIEW_SIDE, NUM_CHANNELS))
@@ -158,9 +169,16 @@ def obs_to_arrays(obs: dict):
     mask = np.asarray(obs.get("action_mask", [1] * NUM_ACTIONS), dtype=np.float32).flatten()
     if mask.shape != (NUM_ACTIONS,):
         mask = np.ones(NUM_ACTIONS, dtype=np.float32)
-    return vc, bv, scal, mask
+    if memory is not None:
+        smap = memory.static_map_layer()
+        if smap.shape != (STATIC_MAP_CHANNELS, GRID_SIZE, GRID_SIZE):
+            smap = np.zeros((STATIC_MAP_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
+    else:
+        smap = np.zeros((STATIC_MAP_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
+    return vc, bv, scal, mask, smap
 
 
 # Shapes exported for the model constructor.
 VIEW_SHAPE = (NUM_CHANNELS, VIEWCONE_LENGTH, VIEWCONE_WIDTH)
 BASE_SHAPE = (NUM_CHANNELS, BASE_VIEW_SIDE, BASE_VIEW_SIDE)
+STATIC_MAP_SHAPE = (STATIC_MAP_CHANNELS, GRID_SIZE, GRID_SIZE)

@@ -99,7 +99,7 @@ Inference runs through `ae/src/rl_policy.py` (`RLPolicy`, implements the same
 `Policy` interface as the heuristic). The network there mirrors `model.py`
 exactly so checkpoints load directly.
 
-1. Copy a checkpoint into the image source: `cp ae_rl/checkpoints/stage3_league.pt ae/src/ae_rl.pt`
+1. Copy a checkpoint into the image source: `cp ae_rl/checkpoints/stage3_league.pt ae/models/ae_rl.pt`
 2. Wire it in `ae/src/ae_manager.py` (left un-wired so the heuristic stays
    production):
    ```python
