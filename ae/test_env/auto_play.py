@@ -4,13 +4,14 @@ Agent types
 -----------
   normal              — HeuristicPolicy (balanced: dodge, attack, defend, collect, explore)
   berserker           — BerserkerPolicy (rush enemy bases, ignore self-preservation)
-  berserker_base      — BerserkerBasePolicy (heuristic base, berserker-style aggression)
   random              — RandomPolicy (uniform sample over legal actions)
+  rl                  — RLPolicy loaded from ae/models/ae_rl.pt by default
 
 Visual mode (default):
     python ae/test_env/auto_play.py
+    python ae/test_env/auto_play.py --agent-type rl
     python ae/test_env/auto_play.py --agent-type berserker
-    python ae/test_env/auto_play.py --agent-types berserker normal normal normal normal normal
+    python ae/test_env/auto_play.py --agent-types rl normal normal normal normal normal
     python ae/test_env/auto_play.py --rounds 3 --seed 42 --fps 4
 
 Headless benchmark (compare selected types, no window):
@@ -49,24 +50,22 @@ from til_environment.bomberman_env import Bomberman  # noqa: E402
 from til_environment.config import default_config, load_config  # noqa: E402
 
 from ae_manager import DEFAULT_CACHE_PATH, DEFAULT_POLICY_KWARGS, AEManager  # noqa: E402
-from berserker_base_policy import BerserkerBasePolicy  # noqa: E402
 from berserker_policy import BerserkerPolicy  # noqa: E402
 from constants import Action, GRID_SIZE  # noqa: E402
-from edited_policy import EditedHeuristicPolicy as HeuristicPolicy  # noqa: E402
+# from edited_policy import EditedHeuristicPolicy as HeuristicPolicy  # noqa: E402
 
-# Comment the line below to benchmark the plain edited_policy instead of the
-# experimental clone (mirrors the toggle in ae_manager.py).
 from edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy  # noqa: E402
 from map_memory import MapMemory  # noqa: E402
 from observation import ParsedObs  # noqa: E402
 from policy import Policy  # noqa: E402
+from rl_policy import RLPolicy  # noqa: E402
 
 
 AGENT_TYPES = (
     "normal",
     "berserker",
-    "berserker_base",
     "random",
+    "rl",
 )
 
 
@@ -81,15 +80,16 @@ class RandomPolicy(Policy):
 def _make_policy(
     agent_type: str,
     policy_kwargs: dict,
+    rl_checkpoint: Optional[Path] = None,
 ) -> Policy:
     if agent_type == "normal":
-        policy: Policy = HeuristicPolicy(**policy_kwargs)
+        policy: Policy = HeuristicPolicy()
     elif agent_type == "berserker":
         policy = BerserkerPolicy()
-    elif agent_type == "berserker_base":
-        policy = BerserkerBasePolicy(**policy_kwargs)
     elif agent_type == "random":
         policy = RandomPolicy()
+    elif agent_type == "rl":
+        policy = RLPolicy(checkpoint_path=rl_checkpoint)
     else:
         raise ValueError(f"unknown agent type: {agent_type}")
 
@@ -100,6 +100,7 @@ def _make_factories(
     agents: list[str],
     types: list[str],
     policy_kwargs: dict,
+    rl_checkpoint: Optional[Path] = None,
 ) -> dict[str, callable]:
     """Return a per-agent-id dict of zero-arg callables that produce a Policy."""
     out: dict[str, callable] = {}
@@ -108,6 +109,7 @@ def _make_factories(
         out[agent] = lambda t=t_: _make_policy(
             t,
             policy_kwargs,
+            rl_checkpoint,
         )
     return out
 
@@ -179,6 +181,7 @@ def _run_benchmark(
     policy_kwargs: dict,
     cache_path: Optional[Path],
     agent_types: tuple[str, ...] = AGENT_TYPES,
+    rl_checkpoint: Optional[Path] = None,
 ) -> None:
     """Headless comparison: run each type for *rounds* rounds, then print table.
 
@@ -208,6 +211,7 @@ def _run_benchmark(
             env.possible_agents,
             [agent_type] * n_agents,
             policy_kwargs,
+            rl_checkpoint,
         )
         managers, cache_tmpl = _build_managers(env, factories, cache_path)
 
@@ -280,6 +284,7 @@ def _run_matchup_benchmark(
     policy_kwargs: dict,
     cache_path: Optional[Path],
     agent_types: tuple[str, ...] = AGENT_TYPES,
+    rl_checkpoint: Optional[Path] = None,
 ) -> None:
     """Headless cross-type matchup: for every (focus, opponent) pair run *rounds* rounds.
 
@@ -326,6 +331,7 @@ def _run_matchup_benchmark(
                 env.possible_agents,
                 type_list,
                 policy_kwargs,
+                rl_checkpoint,
             )
             managers, cache_tmpl = _build_managers(env, factories, cache_path)
 
@@ -428,8 +434,8 @@ _MODE_COLORS: dict[str, tuple[int, int, int]] = {
 _TYPE_COLORS: dict[str, tuple[int, int, int]] = {
     "normal": (100, 200, 255),
     "berserker": (255, 80, 80),
-    "berserker_base": (255, 150, 120),
     "random": (200, 200, 80),
+    "rl": (180, 120, 255),
 }
 
 
@@ -630,6 +636,12 @@ def main() -> None:
             "Default: all available policy types."
         ),
     )
+    parser.add_argument(
+        "--rl-checkpoint",
+        type=Path,
+        default=None,
+        help="Checkpoint for --agent-type rl (default: ae/models/ae_rl.pt)",
+    )
     # ── heuristic (normal) policy toggles ────────────────────────────────────
     parser.add_argument(
         "--predictive-bomb",
@@ -769,12 +781,6 @@ def main() -> None:
         type=int,
         default=_P["base_weight_attack_cooldown"],
     )
-    parser.add_argument("--minimum-aggression", type=float, default=2.0)
-    parser.add_argument(
-        "--aggression-ramp-rate",
-        type=float,
-        default=0.08,
-    )
     parser.add_argument("--defensive-force", type=float, default=0.6)
     parser.add_argument(
         "--defense-abandon-margin",
@@ -827,12 +833,6 @@ def main() -> None:
         base_weight_min=args.base_weight_min,
         base_weight_ramp_rate=args.base_weight_ramp_rate,
         base_weight_attack_cooldown=args.base_weight_attack_cooldown,
-        minimum_aggression=args.minimum_aggression,
-        aggression_ramp_rate=args.aggression_ramp_rate,
-        defensive_force=args.defensive_force,
-        defense_abandon_margin=args.defense_abandon_margin,
-        max_defense_distance=args.max_defense_distance,
-        defense_cooldown_scale=args.defense_cooldown_scale,
     )
 
     # ── benchmark mode (headless) ─────────────────────────────────────────────
@@ -847,6 +847,7 @@ def main() -> None:
             policy_kwargs,
             args.cache_path,
             benchmark_types,
+            args.rl_checkpoint,
         )
         return
 
@@ -857,6 +858,7 @@ def main() -> None:
             policy_kwargs,
             args.cache_path,
             benchmark_types,
+            args.rl_checkpoint,
         )
         return
 
@@ -884,6 +886,7 @@ def main() -> None:
         env.possible_agents,
         agent_types_list,
         policy_kwargs,
+        args.rl_checkpoint,
     )
     managers, cached_template = _build_managers(env, factories, args.cache_path)
 

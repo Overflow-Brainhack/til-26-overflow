@@ -188,3 +188,5 @@ til-26.wiki
 logs/eval_results.jsonl
 
 nlp_cheese/nlp_eval_512
+
+!ae_cpp/**/models

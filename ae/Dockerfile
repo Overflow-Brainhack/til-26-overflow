@@ -1,8 +1,15 @@
 # Dockerfile for building the AE image.
 
 
-# The base image. Using a regular Python base because AE agents don't typically
-# require GPU. This will speed up your evaluation.
+# The base image. A slim Python base keeps the image small and evaluation fast.
+# The learned RL policy (rl_policy.py) is a ~1.1M-param net whose per-step
+# inference is sub-millisecond on CPU, so no GPU is needed — torch (CPU build)
+# is installed from requirements.txt.
+#
+# If you ever need GPU inference (much larger nets, batched eval), swap the base
+# to the CUDA image below — it already ships torch, so also remove the torch /
+# --extra-index-url lines from requirements.txt:
+#   FROM nvcr.io/nvidia/pytorch:25.11-py3
 FROM python:3.11-slim
 
 # Configures settings for the image.
@@ -18,6 +25,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copies your source files.
 COPY src .
+COPY models/ models/
 
 # Starts your model server.
 CMD uvicorn ae_server:app --port 5005 --host 0.0.0.0

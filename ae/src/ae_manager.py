@@ -18,6 +18,7 @@ from constants import Action
 from map_memory import MapMemory, get_shared_memory
 from observation import parse_observation
 from policy import Policy
+from rl_policy import RLPolicy
 
 from edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy
 
@@ -78,7 +79,8 @@ class AEManager:
 
         self._memory.reset_round()
         # self._policy: Policy = policy or BerserkerPolicy()
-        self._policy: Policy = policy or HeuristicPolicy()
+        # self._policy: Policy = policy or HeuristicPolicy()
+        self._policy: Policy = policy or RLPolicy()
 
     def _maybe_load_cache(self, path: Path) -> None:
         if not path.exists():

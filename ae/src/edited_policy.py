@@ -86,7 +86,6 @@ from pathfinding import (
     reachable_cells,
     temporal_first_action_to,
 )
-from rl_attack import AttackModule
 from threat import (
     cells_in_blast,
     cells_safe_for_at_least,
@@ -1124,19 +1123,6 @@ class EditedHeuristicPolicy(Policy):
         #     )
 
     # ── overridable hooks (no-ops here; subclasses layer behaviour on) ───────
-
-    def _extra_danger_cells(
-        self,
-        obs: ParsedObs,
-        memory: MapMemory,
-    ) -> set[tuple[int, int]]:
-        """Additional cells to treat as unsafe for collect/explore routing only.
-
-        Base policy anticipates nothing beyond live enemy bombs (handled via the
-        danger timeline). Subclasses may project danger from visible enemy agents.
-        Never consulted by dodge, so it cannot block a real escape.
-        """
-        return set()
 
     def _collect_value(self, cell: tuple[int, int], memory: MapMemory) -> float:
         """Scoring numerator for a collectible cell (before /(dist+1)).

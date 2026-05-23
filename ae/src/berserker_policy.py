@@ -39,7 +39,7 @@ class BerserkerPolicy(Policy):
     1. Frozen            → STAY (can't act)
     2. Enemy base in our current blast radius + have bombs → PLACE_BOMB
     3. Enemy agent in our current blast radius + have bombs → PLACE_BOMB
-    4. Navigate to firing position for weakest (lowest-HP) enemy base,
+    4. Navigate to firing position for the nearest enemy base,
        bombing through destructible walls when that shortens the path
     5. Collect nearby resource tile to restock bombs faster
     6. Explore (advance / turn)
@@ -69,8 +69,8 @@ class BerserkerPolicy(Policy):
             if set(memory.enemy_agents) & blast:
                 return int(Action.PLACE_BOMB)
 
-        # Navigate toward a firing position for the weakest known enemy base.
-        target = self._pick_target(memory)
+        # Navigate toward a firing position for the nearest known enemy base.
+        target = self._pick_target(memory, pos)
         if target is not None:
             # Firing positions are cells from which a bomb would hit the target.
             # By LOS symmetry, these equal cells_in_blast centred on the base.
@@ -143,9 +143,13 @@ class BerserkerPolicy(Policy):
             return int(Action.PLACE_BOMB)
         return action
 
-    def _pick_target(self, memory: MapMemory) -> Optional[tuple[int, int]]:
-        """Weakest (lowest HP) known enemy base, or None if none remain.
+    def _pick_target(
+        self, memory: MapMemory, pos: tuple[int, int]
+    ) -> Optional[tuple[int, int]]:
+        """Nearest known alive enemy base, or None if none remain.
 
+        Attack whatever base is observed — no weakest-HP preference. If we can
+        see a base we should be pressuring it, so we just go for the closest one.
         Bases observed at exactly 0 HP are treated as destroyed and excluded —
         the simulator may keep them visible with health_ratio=0 for one tick
         before the entity is fully removed from the observation.
@@ -156,4 +160,4 @@ class BerserkerPolicy(Policy):
         }
         if not bases:
             return None
-        return min(bases, key=lambda b: memory.enemy_base_health.get(b, 100.0))
+        return min(bases, key=lambda b: abs(b[0] - pos[0]) + abs(b[1] - pos[1]))

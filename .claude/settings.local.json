@@ -6,7 +6,28 @@
       "Bash(cd /c/Users/zedon/Documents/GitHub/til-26-overflow/til-26-ae && find . -type f -name \"*.py\" | head -20)",
       "Read(//c/c/Users/zedon/Documents/GitHub/til-26-overflow/**)",
       "Bash(python -c ' *)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(uv pip *)",
+      "Bash(uv run *)",
+      "Bash(~/.local/bin/py-spy --version)",
+      "Bash(./.venv/bin/python -m compileall -q src/edited_policy_v2.py src/berserker_policy.py)",
+      "Bash(./.venv/bin/python -m compileall -q src/edited_policy_v2.py src/berserker_policy.py test_env/auto_play.py)",
+      "Bash(./.venv/bin/python -m compileall -q src/ test_env/auto_play.py)",
+      "Bash(./.venv/bin/python -c \"from ae_manager import AEManager, DEFAULT_POLICY_KWARGS; m=AEManager\\(\\); print\\('policy:', type\\(m._policy\\).__name__, '| siege_mode=', m._policy.siege_mode\\)\")",
+      "Bash(PYTHONPATH=src:../til-26-ae ./.venv/bin/python -c \"from ae_manager import AEManager; m=AEManager\\(\\); print\\('policy:', type\\(m._policy\\).__name__, '| siege_mode=', m._policy.siege_mode, '| min_bombs=', m._policy.siege_min_bombs\\)\")",
+      "Bash(PYTHONPATH=src:../til-26-ae ../.venv/bin/python -c \"from ae_manager import AEManager; m=AEManager\\(\\); print\\('policy:', type\\(m._policy\\).__name__, '| siege_mode=', m._policy.siege_mode, '| min_bombs=', m._policy.siege_min_bombs\\)\")",
+      "Bash(SDL_VIDEODRIVER=dummy PYTHONPATH=../src:../../til-26-ae ../../.venv/bin/python auto_play.py --benchmark --benchmark-types normal --rounds 2 --advanced)",
+      "Bash(../.venv/bin/python -m compileall -q src/ test_env/auto_play.py)",
+      "Bash(PYTHONPATH=src:../til-26-ae ../.venv/bin/python -c \"from ae_manager import AEManager, DEFAULT_POLICY_KWARGS; assert 'siege_mode' not in DEFAULT_POLICY_KWARGS; m=AEManager\\(\\); print\\('policy:', type\\(m._policy\\).__name__, '| siege_mode=', m._policy.siege_mode, '\\(from class default\\)'\\)\")",
+      "Bash(../.venv/bin/python -m compileall -q src/edited_policy_v2.py)",
+      "Bash(.venv/bin/python -c 'import __TRACKED_VAR__; print\\('\\\\''__TRACKED_VAR__'\\\\'', getattr\\(__TRACKED_VAR__,'\\\\''__version__'\\\\'','\\\\''ok'\\\\''\\)\\)')",
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(.venv/bin/python ae_rl/train_stage3_league.py --updates 3 --episodes-per-update 2 --learners 2 --snapshot-every 2 --save-every 2)",
+      "Bash(.venv/bin/python ae_rl/benchmark.py --rounds 2 --learners 1)",
+      "Bash(.venv/bin/python -m pip index versions torch --index-url https://download.pytorch.org/whl/cpu)",
+      "Bash(.venv/bin/python -c \"import torch; print\\('train torch', torch.__version__\\)\")",
+      "Bash(../../.venv/bin/python -c \"import rl_policy; print\\('rl_policy imports OK in flat layout'\\)\")",
+      "Bash(grep -nE \"checkpoint|\\\\.pt$|ae_rl\" .gitignore)"
     ]
   }
 }
