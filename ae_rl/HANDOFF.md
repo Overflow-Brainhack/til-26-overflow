@@ -76,6 +76,10 @@ Per-event scoring breakdown for a checkpoint. Spies on `env.dynamics.rewards.awa
 5. **Commit boundaries.** The three experiments are independent — split into three commits (safety/`weights_only` is a fourth trivial one) so a regression can be bisected.
 6. **`week_long_edits/` drift.** Currently `ppo.py` + `train_stage2_ppo.py` are mirrored but `rollout.py` is not. Decide whether to mirror or to delete `week_long_edits/ae_rl/` outright.
 
+## Autonomous tuning
+
+If you're picking this branch up as an autonomous Claude session driving the tune-train-submit loop, the playbook is at [AUTOTUNE.md](AUTOTUNE.md). State and append-only history live in [tuning/state.json](tuning/state.json) and [tuning/log.jsonl](tuning/log.jsonl). Read AUTOTUNE.md first — it covers the resumability protocol, forbidden git operations, hypothesis menu, noise handling, and cleanup rules.
+
 ## Autonomous-caller pipeline (for Claude / scripts)
 
 Both training and submission produce machine-readable outputs so an autonomous

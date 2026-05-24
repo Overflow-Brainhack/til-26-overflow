@@ -1,0 +1,14 @@
+{
+  "iteration": 0,
+  "branch": null,
+  "best_eval_score": null,
+  "best_eval_speed": null,
+  "best_eval_tag": null,
+  "best_checkpoint": "ae_rl/checkpoints/stage3_league_best.pt",
+  "best_checkpoint_internal_score": 294,
+  "best_git_commit": null,
+  "in_flight": null,
+  "paused_for_human": null,
+  "last_updated_at": null,
+  "notes": "Initial state. best_checkpoint is the Stage 3 league best (internal validation +294 vs heuristic baseline) — never submitted to the evaluator, so best_eval_score is null. First iteration should submit this checkpoint to establish a real eval-score baseline before changing anything."
+}
