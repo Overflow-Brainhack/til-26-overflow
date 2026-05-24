@@ -116,6 +116,7 @@ _LOOP_PERIODS = (2, 3)  # cycle lengths to detect
 # gives one entry of slack while keeping memory negligible.
 _LOOP_WINDOW_DEFAULT = 6
 _PRODUCTIVE_WALL_WAIT_RADIUS = 2
+_COLLECTED_TILE_COOLDOWN = 35
 
 
 class _PendingBomb(NamedTuple):
@@ -199,6 +200,7 @@ class EditedHeuristicPolicy(Policy):
         defense_abandon_margin: int = 2,
         max_defense_distance: int = 9,
         defense_cooldown_scale: float = 0.6,
+        enable_defend: bool = True,
         attack_module: Optional[AttackModule] = None,
         attack_module_mode: str = "hybrid",
     ) -> None:
@@ -231,6 +233,7 @@ class EditedHeuristicPolicy(Policy):
         self.defense_abandon_margin = defense_abandon_margin
         self.max_defense_distance = max_defense_distance
         self.defense_cooldown_scale = defense_cooldown_scale
+        self.enable_defend = enable_defend
         self.attack_module = attack_module
         self.attack_module_mode = attack_module_mode
 
@@ -252,6 +255,7 @@ class EditedHeuristicPolicy(Policy):
         self._action_history: deque[tuple[int, tuple[int, int]]] = deque(
             maxlen=loop_window
         )
+        self._recently_collected_tiles: dict[tuple[int, int], int] = {}
 
         # Precomputed attack-vector hotspots — cell → coverage count. Computed once
         # per round when ally_base is first known; cheap (256 × 25 LOS checks).
@@ -269,6 +273,7 @@ class EditedHeuristicPolicy(Policy):
     def choose(self, obs: ParsedObs, memory: MapMemory) -> int:
         self._resolve_pending_bombs(memory)
         self._update_adaptive_weight(obs, memory)
+        self._update_collected_tiles(obs, memory)
 
         self._debug_mode = "stay"
         self._debug_target = None
@@ -300,10 +305,11 @@ class EditedHeuristicPolicy(Policy):
             self._debug_target = obs.location
             return self._finalize(self._mask_check(attack, obs), obs, memory)
 
-        # defend = self._try_defend(obs, memory, danger_now)
-        # if defend is not None:
-        #     self._debug_mode = "defend"
-        #     return self._finalize(self._mask_check(defend, obs), obs, memory)
+        if self.enable_defend:
+            defend = self._try_defend(obs, memory, danger_now)
+            if defend is not None:
+                self._debug_mode = "defend"
+                return self._finalize(self._mask_check(defend, obs), obs, memory)
 
         collect = self._try_collect(obs, memory, danger_now)
         if collect is not None:
@@ -374,7 +380,9 @@ class EditedHeuristicPolicy(Policy):
                 continue
             if obs.action_mask[candidate] != 1:
                 continue
-            if not self._is_loop(candidate, obs.location):
+            if not self._is_loop(candidate, obs.location) and not self._is_position_churn(
+                candidate, obs, memory
+            ):
                 return candidate
         # All alternatives are either masked or themselves looping — return any
         # masked-legal action as a last resort.
@@ -391,9 +399,56 @@ class EditedHeuristicPolicy(Policy):
 
     def _finalize(self, action: int, obs: ParsedObs, memory: MapMemory) -> int:
         """Apply loop detection and record the action before returning it."""
-        if self.loop_detection and self._is_loop(action, obs.location):
+        if self.loop_detection and (
+            self._is_loop(action, obs.location)
+            or self._is_position_churn(action, obs, memory)
+        ):
             action = self._break_loop(obs, memory, action)
         return self._record_action(action, obs.location)
+
+    def _is_position_churn(
+        self,
+        action: int,
+        obs: ParsedObs,
+        memory: MapMemory,
+    ) -> bool:
+        """Catch short two-cell shuttles even when the actions differ."""
+        if action == int(Action.PLACE_BOMB):
+            return False
+        if len(self._action_history) < _LOOP_WINDOW_DEFAULT - 1:
+            return False
+
+        dest = obs.location
+        if action in (int(Action.FORWARD), int(Action.BACKWARD)):
+            dest = next_pos_after(obs.location, obs.direction, action)
+            if not memory.in_bounds(dest) or not memory.passable(obs.location, dest):
+                dest = obs.location
+
+        recent_positions = [pos for _, pos in self._action_history] + [dest]
+        return len(set(recent_positions[-_LOOP_WINDOW_DEFAULT:])) <= 2
+
+    def _update_collected_tiles(self, obs: ParsedObs, memory: MapMemory) -> None:
+        """Temporarily suppress tiles we just stepped onto."""
+        if obs.step == 0:
+            self._recently_collected_tiles.clear()
+
+        now = int(obs.step)
+        expired = [
+            cell
+            for cell, seen_step in self._recently_collected_tiles.items()
+            if now - seen_step >= _COLLECTED_TILE_COOLDOWN
+        ]
+        for cell in expired:
+            del self._recently_collected_tiles[cell]
+
+        if memory.tile_contents.get(obs.location) in ("mission", "resource", "recon"):
+            self._recently_collected_tiles[obs.location] = now
+
+    def _tile_recently_collected(self, cell: tuple[int, int], step: int) -> bool:
+        last_seen = self._recently_collected_tiles.get(cell)
+        if last_seen is None:
+            return False
+        return int(step) - last_seen < _COLLECTED_TILE_COOLDOWN
 
     # ── edge cost builder (incorporates wall-breaking flag) ────────────────
     def _edge_cost(
@@ -914,7 +969,11 @@ class EditedHeuristicPolicy(Policy):
         memory: MapMemory,
         danger_now: set[tuple[int, int]],
     ) -> Optional[int]:
-        candidates = memory.collectible_cells()
+        candidates = [
+            cell
+            for cell in memory.collectible_cells()
+            if cell != obs.location and not self._tile_recently_collected(cell, obs.step)
+        ]
 
         # Proactive base routing: include known enemy base cells as synthetic
         # targets. They compete with real tiles using base_route_weight as their
@@ -1181,7 +1240,11 @@ class EditedHeuristicPolicy(Policy):
         if radius <= 0:
             return None
 
-        candidates = memory.collectible_cells()
+        candidates = [
+            cell
+            for cell in memory.collectible_cells()
+            if cell != obs.location and not self._tile_recently_collected(cell, obs.step)
+        ]
         if not candidates:
             return None
 

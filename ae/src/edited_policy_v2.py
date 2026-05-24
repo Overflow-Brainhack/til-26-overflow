@@ -170,7 +170,11 @@ class EditedHeuristicPolicyV2(EditedHeuristicPolicy):
         memory: MapMemory,
         danger_now: set[tuple[int, int]],
     ) -> Optional[int]:
-        candidates = memory.collectible_cells()
+        candidates = [
+            cell
+            for cell in memory.collectible_cells()
+            if cell != obs.location and not self._tile_recently_collected(cell, obs.step)
+        ]
         base_tiles: list[tuple[int, int]] = []
         if self.proactive_base_routing:
             base_tiles = [p for p in memory.enemy_bases if p != obs.location]

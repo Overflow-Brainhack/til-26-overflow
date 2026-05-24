@@ -3,6 +3,8 @@
 Agent types
 -----------
   normal              — HeuristicPolicy (balanced: dodge, attack, defend, collect, explore)
+  ppo                 — full learned 6-action policy from exported PPO/BC model
+  rl_attack           — HeuristicPolicy + optional learned attack module
   berserker           — BerserkerPolicy (rush enemy bases, ignore self-preservation)
   berserker_base      — BerserkerBasePolicy (heuristic base, berserker-style aggression)
   random              — RandomPolicy (uniform sample over legal actions)
@@ -10,8 +12,10 @@ Agent types
 Visual mode (default):
     python ae/test_env/auto_play.py
     python ae/test_env/auto_play.py --agent-type berserker
+    python ae/test_env/auto_play.py --agent-type ppo --attack-model ae/models/promoted_ppo_u1100.pt
     python ae/test_env/auto_play.py --agent-types berserker normal normal normal normal normal
     python ae/test_env/auto_play.py --rounds 3 --seed 42 --fps 4
+    python ae/test_env/auto_play.py --action-log ae/test_env/action_logs/normal.txt
 
 Headless benchmark (compare selected types, no window):
     python ae/test_env/auto_play.py --benchmark --rounds 30
@@ -31,11 +35,12 @@ from __future__ import annotations
 import argparse
 import random
 import sys
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from statistics import mean, stdev
-from typing import Optional
+from typing import Any, Optional
 
 import pygame
 
@@ -50,6 +55,7 @@ from til_environment.config import default_config, load_config  # noqa: E402
 
 from ae_manager import DEFAULT_CACHE_PATH, DEFAULT_POLICY_KWARGS, AEManager  # noqa: E402
 from berserker_base_policy import BerserkerBasePolicy  # noqa: E402
+from berserker_base_submit_policy import BerserkerBaseSubmitPolicy  # noqa: E402
 from berserker_policy import BerserkerPolicy  # noqa: E402
 from constants import Action, GRID_SIZE  # noqa: E402
 from edited_policy import EditedHeuristicPolicy as HeuristicPolicy  # noqa: E402
@@ -60,14 +66,27 @@ from edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy  # noqa:
 from map_memory import MapMemory  # noqa: E402
 from observation import ParsedObs  # noqa: E402
 from policy import Policy  # noqa: E402
+from rl_attack import load_attack_module  # noqa: E402
+from rl_policy import LearnedPolicy  # noqa: E402
+from scoremax_policy import ScoreMaxPolicy  # noqa: E402
 
 
 AGENT_TYPES = (
     "normal",
+    "ppo",
+    "learned",
+    "rl_attack",
     "berserker",
     "berserker_base",
+    "berserker_base_submit",
+    "scoremax",
     "random",
 )
+
+DEFAULT_BENCHMARK_TYPES = tuple(
+    t for t in AGENT_TYPES if t not in ("ppo", "learned", "rl_attack")
+)
+DEFAULT_ACTION_LOG = HERE / "action_logs" / "auto_play_actions.txt"
 
 
 class RandomPolicy(Policy):
@@ -81,13 +100,46 @@ class RandomPolicy(Policy):
 def _make_policy(
     agent_type: str,
     policy_kwargs: dict,
+    attack_model_path: Optional[Path],
+    attack_bomb_margin: float,
+    attack_module_mode: str,
 ) -> Policy:
     if agent_type == "normal":
         policy: Policy = HeuristicPolicy(**policy_kwargs)
+    elif agent_type in {"ppo", "learned"}:
+        if attack_model_path is None:
+            raise ValueError(
+                f"--agent-type {agent_type} requires --attack-model pointing "
+                "to an exported full-policy .pt or .npz model"
+            )
+        fallback = HeuristicPolicy(**policy_kwargs)
+        policy = LearnedPolicy(model_path=attack_model_path, fallback=fallback)
+        if not policy.available:
+            raise ValueError(f"learned policy could not load model: {attack_model_path}")
+    elif agent_type == "rl_attack":
+        attack_module = load_attack_module(
+            str(attack_model_path) if attack_model_path is not None else None,
+            bomb_margin=attack_bomb_margin,
+        )
+        if attack_module is None:
+            raise ValueError(
+                "--agent-type rl_attack requires --attack-model pointing to a "
+                "loadable .pt or .json attack model"
+            )
+        kwargs = dict(policy_kwargs)
+        kwargs["attack_module"] = attack_module
+        kwargs["attack_module_mode"] = attack_module_mode
+        # Avoid mixing the heuristic online threshold tuner with fixed RL comparisons.
+        kwargs["auto_tune_bomb"] = False
+        policy = HeuristicPolicy(**kwargs)
     elif agent_type == "berserker":
         policy = BerserkerPolicy()
     elif agent_type == "berserker_base":
         policy = BerserkerBasePolicy(**policy_kwargs)
+    elif agent_type == "berserker_base_submit":
+        policy = BerserkerBaseSubmitPolicy(**policy_kwargs)
+    elif agent_type == "scoremax":
+        policy = ScoreMaxPolicy(**policy_kwargs)
     elif agent_type == "random":
         policy = RandomPolicy()
     else:
@@ -100,6 +152,9 @@ def _make_factories(
     agents: list[str],
     types: list[str],
     policy_kwargs: dict,
+    attack_model_path: Optional[Path],
+    attack_bomb_margin: float,
+    attack_module_mode: str,
 ) -> dict[str, callable]:
     """Return a per-agent-id dict of zero-arg callables that produce a Policy."""
     out: dict[str, callable] = {}
@@ -108,6 +163,9 @@ def _make_factories(
         out[agent] = lambda t=t_: _make_policy(
             t,
             policy_kwargs,
+            attack_model_path,
+            attack_bomb_margin,
+            attack_module_mode,
         )
     return out
 
@@ -170,6 +228,236 @@ def _print_round_summary(
         print(f"  {a}  [{t:9s}]  reward={r:.2f}")
 
 
+def _action_name(action: int | None) -> str:
+    if action is None:
+        return "NONE"
+    try:
+        return Action(int(action)).name
+    except ValueError:
+        return f"UNKNOWN_{action}"
+
+
+def _as_scalar(value: Any) -> Any:
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return ""
+        return _as_scalar(value[0])
+    return value
+
+
+def _fmt_scalar(value: Any) -> str:
+    value = _as_scalar(value)
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    return str(value)
+
+
+def _fmt_pair(value: Any) -> str:
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return f"{int(value[0])},{int(value[1])}"
+    return str(value)
+
+
+class ActionLogger:
+    """Writes one tab-separated row for every non-terminal agent action."""
+
+    def __init__(self, path: Optional[Path]) -> None:
+        self.path = path
+        self._fh = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.path is not None
+
+    def open(
+        self,
+        *,
+        mode: str,
+        novice: bool,
+        rounds: int,
+        selected_types: tuple[str, ...],
+        attack_model_path: Optional[Path],
+        attack_module_mode: str,
+    ) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = self.path.open("w", encoding="utf-8", newline="")
+        self._fh.write("# auto_play action log\n")
+        self._fh.write(f"# created_at={datetime.now().isoformat(timespec='seconds')}\n")
+        self._fh.write(f"# mode={mode}\n")
+        self._fh.write(f"# novice={novice}\n")
+        self._fh.write(f"# rounds={rounds}\n")
+        self._fh.write(f"# selected_types={','.join(selected_types)}\n")
+        self._fh.write(f"# attack_model={attack_model_path or ''}\n")
+        self._fh.write(f"# attack_module_mode={attack_module_mode}\n")
+        self._fh.write(
+            "round\tseed\tstep\tagent\ttype\taction\taction_name\t"
+            "location\tdirection\thealth\tfrozen\tbase_health\tresources\t"
+            "bombs\tmode\ttarget\n"
+        )
+        self._fh.flush()
+
+    def close(self) -> None:
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+
+    def log_event(self, message: str) -> None:
+        if self._fh is None:
+            return
+        self._fh.write(f"# {message}\n")
+        self._fh.flush()
+
+    def start_round(self, round_idx: int, seed: int, label: str = "") -> None:
+        suffix = f" {label}" if label else ""
+        self.log_event(f"round {round_idx} seed={seed}{suffix}")
+
+    def log_action(
+        self,
+        *,
+        round_idx: int,
+        seed: int,
+        agent: str,
+        agent_type: str,
+        obs: dict[str, Any],
+        action: int,
+        manager: AEManager,
+    ) -> None:
+        if self._fh is None:
+            return
+
+        policy = manager._policy
+        self._fh.write(
+            f"{round_idx}\t"
+            f"{seed}\t"
+            f"{_fmt_scalar(obs.get('step', ''))}\t"
+            f"{agent}\t"
+            f"{agent_type}\t"
+            f"{int(action)}\t"
+            f"{_action_name(int(action))}\t"
+            f"{_fmt_pair(obs.get('location', ''))}\t"
+            f"{_fmt_scalar(obs.get('direction', ''))}\t"
+            f"{_fmt_scalar(obs.get('health', ''))}\t"
+            f"{_fmt_scalar(obs.get('frozen_ticks', ''))}\t"
+            f"{_fmt_scalar(obs.get('base_health', ''))}\t"
+            f"{_fmt_scalar(obs.get('team_resources', ''))}\t"
+            f"{_fmt_scalar(obs.get('team_bombs', ''))}\t"
+            f"{getattr(policy, '_debug_mode', '')}\t"
+            f"{_fmt_pair(getattr(policy, '_debug_target', ''))}\n"
+        )
+        self._fh.flush()
+
+    def log_reward_breakdown(
+        self,
+        *,
+        round_idx: int,
+        seed: int,
+        agent_types: dict[str, str],
+        tracker: "RewardBreakdownTracker",
+        env: Bomberman,
+    ) -> None:
+        if self._fh is None:
+            return
+        header = (
+            "# reward_breakdown_header\t"
+            "round\tseed\tagent\ttype\ttotal\tattack_damage_pos\t"
+            "attack_damage_neg\tattack_kill\tdestroy_enemy_base\t"
+            "own_base_destroyed\tcollect_mission\tcollect_resource\tcollect_recon\t"
+            "other\n"
+        )
+        self._fh.write(header)
+        for row in tracker.rows(env, agent_types):
+            self._fh.write(
+                "# reward_breakdown\t"
+                f"{round_idx}\t{seed}\t{row['agent']}\t{row['type']}\t"
+                f"{row['total']:.3f}\t"
+                f"{row['attack_damage_pos']:.3f}\t"
+                f"{row['attack_damage_neg']:.3f}\t"
+                f"{row['attack_kill']:.3f}\t"
+                f"{row['destroy_enemy_base']:.3f}\t"
+                f"{row['own_base_destroyed']:.3f}\t"
+                f"{row['collect_mission']:.3f}\t"
+                f"{row['collect_resource']:.3f}\t"
+                f"{row['collect_recon']:.3f}\t"
+                f"{row['other']:.3f}\n"
+            )
+        self._fh.flush()
+
+
+class RewardBreakdownTracker:
+    """Tracks signed reward-event buckets by wrapping env.dynamics.rewards.award."""
+
+    TRACKED_EVENTS = (
+        "attack_damage",
+        "attack_kill",
+        "destroy_enemy_base",
+        "own_base_destroyed",
+        "collect_mission",
+        "collect_resource",
+        "collect_recon",
+    )
+
+    def __init__(self, env: Bomberman) -> None:
+        self._env = env
+        self._events: dict[str, dict[str, float]] = defaultdict(
+            lambda: defaultdict(float)
+        )
+        rewards = env.dynamics.rewards
+        self._original_award = rewards.award
+
+        def award(recipient_id: str, event: str, multiplier: float = 1.0) -> float:
+            value = float(self._original_award(recipient_id, event, multiplier))
+            if value != 0.0:
+                self._record(recipient_id, event, value)
+            return value
+
+        rewards.award = award
+
+    def reset(self) -> None:
+        self._events.clear()
+
+    def _record(self, agent: str, event: str, value: float) -> None:
+        buckets = self._events[agent]
+        buckets[event] += value
+        if event == "attack_damage":
+            key = "attack_damage_pos" if value > 0 else "attack_damage_neg"
+            buckets[key] += value
+
+    def rows(self, env: Bomberman, agent_types: dict[str, str]) -> list[dict[str, Any]]:
+        episode = getattr(env.dynamics.rewards, "_episode", {})
+        rows: list[dict[str, Any]] = []
+        for agent in env.possible_agents:
+            buckets = self._events.get(agent, {})
+            tracked_total = sum(float(buckets.get(k, 0.0)) for k in self.TRACKED_EVENTS)
+            total = float(episode.get(agent, 0.0))
+            rows.append(
+                {
+                    "agent": agent,
+                    "type": agent_types.get(agent, "normal"),
+                    "total": total,
+                    "attack_damage_pos": float(buckets.get("attack_damage_pos", 0.0)),
+                    "attack_damage_neg": float(buckets.get("attack_damage_neg", 0.0)),
+                    "attack_kill": float(buckets.get("attack_kill", 0.0)),
+                    "destroy_enemy_base": float(
+                        buckets.get("destroy_enemy_base", 0.0)
+                    ),
+                    "own_base_destroyed": float(
+                        buckets.get("own_base_destroyed", 0.0)
+                    ),
+                    "collect_mission": float(buckets.get("collect_mission", 0.0)),
+                    "collect_resource": float(buckets.get("collect_resource", 0.0)),
+                    "collect_recon": float(buckets.get("collect_recon", 0.0)),
+                    "other": total - tracked_total,
+                }
+            )
+        return rows
+
+
 # ── headless benchmark ──────────────────────────────────────────────────────
 
 
@@ -178,7 +466,11 @@ def _run_benchmark(
     novice: bool,
     policy_kwargs: dict,
     cache_path: Optional[Path],
-    agent_types: tuple[str, ...] = AGENT_TYPES,
+    attack_model_path: Optional[Path],
+    attack_bomb_margin: float,
+    attack_module_mode: str,
+    action_logger: ActionLogger,
+    agent_types: tuple[str, ...] = DEFAULT_BENCHMARK_TYPES,
 ) -> None:
     """Headless comparison: run each type for *rounds* rounds, then print table.
 
@@ -202,17 +494,28 @@ def _run_benchmark(
         env = Bomberman(cfg)
         seed = random.randint(0, 99999)
         env.reset(seed=seed)
+        reward_tracker = RewardBreakdownTracker(env)
 
         n_agents = len(env.possible_agents)
         factories = _make_factories(
             env.possible_agents,
             [agent_type] * n_agents,
             policy_kwargs,
+            attack_model_path,
+            attack_bomb_margin,
+            attack_module_mode,
         )
         managers, cache_tmpl = _build_managers(env, factories, cache_path)
+        agent_type_map = {agent: agent_type for agent in env.possible_agents}
 
         round_scores: list[float] = []
         for round_idx in range(rounds):
+            reward_tracker.reset()
+            action_logger.start_round(
+                round_idx + 1,
+                seed,
+                label=f"benchmark type={agent_type}",
+            )
             # Run one round.
             while True:
                 agent = env.agent_selection
@@ -223,12 +526,28 @@ def _run_benchmark(
                     continue
                 obs = env.observe(agent)
                 action = managers[agent].ae(obs)
+                action_logger.log_action(
+                    round_idx=round_idx + 1,
+                    seed=seed,
+                    agent=agent,
+                    agent_type=agent_type_map[agent],
+                    obs=obs,
+                    action=int(action),
+                    manager=managers[agent],
+                )
                 env.step(int(action))
 
             episode = getattr(env.dynamics.rewards, "_episode", {})
             per_agent = [float(episode.get(a, 0.0)) for a in env.possible_agents]
             avg = mean(per_agent)
             best = max(per_agent)
+            action_logger.log_reward_breakdown(
+                round_idx=round_idx + 1,
+                seed=seed,
+                agent_types=agent_type_map,
+                tracker=reward_tracker,
+                env=env,
+            )
             round_scores.append(avg)
             print(
                 f"  round {round_idx + 1:3d}  avg={avg:7.1f}  max={best:7.1f}",
@@ -279,7 +598,11 @@ def _run_matchup_benchmark(
     novice: bool,
     policy_kwargs: dict,
     cache_path: Optional[Path],
-    agent_types: tuple[str, ...] = AGENT_TYPES,
+    attack_model_path: Optional[Path],
+    attack_bomb_margin: float,
+    attack_module_mode: str,
+    action_logger: ActionLogger,
+    agent_types: tuple[str, ...] = DEFAULT_BENCHMARK_TYPES,
 ) -> None:
     """Headless cross-type matchup: for every (focus, opponent) pair run *rounds* rounds.
 
@@ -319,6 +642,7 @@ def _run_matchup_benchmark(
             env = Bomberman(cfg)
             seed = random.randint(0, 99999)
             env.reset(seed=seed)
+            reward_tracker = RewardBreakdownTracker(env)
 
             n_agents = len(env.possible_agents)
             type_list = [focus_type] + [opp_type] * (n_agents - 1)
@@ -326,13 +650,23 @@ def _run_matchup_benchmark(
                 env.possible_agents,
                 type_list,
                 policy_kwargs,
+                attack_model_path,
+                attack_bomb_margin,
+                attack_module_mode,
             )
             managers, cache_tmpl = _build_managers(env, factories, cache_path)
+            agent_type_map = dict(zip(env.possible_agents, type_list))
 
             focus_agent = env.possible_agents[0]
             opp_agents = env.possible_agents[1:]
 
             for round_idx in range(rounds):
+                reward_tracker.reset()
+                action_logger.start_round(
+                    round_idx + 1,
+                    seed,
+                    label=f"matchup focus={focus_type} opponent={opp_type}",
+                )
                 while True:
                     agent = env.agent_selection
                     if env.terminations[agent] or env.truncations[agent]:
@@ -344,12 +678,28 @@ def _run_matchup_benchmark(
                         continue
                     obs = env.observe(agent)
                     action = managers[agent].ae(obs)
+                    action_logger.log_action(
+                        round_idx=round_idx + 1,
+                        seed=seed,
+                        agent=agent,
+                        agent_type=agent_type_map[agent],
+                        obs=obs,
+                        action=int(action),
+                        manager=managers[agent],
+                    )
                     env.step(int(action))
 
                 episode = getattr(env.dynamics.rewards, "_episode", {})
                 focus_score = float(episode.get(focus_agent, 0.0))
                 opp_scores = [float(episode.get(a, 0.0)) for a in opp_agents]
                 opp_mean = mean(opp_scores)
+                action_logger.log_reward_breakdown(
+                    round_idx=round_idx + 1,
+                    seed=seed,
+                    agent_types=agent_type_map,
+                    tracker=reward_tracker,
+                    env=env,
+                )
                 matchups[key]["focus"].append(focus_score)
                 matchups[key]["opp"].append(opp_mean)
                 print(
@@ -427,8 +777,13 @@ _MODE_COLORS: dict[str, tuple[int, int, int]] = {
 
 _TYPE_COLORS: dict[str, tuple[int, int, int]] = {
     "normal": (100, 200, 255),
+    "ppo": (120, 255, 220),
+    "learned": (120, 255, 220),
+    "rl_attack": (120, 255, 220),
     "berserker": (255, 80, 80),
     "berserker_base": (255, 150, 120),
+    "berserker_base_submit": (255, 175, 120),
+    "scoremax": (255, 215, 90),
     "random": (200, 200, 80),
 }
 
@@ -579,6 +934,22 @@ def main() -> None:
     parser.add_argument("--fps", type=int, default=None)
     parser.add_argument("--novice", action="store_true", default=True)
     parser.add_argument("--advanced", dest="novice", action="store_false")
+    parser.add_argument(
+        "--action-log",
+        type=Path,
+        default=DEFAULT_ACTION_LOG,
+        help=(
+            "Write every chosen agent action to this text file "
+            f"(default: {DEFAULT_ACTION_LOG})"
+        ),
+    )
+    parser.add_argument(
+        "--no-action-log",
+        dest="action_log",
+        action="store_const",
+        const=None,
+        help="Disable action logging.",
+    )
 
     # ── agent type selection ─────────────────────────────────────────────────
     parser.add_argument(
@@ -599,6 +970,22 @@ def main() -> None:
             "Shorter lists are padded with --agent-type. "
             f"Choices: {AGENT_TYPES}"
         ),
+    )
+    parser.add_argument(
+        "--attack-model",
+        type=Path,
+        default=None,
+        help=(
+            "Learned model path. Use a full-policy PPO/BC .pt/.npz with "
+            "--agent-type ppo, or a bomb-only .pt/.json with --agent-type rl_attack."
+        ),
+    )
+    parser.add_argument("--attack-bomb-margin", type=float, default=0.0)
+    parser.add_argument(
+        "--attack-module-mode",
+        choices=("hybrid", "replace"),
+        default="hybrid",
+        help="hybrid keeps scripted high-confidence bombs; replace lets RL own attack decisions.",
     )
 
     # ── benchmark mode ───────────────────────────────────────────────────────
@@ -836,8 +1223,27 @@ def main() -> None:
     )
 
     # ── benchmark mode (headless) ─────────────────────────────────────────────
-    benchmark_types = (
-        tuple(args.benchmark_types) if args.benchmark_types else AGENT_TYPES
+    benchmark_types = tuple(args.benchmark_types) if args.benchmark_types else (
+        AGENT_TYPES if args.attack_model is not None else DEFAULT_BENCHMARK_TYPES
+    )
+    run_mode = (
+        "benchmark-matchup"
+        if args.benchmark_matchup
+        else "benchmark"
+        if args.benchmark
+        else "visual"
+    )
+    selected_types = benchmark_types if (args.benchmark or args.benchmark_matchup) else (
+        tuple(args.agent_types) if args.agent_types else (args.agent_type,)
+    )
+    action_logger = ActionLogger(args.action_log)
+    action_logger.open(
+        mode=run_mode,
+        novice=args.novice,
+        rounds=args.rounds,
+        selected_types=selected_types,
+        attack_model_path=args.attack_model,
+        attack_module_mode=args.attack_module_mode,
     )
 
     if args.benchmark:
@@ -846,8 +1252,13 @@ def main() -> None:
             args.novice,
             policy_kwargs,
             args.cache_path,
+            args.attack_model,
+            args.attack_bomb_margin,
+            args.attack_module_mode,
+            action_logger,
             benchmark_types,
         )
+        action_logger.close()
         return
 
     if args.benchmark_matchup:
@@ -856,8 +1267,13 @@ def main() -> None:
             args.novice,
             policy_kwargs,
             args.cache_path,
+            args.attack_model,
+            args.attack_bomb_margin,
+            args.attack_module_mode,
+            action_logger,
             benchmark_types,
         )
+        action_logger.close()
         return
 
     # ── visual mode ───────────────────────────────────────────────────────────
@@ -884,8 +1300,12 @@ def main() -> None:
         env.possible_agents,
         agent_types_list,
         policy_kwargs,
+        args.attack_model,
+        args.attack_bomb_margin,
+        args.attack_module_mode,
     )
     managers, cached_template = _build_managers(env, factories, args.cache_path)
+    reward_tracker = RewardBreakdownTracker(env)
 
     type_summary = "  ".join(f"{a}={t}" for a, t in agent_type_map.items())
     print(f"Auto-play: seed={seed}, novice={args.novice}, rounds={args.rounds}")
@@ -913,6 +1333,8 @@ def main() -> None:
     grid_offset_y: int = args.grid_offset_y
 
     selected_view = env.possible_agents[0]
+    reward_tracker.reset()
+    action_logger.start_round(rounds_done + 1, seed, label="visual")
 
     while running and rounds_done < args.rounds:
         if not paused:
@@ -1010,6 +1432,8 @@ def main() -> None:
                     seed = random.randint(0, 99999)
                     env.reset(seed=seed)
                     _reset_managers(managers, cached_template)
+                    reward_tracker.reset()
+                    action_logger.start_round(rounds_done + 1, seed, label="manual reset")
                     history.clear()
                     history_pos = 0
                     paused = False
@@ -1032,6 +1456,13 @@ def main() -> None:
             if all(env.terminations.values()) or all(env.truncations.values()):
                 rounds_done += 1
                 _print_round_summary(env, rounds_done, agent_type_map)
+                action_logger.log_reward_breakdown(
+                    round_idx=rounds_done,
+                    seed=seed,
+                    agent_types=agent_type_map,
+                    tracker=reward_tracker,
+                    env=env,
+                )
                 # Print auto-tune info only for normal (HeuristicPolicy) agents.
                 if args.auto_tune_bomb:
                     for mgr in managers.values():
@@ -1046,13 +1477,25 @@ def main() -> None:
                     seed = random.randint(0, 99999)
                     env.reset(seed=seed)
                     _reset_managers(managers, cached_template)
+                    reward_tracker.reset()
+                    action_logger.start_round(rounds_done + 1, seed, label="visual")
             continue
 
         obs = env.observe(agent)
         action = managers[agent].ae(obs)
+        action_logger.log_action(
+            round_idx=rounds_done + 1,
+            seed=seed,
+            agent=agent,
+            agent_type=agent_type_map[agent],
+            obs=obs,
+            action=int(action),
+            manager=managers[agent],
+        )
         env.step(int(action))
 
     env.close()
+    action_logger.close()
     print(f"\nDone. Played {rounds_done} round(s).")
 
 
