@@ -270,6 +270,23 @@ jq . /tmp/eval-$TAG.json  # {challenge,tag,errors,score,speed,timestamp}
 # overwritten ours in the queue. Resubmit and await again before giving up.
 ```
 
+## Session termination (when user asks to stop / push / end session)
+
+When the user requests to terminate the session:
+
+1. **Kill all background processes** — check for running `python.exe` instances from this session (Discord watcher, `--await-eval`, any training jobs) and stop them:
+   ```powershell
+   Get-Process python | Where-Object {$_.StartTime -gt (Get-Date).AddHours(-6)} | ForEach-Object {
+       $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)").CommandLine
+       "$($_.Id)  $cmd"
+   }
+   Stop-Process -Id <pids> -Force
+   ```
+2. **Update `state.json`** — set `paused_for_human` to a one-line note explaining what's in flight (eval tag, submitted_at, next step), so the next session can resume without guessing.
+3. **Commit all changes** — stage every modified file (excluding `.gitignore`d paths like `ae/models/`) and commit with a summary message. Never leave a session with uncommitted tuning state.
+4. **Push to the tuning branch** — `git push origin tuning/auto` (or current branch). Never push to `main`.
+5. **Confirm** — report to the user which PIDs were killed and what was pushed.
+
 ## When to stop and ask the user
 
 - Watcher won't start (missing `DISCORD_TOKEN`, network issue).
