@@ -18,10 +18,21 @@ import torch
 
 import common  # noqa: F401  (path bootstrap)
 from ae_manager import DEFAULT_CACHE_PATH, DEFAULT_POLICY_KWARGS, AEManager
+from berserker_policy import BerserkerPolicy
 from constants import Action
+from diverse_opponents import (
+    IdlePolicy,
+    KamikazePolicy,
+    PatrollerPolicy,
+    PureCollectorPolicy,
+    RandomLegalPolicy,
+    TacticalPolicy,
+    TrapSetterPolicy,
+)
 from edited_policy_v2 import EditedHeuristicPolicyV2
 from map_memory import MapMemory
 from observation import parse_observation
+from policy import HeuristicPolicy
 
 from common import obs_to_arrays
 
@@ -172,6 +183,10 @@ class NetController:
         self.novice = novice
         self._hidden = self.model.initial_hidden(1, device)
         self._memory = self._fresh_memory()
+        # Last forward diagnostics — populated by act(); used by
+        # LayeredNetController to decide whether to fall back to the heuristic.
+        self._last_value: float = 0.0
+        self._last_entropy: float = 0.0
 
     def _fresh_memory(self) -> MapMemory:
         mem = MapMemory()
@@ -194,7 +209,7 @@ class NetController:
             pass
         vc, bv, sc, mk, smap = obs_to_arrays(obs, memory=self._memory)
         t = lambda a: torch.as_tensor(a, device=self.device).unsqueeze(0)  # noqa: E731
-        action, _, _, _, self._hidden = self.model.act(
+        action, _logp, value, entropy, self._hidden = self.model.act(
             t(vc),
             t(bv),
             t(sc),
@@ -203,7 +218,338 @@ class NetController:
             self._hidden,
             deterministic=self.deterministic,
         )
+        self._last_value = float(value.item())
+        self._last_entropy = float(entropy.item())
         return int(action.item())
+
+
+class VanillaHeuristicController(HeuristicController):
+    """The base ``HeuristicPolicy`` from ``ae/src/policy.py`` — same family
+    as the strong heuristic but with simpler defaults and a different
+    decision tree. Gives the RL exposure to a structurally similar opponent
+    that nonetheless makes different micro-decisions."""
+
+    name = "vanilla_heuristic"
+
+    def _build(self) -> AEManager:
+        mem = MapMemory()
+        if self.use_cache and _CACHE_TEMPLATE is not None:
+            mem.merge_static_from(_CACHE_TEMPLATE)
+        return AEManager(policy=HeuristicPolicy(), memory=mem)
+
+
+class BerserkerController(HeuristicController):
+    """``BerserkerPolicy`` — rushes enemy bases, spams bombs, ignores incoming
+    fire. Completely different objective from the strong heuristic; this is
+    the most diverse training opponent we have."""
+
+    name = "berserker"
+
+    def _build(self) -> AEManager:
+        mem = MapMemory()
+        if self.use_cache and _CACHE_TEMPLATE is not None:
+            mem.merge_static_from(_CACHE_TEMPLATE)
+        return AEManager(policy=BerserkerPolicy(), memory=mem)
+
+
+class PureCollectorController(HeuristicController):
+    """``PureCollectorPolicy`` — only moves toward visible collectibles,
+    never bombs, never attacks. Trains the RL to handle non-aggressive
+    opponents (which is plausibly what the eval reference policy is)."""
+
+    name = "pure_collector"
+
+    def _build(self) -> AEManager:
+        mem = MapMemory()
+        if self.use_cache and _CACHE_TEMPLATE is not None:
+            mem.merge_static_from(_CACHE_TEMPLATE)
+        return AEManager(policy=PureCollectorPolicy(), memory=mem)
+
+
+class RandomController(HeuristicController):
+    """``RandomLegalPolicy`` — uniform over the legal action mask. Trains
+    the RL not to assume opponent rationality."""
+
+    name = "random"
+
+    def _build(self) -> AEManager:
+        mem = MapMemory()
+        if self.use_cache and _CACHE_TEMPLATE is not None:
+            mem.merge_static_from(_CACHE_TEMPLATE)
+        return AEManager(policy=RandomLegalPolicy(), memory=mem)
+
+
+class IdleController(HeuristicController):
+    """``IdlePolicy`` — mostly STAY, occasionally turn. Approximates an
+    effectively-empty opponent slot."""
+
+    name = "idle"
+
+    def _build(self) -> AEManager:
+        mem = MapMemory()
+        if self.use_cache and _CACHE_TEMPLATE is not None:
+            mem.merge_static_from(_CACHE_TEMPLATE)
+        return AEManager(policy=IdlePolicy(), memory=mem)
+
+
+class TrapSetterController(HeuristicController):
+    """``TrapSetterPolicy`` — wanders and drops bombs everywhere. Trains the RL
+    against an environment where any cell may become hazardous."""
+
+    name = "trap_setter"
+
+    def _build(self) -> AEManager:
+        mem = MapMemory()
+        if self.use_cache and _CACHE_TEMPLATE is not None:
+            mem.merge_static_from(_CACHE_TEMPLATE)
+        return AEManager(policy=TrapSetterPolicy(), memory=mem)
+
+
+class PatrollerController(HeuristicController):
+    """``PatrollerPolicy`` — predictable FORWARD-until-blocked walk. Models a
+    non-adversarial opponent that does not react to the learner's presence."""
+
+    name = "patroller"
+
+    def _build(self) -> AEManager:
+        mem = MapMemory()
+        if self.use_cache and _CACHE_TEMPLATE is not None:
+            mem.merge_static_from(_CACHE_TEMPLATE)
+        return AEManager(policy=PatrollerPolicy(), memory=mem)
+
+
+class KamikazeController(HeuristicController):
+    """``KamikazePolicy`` — bombs at own feet when low HP or adjacent to enemies.
+    Models desperate end-game opponents that trade life for damage."""
+
+    name = "kamikaze"
+
+    def _build(self) -> AEManager:
+        mem = MapMemory()
+        if self.use_cache and _CACHE_TEMPLATE is not None:
+            mem.merge_static_from(_CACHE_TEMPLATE)
+        return AEManager(policy=KamikazePolicy(), memory=mem)
+
+
+class TacticalController(HeuristicController):
+    """``TacticalPolicy`` — 1-step lookahead with hand-tuned scoring. Provides
+    a 'good but non-heuristic' opponent so the RL has a strong adversary
+    that doesn't share EditedHeuristicPolicyV2's exploitable quirks."""
+
+    name = "tactical"
+
+    def _build(self) -> AEManager:
+        mem = MapMemory()
+        if self.use_cache and _CACHE_TEMPLATE is not None:
+            mem.merge_static_from(_CACHE_TEMPLATE)
+        return AEManager(policy=TacticalPolicy(), memory=mem)
+
+
+class LayeredNetController(NetController):
+    """NetController + the same dodge/loop-break guards as deploy-side
+    ``LayeredRLPolicy``. Used by diagnose/benchmark when ``--layered`` is set.
+
+    The network is still consulted (and its hidden state advanced) on every
+    turn so the GRU stays in sync; the guards only swap the *emitted* action.
+    """
+
+    name = "rl_layered"
+
+    def __init__(
+        self,
+        model,
+        device,
+        name: str = "rl_layered",
+        deterministic: bool = False,
+        novice: bool = True,
+        *,
+        dodge_override: bool = True,
+        oscillation_break: bool = True,
+        loop_window: int = 6,
+        heuristic_fallback: bool = False,
+        value_threshold: float | None = None,
+        entropy_threshold_frac: float | None = None,
+    ):
+        super().__init__(model, device, name=name,
+                         deterministic=deterministic, novice=novice)
+        self.dodge_override = dodge_override
+        self.oscillation_break = oscillation_break
+        self.heuristic_fallback = heuristic_fallback
+        self.value_threshold = value_threshold
+        self.entropy_threshold_frac = entropy_threshold_frac
+        from collections import deque as _deque
+        self._action_history = _deque(maxlen=loop_window)
+        # Heuristic instance used when fallback fires. Same MapMemory as the
+        # network sees, so it gets the same world view.
+        self._heuristic = None
+        if self.heuristic_fallback:
+            self._heuristic = EditedHeuristicPolicyV2()
+
+    def reset(self) -> None:
+        super().reset()
+        self._action_history.clear()
+
+    @torch.no_grad()
+    def act(self, obs: dict) -> int:
+        rl_action = super().act(obs)
+
+        # Parse once for both guards; bail out cleanly if parsing fails.
+        try:
+            parsed = parse_observation(obs)
+        except Exception:
+            return rl_action
+        loc = tuple(int(x) for x in parsed.location)
+        mask = np.asarray(obs.get("action_mask"), dtype=np.float32).flatten()
+
+        if parsed.frozen_ticks > 0:
+            self._action_history.append((int(Action.STAY), loc))
+            return int(Action.STAY)
+
+        # Dodge override.
+        if self.dodge_override:
+            from constants import BOMB_TIMER
+            from threat import (
+                cells_safe_for_at_least,
+                imminent_danger,
+                project_danger,
+            )
+            try:
+                timeline = project_danger(self._memory)
+                blast_tick = imminent_danger(self._memory, loc, timeline)
+            except Exception:
+                timeline, blast_tick = None, None
+            if blast_tick is not None and blast_tick <= BOMB_TIMER:
+                dodge_action = self._dodge(parsed, timeline, mask)
+                if dodge_action is not None:
+                    self._action_history.append((int(dodge_action), loc))
+                    return int(dodge_action)
+
+        # Heuristic fallback: low value or high entropy means the RL is
+        # confidently-wrong or uncertain. Replace with the heuristic, which is
+        # bounded-bad on every state. Decision uses the diagnostics that
+        # NetController.act() just populated.
+        if self.heuristic_fallback and self._should_fall_back(parsed):
+            try:
+                heur_action = int(self._heuristic.choose(parsed, self._memory))
+            except Exception:
+                heur_action = rl_action
+            if self._is_legal(heur_action, mask):
+                self._action_history.append((heur_action, loc))
+                return heur_action
+
+        # Loop break.
+        if self.oscillation_break and self._is_loop(rl_action, loc):
+            alt = self._break_loop(rl_action, mask, loc)
+            if alt is not None:
+                self._action_history.append((int(alt), loc))
+                return int(alt)
+
+        self._action_history.append((int(rl_action), loc))
+        return rl_action
+
+    def _should_fall_back(self, parsed) -> bool:
+        if self.value_threshold is not None and self._last_value < self.value_threshold:
+            return True
+        if self.entropy_threshold_frac is not None:
+            n_legal = int(sum(1 for a in parsed.action_mask if a))
+            if n_legal >= 2:
+                import math
+                max_ent = math.log(n_legal)
+                if max_ent > 0 and (self._last_entropy / max_ent) > self.entropy_threshold_frac:
+                    return True
+        return False
+
+    def _dodge(self, parsed, timeline, mask):
+        from constants import BOMB_TIMER, DIR_VECTOR
+        from pathfinding import temporal_first_action_to
+        from threat import cells_safe_for_at_least, imminent_danger
+
+        if timeline is None:
+            return None
+
+        def edge_cost(a, b):
+            if not self._memory.in_bounds(b):
+                return None
+            if self._memory.passable(a, b):
+                return 1.0
+            return None  # no wall-breaking during evacuation
+
+        loc = tuple(int(x) for x in parsed.location)
+        try:
+            safe = cells_safe_for_at_least(self._memory, BOMB_TIMER + 1, timeline)
+        except Exception:
+            safe = None
+
+        if safe:
+            try:
+                action = temporal_first_action_to(
+                    loc, parsed.direction, safe, edge_cost, timeline
+                )
+            except Exception:
+                action = None
+            if action is not None and self._is_legal(int(action), mask):
+                return int(action)
+
+        # panic fallback: legal neighbour that survives longest.
+        best_action = int(Action.STAY)
+        try:
+            best_tick = imminent_danger(self._memory, loc, timeline) or 99
+        except Exception:
+            best_tick = 0
+        for cand in (int(Action.FORWARD), int(Action.BACKWARD),
+                     int(Action.LEFT), int(Action.RIGHT), int(Action.STAY)):
+            if not self._is_legal(cand, mask):
+                continue
+            dest = loc
+            if cand == int(Action.FORWARD) and 0 <= parsed.direction < 4:
+                dx, dy = DIR_VECTOR[parsed.direction]
+                dest = (loc[0] + dx, loc[1] + dy)
+            elif cand == int(Action.BACKWARD) and 0 <= parsed.direction < 4:
+                dx, dy = DIR_VECTOR[parsed.direction]
+                dest = (loc[0] - dx, loc[1] - dy)
+            try:
+                tick = (imminent_danger(self._memory, dest, timeline)
+                        if dest != loc else best_tick)
+            except Exception:
+                tick = None
+            tick = tick if tick is not None else 99
+            if tick > best_tick:
+                best_tick = tick
+                best_action = cand
+        return best_action
+
+    @staticmethod
+    def _is_legal(action: int, mask) -> bool:
+        return 0 <= action < len(mask) and mask[action] == 1
+
+    def _is_loop(self, action: int, pos: tuple[int, int]) -> bool:
+        entry = (int(action), pos)
+        buf = list(self._action_history)
+        n = len(buf)
+        for period in (2, 3):
+            needed = 2 * period - 1
+            if n < needed:
+                continue
+            suffix = tuple(buf[n - (period - 1):]) + (entry,)
+            prev = tuple(buf[n - (2 * period - 1): n - (period - 1)])
+            if suffix == prev:
+                return True
+        return False
+
+    def _break_loop(self, looping_action: int, mask, loc):
+        for cand in (int(Action.LEFT), int(Action.RIGHT), int(Action.FORWARD),
+                     int(Action.BACKWARD), int(Action.STAY)):
+            if cand == looping_action:
+                continue
+            if not self._is_legal(cand, mask):
+                continue
+            if not self._is_loop(cand, loc):
+                return cand
+        for cand in (int(Action.LEFT), int(Action.RIGHT), int(Action.FORWARD),
+                     int(Action.BACKWARD), int(Action.STAY)):
+            if cand != looping_action and self._is_legal(cand, mask):
+                return cand
+        return None
 
 
 def league_checkpoints(league_dir: Path) -> list[Path]:
@@ -234,6 +580,42 @@ def stochastic_heuristic_spec(
     }
 
 
+def vanilla_heuristic_spec(use_cache: bool = True) -> dict:
+    return {"kind": "vanilla_heuristic", "use_cache": use_cache}
+
+
+def berserker_spec(use_cache: bool = True) -> dict:
+    return {"kind": "berserker", "use_cache": use_cache}
+
+
+def pure_collector_spec(use_cache: bool = True) -> dict:
+    return {"kind": "pure_collector", "use_cache": use_cache}
+
+
+def random_spec(use_cache: bool = True) -> dict:
+    return {"kind": "random", "use_cache": use_cache}
+
+
+def idle_spec(use_cache: bool = True) -> dict:
+    return {"kind": "idle", "use_cache": use_cache}
+
+
+def trap_setter_spec(use_cache: bool = True) -> dict:
+    return {"kind": "trap_setter", "use_cache": use_cache}
+
+
+def patroller_spec(use_cache: bool = True) -> dict:
+    return {"kind": "patroller", "use_cache": use_cache}
+
+
+def kamikaze_spec(use_cache: bool = True) -> dict:
+    return {"kind": "kamikaze", "use_cache": use_cache}
+
+
+def tactical_spec(use_cache: bool = True) -> dict:
+    return {"kind": "tactical", "use_cache": use_cache}
+
+
 def net_spec(path, deterministic: bool = False, novice: bool = True) -> dict:
     return {
         "kind": "net",
@@ -253,6 +635,24 @@ def build_controller(spec: dict, device):
             action_noise=spec.get("action_noise", 0.03),
             use_cache=spec.get("use_cache", True),
         )
+    if kind == "vanilla_heuristic":
+        return VanillaHeuristicController(use_cache=spec.get("use_cache", True))
+    if kind == "berserker":
+        return BerserkerController(use_cache=spec.get("use_cache", True))
+    if kind == "pure_collector":
+        return PureCollectorController(use_cache=spec.get("use_cache", True))
+    if kind == "random":
+        return RandomController(use_cache=spec.get("use_cache", True))
+    if kind == "idle":
+        return IdleController(use_cache=spec.get("use_cache", True))
+    if kind == "trap_setter":
+        return TrapSetterController(use_cache=spec.get("use_cache", True))
+    if kind == "patroller":
+        return PatrollerController(use_cache=spec.get("use_cache", True))
+    if kind == "kamikaze":
+        return KamikazeController(use_cache=spec.get("use_cache", True))
+    if kind == "tactical":
+        return TacticalController(use_cache=spec.get("use_cache", True))
     if kind == "net":
         from model import load_checkpoint  # local import avoids a cycle at import time
 

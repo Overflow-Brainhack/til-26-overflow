@@ -36,9 +36,23 @@ from common import (
     get_device,
     seed_everything,
 )
-from controllers import heuristic_spec, league_checkpoints, net_spec, stochastic_heuristic_spec
+from controllers import (
+    berserker_spec,
+    heuristic_spec,
+    idle_spec,
+    kamikaze_spec,
+    league_checkpoints,
+    net_spec,
+    patroller_spec,
+    pure_collector_spec,
+    random_spec,
+    stochastic_heuristic_spec,
+    tactical_spec,
+    trap_setter_spec,
+    vanilla_heuristic_spec,
+)
 from model import RecurrentMaskableActorCritic, load_checkpoint, save_checkpoint
-from ppo import ppo_update
+from ppo import RunningReturnNorm, ppo_update
 from rollout import SelfPlayCollector, default_workers
 from validation import validate_model
 
@@ -58,46 +72,96 @@ def _checkpoint_score(path) -> float:
     if not path.exists():
         return float("-inf")
     try:
-        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
         return float(ckpt.get("meta", {}).get("validation_score", float("-inf")))
     except Exception:
         return float("-inf")
 
 
-def _build_opponent_specs(
-    heuristic_prob: float,
-    stochastic_heuristic_prob: float = 0.0,
-    stochastic_jitter: float = 0.35,
-    stochastic_action_noise: float = 0.03,
-):
+_POOL_GRANULARITY = 100
+
+
+def _build_opponent_specs(args):
     """Return a weighted list of picklable opponent specs.
 
-    The heuristic is replicated so ``random.choice`` selects it ~heuristic_prob of
-    the time; each frozen league snapshot contributes one net spec (workers load
-    and cache the actual weights per-process on first use).
+    Each non-net opponent type gets ``round(N * prob)`` entries in the pool where
+    N=_POOL_GRANULARITY; ``random.choice`` then selects each type with frequency
+    ≈ its prob. The remaining share (1 − sum of non-net probs) is split equally
+    across frozen league snapshots, so as the league grows, individual snapshots
+    are sampled less but the net-as-a-class share stays roughly constant.
+
+    Diverse opponents (vanilla heuristic, berserker, pure collector, random,
+    idle) widen the pool beyond the EditedHeuristicPolicyV2 family to fight the
+    overfit-to-own-heuristic problem.
     """
     pool = league_checkpoints(LEAGUE_DIR)
     n_nets = max(1, len(pool))
-    if heuristic_prob <= 0:
-        heuristic_copies = 0
-    elif heuristic_prob < 1:
-        heuristic_copies = max(1, round(heuristic_prob / (1 - heuristic_prob) * n_nets))
-    else:
-        heuristic_copies = 999
 
-    stoch_p = max(0.0, min(1.0, stochastic_heuristic_prob))
-    stochastic_copies = round(heuristic_copies * stoch_p)
-    fixed_copies = heuristic_copies - stochastic_copies
-    specs = [heuristic_spec()] * fixed_copies
-    specs += [
-        stochastic_heuristic_spec(stochastic_jitter, stochastic_action_noise)
-        for _ in range(stochastic_copies)
-    ]
-    specs += [net_spec(ckpt) for ckpt in pool]
-    print(
-        f"League opponents: {fixed_copies}xheuristic + "
-        f"{stochastic_copies}xstochastic heuristic + {len(pool)} frozen snapshots"
-    )
+    # Per-type non-net probabilities, clamped to [0, 1].
+    probs = {
+        "heuristic": max(0.0, min(1.0, args.heuristic_prob)),
+        "stochastic_heuristic": max(0.0, min(1.0, args.stochastic_heuristic_prob)),
+        "vanilla_heuristic": max(0.0, min(1.0, args.vanilla_heuristic_prob)),
+        "berserker": max(0.0, min(1.0, args.berserker_prob)),
+        "pure_collector": max(0.0, min(1.0, args.pure_collector_prob)),
+        "random": max(0.0, min(1.0, args.random_prob)),
+        "idle": max(0.0, min(1.0, args.idle_prob)),
+        "trap_setter": max(0.0, min(1.0, args.trap_setter_prob)),
+        "patroller": max(0.0, min(1.0, args.patroller_prob)),
+        "kamikaze": max(0.0, min(1.0, args.kamikaze_prob)),
+        "tactical": max(0.0, min(1.0, args.tactical_prob)),
+    }
+    non_net_share = sum(probs.values())
+    if non_net_share > 1.0:
+        # Renormalise so the user can specify probs that sum to >1 without
+        # blowing up — nets get 0% in that case.
+        probs = {k: v / non_net_share for k, v in probs.items()}
+        non_net_share = 1.0
+    net_share = max(0.0, 1.0 - non_net_share)
+
+    spec_builders = {
+        "heuristic": lambda: heuristic_spec(),
+        "stochastic_heuristic": lambda: stochastic_heuristic_spec(
+            args.stochastic_jitter, args.stochastic_action_noise
+        ),
+        "vanilla_heuristic": lambda: vanilla_heuristic_spec(),
+        "berserker": lambda: berserker_spec(),
+        "pure_collector": lambda: pure_collector_spec(),
+        "random": lambda: random_spec(),
+        "idle": lambda: idle_spec(),
+        "trap_setter": lambda: trap_setter_spec(),
+        "patroller": lambda: patroller_spec(),
+        "kamikaze": lambda: kamikaze_spec(),
+        "tactical": lambda: tactical_spec(),
+    }
+
+    specs: list[dict] = []
+    counts: dict[str, int] = {}
+    for kind, p in probs.items():
+        c = round(_POOL_GRANULARITY * p)
+        counts[kind] = c
+        specs.extend(spec_builders[kind]() for _ in range(c))
+
+    # Distribute the net share across snapshots — each snapshot gets the same
+    # number of entries. Always at least 1 entry per snapshot so a new snapshot
+    # is sampleable immediately.
+    net_copies_per_snap = max(1, round(_POOL_GRANULARITY * net_share / n_nets)) if net_share > 0 else 0
+    if net_copies_per_snap == 0 and net_share > 0:
+        net_copies_per_snap = 1
+    for ckpt in pool:
+        for _ in range(net_copies_per_snap):
+            specs.append(net_spec(ckpt))
+
+    if not specs:
+        # Pathological all-zero config — fall back to one heuristic so training
+        # doesn't crash.
+        specs = [heuristic_spec()]
+        counts["heuristic"] = 1
+
+    total = len(specs)
+    parts = [f"{c}x{kind}" for kind, c in counts.items() if c > 0]
+    parts.append(f"{net_copies_per_snap}x{len(pool)} frozen snapshots")
+    print("League opponents (" + str(total) + " total): " + " + ".join(parts))
     return specs
 
 
@@ -113,13 +177,46 @@ def main():
     ap.add_argument("--lam", type=float, default=0.95)
     ap.add_argument("--entropy-coef", type=float, default=0.01)
     ap.add_argument("--clip", type=float, default=0.2)
-    ap.add_argument("--heuristic-prob", type=float, default=0.5, help="approx fraction of opponents that are heuristic")
+    # Default opponent mix is "heuristic-free": the EditedHeuristicPolicyV2
+    # family (heuristic, stochastic_heuristic, vanilla_heuristic) is zeroed out
+    # so the policy stops overfitting to it. The strong-opponent slot is
+    # filled by TacticalPolicy (1-step lookahead) + frozen self-snapshots.
+    # Set --heuristic-prob > 0 explicitly if you want some heuristic exposure
+    # back (e.g. as a regulariser).
+    ap.add_argument("--heuristic-prob", type=float, default=0.0,
+                    help="fraction of opponents drawn from the strong EditedHeuristicPolicyV2 "
+                         "(default 0 — RL has overfit to this; re-enable explicitly if needed)")
     ap.add_argument("--stochastic-heuristic-prob", type=float, default=0.0,
-                    help="fraction of heuristic opponents built from randomized heuristic parameters")
+                    help="fraction of opponents drawn from a parameter-jittered EditedHeuristicPolicyV2 "
+                         "(default 0 — same overfitting concern as --heuristic-prob)")
+    ap.add_argument("--vanilla-heuristic-prob", type=float, default=0.0,
+                    help="fraction of opponents drawn from the vanilla HeuristicPolicy "
+                         "(default 0 — shares the same heuristic family parent class)")
+    ap.add_argument("--tactical-prob", type=float, default=0.30,
+                    help="fraction of opponents drawn from TacticalPolicy "
+                         "(1-step lookahead; the new 'strong but non-heuristic' opponent)")
+    ap.add_argument("--berserker-prob", type=float, default=0.12,
+                    help="fraction of opponents drawn from BerserkerPolicy (rushes enemy bases)")
+    ap.add_argument("--pure-collector-prob", type=float, default=0.08,
+                    help="fraction of opponents that only collect tiles, never bomb")
+    ap.add_argument("--random-prob", type=float, default=0.05,
+                    help="fraction of opponents that pick uniform random legal actions")
+    ap.add_argument("--idle-prob", type=float, default=0.05,
+                    help="fraction of opponents that mostly STAY (≈empty slot)")
+    ap.add_argument("--trap-setter-prob", type=float, default=0.05,
+                    help="fraction of opponents that wander and drop bombs anywhere")
+    ap.add_argument("--patroller-prob", type=float, default=0.05,
+                    help="fraction of opponents that walk FORWARD-until-blocked (non-adversarial)")
+    ap.add_argument("--kamikaze-prob", type=float, default=0.05,
+                    help="fraction of opponents that bomb at own feet when low-HP / cornered")
     ap.add_argument("--stochastic-jitter", type=float, default=0.35,
                     help="relative jitter for stochastic heuristic numeric knobs")
     ap.add_argument("--stochastic-action-noise", type=float, default=0.03,
                     help="chance stochastic heuristic takes a random legal action")
+    ap.add_argument("--critic-warmup", type=int, default=8,
+                    help="value-only updates before PPO begins (re-fits the value head to "
+                         "the new opponent/reward distribution after warm-starting from Stage 2; "
+                         "0 to skip)")
     ap.add_argument("--snapshot-every", type=int, default=20, help="updates between adding self to the league pool")
     ap.add_argument("--gated-snapshots", action="store_true",
                     help="only add league snapshots that pass the validation gate")
@@ -134,8 +231,16 @@ def main():
                     help="novice benchmark rounds per validation")
     ap.add_argument("--validation-advanced-rounds", type=int, default=0,
                     help="advanced-map benchmark rounds per validation")
-    ap.add_argument("--validation-learners", type=int, default=3,
-                    help="RL agents used in validation benchmark")
+    ap.add_argument("--validation-learners", type=int, default=1,
+                    help="RL agents used in validation benchmark (default matches "
+                         "benchmark.py's --learners 1 so scores are comparable)")
+    ap.add_argument("--validation-baseline", type=str, default="strong",
+                    choices=("strong", "vanilla", "berserker"),
+                    help="opponent used in validation. 'strong' = EditedHeuristicPolicyV2 "
+                         "(what you trained against — measures within-distribution fit). "
+                         "'vanilla' / 'berserker' = held-out, measures generalisation. "
+                         "Switch to a held-out baseline so checkpoint promotion + rollback "
+                         "optimise for transfer to unseen opponents.")
     ap.add_argument("--validation-seed", type=int, default=22345)
     ap.add_argument("--rollback-on-regress", action="store_true",
                     help="reload the best validated checkpoint if validation falls below best by rollback-margin")
@@ -147,6 +252,12 @@ def main():
                     help="train on randomised advanced maps")
     ap.add_argument("-j", "--num-workers", type=int, default=default_workers(),
                     help="parallel rollout processes (default: cpus-1; 1 = serial)")
+    ap.add_argument("--no-shaping", dest="shape_rewards", action="store_false", default=True,
+                    help="disable ALL training-time reward shaping (env-cfg overrides, "
+                         "offensive multipliers, PBRS, oscillation + turn-spam penalties) "
+                         "and train against raw env reward. Use as a polish phase on an "
+                         "already-converged checkpoint to remove shaping bias and align "
+                         "the gradient with the real eval objective.")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -156,6 +267,10 @@ def main():
 
     model = _load_start_model(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # Shared running stats for return normalisation — critical at Stage 3 because
+    # raw shaped returns are in the hundreds, which makes the value loss explode
+    # (saw v_loss=3000+ in the un-normalised version) and the critic chases noise.
+    return_norm = RunningReturnNorm()
 
     # Seed the league with the starting policy so there's at least one net opponent.
     if not league_checkpoints(LEAGUE_DIR):
@@ -163,12 +278,7 @@ def main():
         save_checkpoint(seed_path, model, meta={"stage": "league_seed"})
         print(f"Seeded league with {seed_path}")
 
-    specs = _build_opponent_specs(
-        args.heuristic_prob,
-        args.stochastic_heuristic_prob,
-        args.stochastic_jitter,
-        args.stochastic_action_noise,
-    )
+    specs = _build_opponent_specs(args)
     collector = SelfPlayCollector(
         model, device,
         opponent_specs=specs,
@@ -177,8 +287,9 @@ def main():
         advanced_prob=args.advanced_prob,
         gamma=args.gamma, lam=args.lam,
         num_workers=args.num_workers,
+        shape_rewards=args.shape_rewards,
     )
-    print(f"Rollout workers: {args.num_workers}")
+    print(f"Rollout workers: {args.num_workers}  shape_rewards={args.shape_rewards}")
     if args.novice and args.advanced_prob > 0:
         print(f"Arena mix: novice with advanced_prob={args.advanced_prob:.2f}")
 
@@ -186,6 +297,28 @@ def main():
     best_validation = _checkpoint_score(STAGE3_BEST_CKPT)
     if best_validation > float("-inf"):
         print(f"Best validation checkpoint: {STAGE3_BEST_CKPT} score={best_validation:+.1f}")
+
+    # ── critic warm-up ───────────────────────────────────────────────────────
+    # Stage 2's value head was fitted against (heuristic-only) opponents under the
+    # old reward shaping. Stage 3 introduces (a) frozen league snapshots in the
+    # opponent mix and (b) potentially-changed shaping. Without warm-up the first
+    # few PPO advantages are garbage and the policy walks the wrong way before
+    # the critic can catch up — observed empirically as val score dropping ~50
+    # points in the first 10 updates of an un-warmed Stage 3 run.
+    if args.critic_warmup > 0:
+        for p in model.parameters():
+            p.requires_grad_(False)
+        for p in model.critic.parameters():
+            p.requires_grad_(True)
+        for _ in trange(args.critic_warmup, desc="critic warmup", unit="upd"):
+            batch, _ = collector.collect(args.episodes_per_update)
+            wl = ppo_update(model, opt, batch, device, epochs=args.epochs,
+                            seq_minibatch=args.seq_minibatch, value_only=True,
+                            return_norm=return_norm)
+            tqdm.write(f"  [warmup] v_loss={wl['value_loss']:.2f}")
+        for p in model.parameters():
+            p.requires_grad_(True)
+
     bar = trange(1, args.updates + 1, desc="League", unit="upd")
     for update in bar:
         t0 = time.time()
@@ -194,6 +327,7 @@ def main():
             model, opt, batch, device,
             epochs=args.epochs, seq_minibatch=args.seq_minibatch,
             clip=args.clip, entropy_coef=args.entropy_coef,
+            return_norm=return_norm,
         )
         dt = time.time() - t0
         bar.set_postfix(ret=f"{stats['learner_return_mean']:.0f}",
@@ -221,6 +355,7 @@ def main():
                 novice=args.novice,
                 seed=args.validation_seed,
                 advanced_rounds=args.validation_advanced_rounds,
+                baseline=args.validation_baseline,
             )
             tqdm.write(
                 f"  [val] score={val['score']:+.1f} rl={val['rl_mean']:.1f} "
@@ -267,12 +402,7 @@ def main():
                 save_checkpoint(snap, model, meta={"stage": "league", "update": update})
                 gen += 1
                 tqdm.write(f"  + league snapshot {snap.name}  (rebuilding opponent pool)")
-                collector.set_opponent_specs(_build_opponent_specs(
-                    args.heuristic_prob,
-                    args.stochastic_heuristic_prob,
-                    args.stochastic_jitter,
-                    args.stochastic_action_noise,
-                ))
+                collector.set_opponent_specs(_build_opponent_specs(args))
 
         if update % args.save_every == 0 or update == args.updates:
             save_checkpoint(STAGE3_CKPT, model, meta={"stage": "league", "update": update,

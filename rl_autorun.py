@@ -55,7 +55,9 @@ REPO_ROOT = Path(__file__).parent
 EVAL_LOG_PATH = REPO_ROOT / "logs" / "eval_results.jsonl"
 STAGE2_CURRENT_CKPT = REPO_ROOT / "ae_rl" / "checkpoints" / "stage2_ppo.pt"
 STAGE2_BEST_CKPT = REPO_ROOT / "ae_rl" / "checkpoints" / "stage2_ppo_best.pt"
-DEFAULT_AE_MODEL_TARGET = REPO_ROOT / "ae" / "models" / "stage2_ppo.pt"
+STAGE3_CURRENT_CKPT = REPO_ROOT / "ae_rl" / "checkpoints" / "stage3_league.pt"
+STAGE3_BEST_CKPT = REPO_ROOT / "ae_rl" / "checkpoints" / "stage3_league_best.pt"
+DEFAULT_AE_MODEL_TARGET = REPO_ROOT / "ae" / "models" / "ppo.pt"
 
 
 def log_eval_result(result: "EvalResult", logger: logging.Logger) -> None:
@@ -267,19 +269,34 @@ def _truthy(value: str | None, default: bool = False) -> bool:
 
 
 def _resolve_rl_checkpoint(logger: logging.Logger) -> Path | None:
-    raw = os.environ.get("RL_AUTORUN_CHECKPOINT", "best").strip()
-    key = raw.lower()
+    raw_key = os.environ.get("RL_AUTORUN_CHECKPOINT", "best").strip()
+    key = raw_key.lower()
 
-    if key == "best":
-        if STAGE2_BEST_CKPT.exists():
-            return STAGE2_BEST_CKPT
-        logger.warning(
-            "Best checkpoint missing: %s; falling back to current", STAGE2_BEST_CKPT
-        )
-        return STAGE2_CURRENT_CKPT if STAGE2_CURRENT_CKPT.exists() else None
+    raw_stage_no = os.environ.get("RL_AUTORUN_STAGE", "2").strip()
+    stage_no = raw_stage_no.lower()
 
-    if key == "current":
-        return STAGE2_CURRENT_CKPT if STAGE2_CURRENT_CKPT.exists() else None
+    if stage_no == "2":
+        if key == "best":
+            if STAGE2_BEST_CKPT.exists():
+                return STAGE2_BEST_CKPT
+            logger.warning(
+                "Best checkpoint missing: %s; falling back to current", STAGE2_BEST_CKPT
+            )
+            return STAGE2_CURRENT_CKPT if STAGE2_CURRENT_CKPT.exists() else None
+
+        if key == "current":
+            return STAGE2_CURRENT_CKPT if STAGE2_CURRENT_CKPT.exists() else None
+    elif stage_no == "3":
+        if key == "best":
+            if STAGE3_BEST_CKPT.exists():
+                return STAGE3_BEST_CKPT
+            logger.warning(
+                "Best checkpoint missing: %s; falling back to current", STAGE3_BEST_CKPT
+            )
+            return STAGE3_CURRENT_CKPT if STAGE3_CURRENT_CKPT.exists() else None
+
+        if key == "current":
+            return STAGE3_CURRENT_CKPT if STAGE3_CURRENT_CKPT.exists() else None
 
     path = Path(raw).expanduser()
     if not path.is_absolute():

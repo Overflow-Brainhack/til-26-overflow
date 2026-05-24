@@ -59,6 +59,7 @@ from map_memory import MapMemory  # noqa: E402
 from observation import ParsedObs  # noqa: E402
 from policy import Policy  # noqa: E402
 from rl_policy import RLPolicy  # noqa: E402
+from layered_rl_policy import LayeredRLPolicy  # noqa: E402
 
 
 AGENT_TYPES = (
@@ -89,7 +90,8 @@ def _make_policy(
     elif agent_type == "random":
         policy = RandomPolicy()
     elif agent_type == "rl":
-        policy = RLPolicy(checkpoint_path=rl_checkpoint)
+        # policy = RLPolicy(checkpoint_path=rl_checkpoint)
+        policy = LayeredRLPolicy(checkpoint_path=rl_checkpoint)
     else:
         raise ValueError(f"unknown agent type: {agent_type}")
 

@@ -1,190 +1,22 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# 2026-05-23 — Static-map architecture (6-channel walls+bases layer added)
-# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2: switch validation to held-out so best-checkpoint promotion
+  # starts optimising for generalisation
+  uv run python ae_rl/train_stage3_league.py \
+    --updates 400 --critic-warmup 0 --lr 5e-5 \
+    --episodes-per-update 24 --seq-minibatch 12 --epochs 3 \
+    --snapshot-every 50 --gated-snapshots --snapshot-margin 25 \
+    --validate-every 5 --validation-rounds 6 --validation-learners 1 \
+    --validation-baseline vanilla \
+    --rollback-on-regress --rollback-margin 35 \
+    -j 24
 
-# ── 36-HR SUBMISSION PATH (run on THIS machine) ──────────────────────────────
-
-# Run currently in flight (started ~07:59, ends ~3hr later). All-slot warm
-# restart from stage2_ppo_best.pt, critic-warmup 5, new static-map arch.
-uv run ae_rl/train_stage2_ppo.py \
-    --updates 300 \
-    --episodes-per-update 96 \
-    --learners 1 \
-    --epochs 8 \
-    --seq-minibatch 8 \
-    --lr 2e-4 \
-    --clip 0.20 \
-    --entropy-coef 0.010 \
-    --critic-warmup 5 \
-    --stochastic-heuristic-prob 0.10 \
-    --stochastic-jitter 0.15 \
-    --stochastic-action-noise 0.0 \
-    --validate-every 25 \
-    --validation-rounds 12 \
-    --validation-learners 1 \
-    --save-every 10 \
-    --snapshot-every 50 \
-    -j 16
-
-# Phase B1 — cool-down + diversity (resumes from current ckpt; ~16h / 240 upd)
-uv run ae_rl/train_stage2_ppo.py \
-    --updates 240 \
-    --episodes-per-update 128 \
-    --learners 1 \
-    --epochs 8 \
-    --seq-minibatch 16 \
-    --lr 1e-4 \
-    --clip 0.15 \
-    --entropy-coef 0.005 \
-    --critic-warmup 0 \
-    --stochastic-heuristic-prob 0.25 \
-    --stochastic-jitter 0.20 \
-    --stochastic-action-noise 0.01 \
-    --advanced-prob 0.10 \
-    --validate-every 20 \
-    --validation-rounds 18 \
-    --validation-advanced-rounds 4 \
-    --validation-learners 1 \
-    --save-every 10 \
-    --snapshot-every 30 \
-    -j 16
-
-# Phase B2 — surgical weak-slot polish (only if a slot is still clearly worst;
-# replace agent_0 with whichever slot is the laggard after B1).
-uv run ae_rl/train_stage2_ppo.py \
-    --updates 180 \
-    --episodes-per-update 96 \
-    --learners 1 \
-    --learner-slots agent_0 \
-    --epochs 8 \
-    --seq-minibatch 16 \
-    --lr 5e-5 \
-    --clip 0.12 \
-    --entropy-coef 0.008 \
-    --critic-warmup 0 \
-    --stochastic-heuristic-prob 0.20 \
-    --stochastic-jitter 0.15 \
-    --advanced-prob 0.05 \
-    --validate-every 30 \
-    --validation-rounds 24 \
-    --validation-learners 1 \
-    --save-every 10 \
-    --snapshot-every 30 \
-    -j 16
-
-# Pre-submit eval: benchmark every snapshot from latest training timestamp,
-# pick the actual best (not always stage2_ppo_best.pt).
-for f in ae_rl/checkpoints/stage2_snapshots/$(ls -t ae_rl/checkpoints/stage2_snapshots | head -1)/*.pt; do
-    echo "=== $f ==="
-    uv run ae_rl/benchmark.py --ckpt "$f" --rounds 50 --learners 1
-done | tee /tmp/snapshot_benchmark.log
-
-# ── WEEK-LONG PATH (run on OTHER machine after copying week_long_edits/) ─────
-#
-# Copy week_long_edits/ over the existing source first:
-#   rsync -av week_long_edits/ae_rl/   <repo>/ae_rl/
-#   rsync -av week_long_edits/ae/src/  <repo>/ae/src/
-# The week-long files include: static-map arch + spawn-position embedding +
-# truncation→done bug fix.
-
-# Stage 1 — fresh BC with new architecture
-uv run ae_rl/train_stage1_bc.py --episodes 96 --epochs 12 --novice
-
-# Stage 2 Run 1 — broad exploration (~24h / 800 upd)
-rm -f ae_rl/checkpoints/stage2_ppo.pt
-uv run ae_rl/train_stage2_ppo.py \
-    --updates 800 \
-    --episodes-per-update 128 \
-    --learners 1 \
-    --epochs 6 \
-    --seq-minibatch 16 \
-    --lr 2.5e-4 \
-    --clip 0.20 \
-    --entropy-coef 0.012 \
-    --critic-warmup 10 \
-    --stochastic-heuristic-prob 0.35 \
-    --stochastic-jitter 0.25 \
-    --stochastic-action-noise 0.02 \
-    --advanced-prob 0.20 \
-    --validate-every 25 \
-    --validation-rounds 18 \
-    --validation-advanced-rounds 6 \
-    --validation-learners 1 \
-    --save-every 10 \
-    --snapshot-every 50 \
-    -j 16
-
-# Stage 2 Run 2 — refinement (~16h / 500 upd, resumes Run 1)
-uv run ae_rl/train_stage2_ppo.py \
-    --updates 500 \
-    --episodes-per-update 128 \
-    --learners 1 \
-    --epochs 8 \
-    --seq-minibatch 16 \
-    --lr 1e-4 \
-    --clip 0.15 \
-    --entropy-coef 0.005 \
-    --critic-warmup 0 \
-    --stochastic-heuristic-prob 0.30 \
-    --stochastic-jitter 0.20 \
-    --advanced-prob 0.20 \
-    --validate-every 25 \
-    --validation-rounds 24 \
-    --validation-advanced-rounds 8 \
-    --validation-learners 1 \
-    --save-every 10 \
-    --snapshot-every 50 \
-    -j 16
-
-# Stage 2 Run 3 — weak-slot polish (~12h / 300 upd, only if a slot lags >50pts)
-# Substitute agent_X with the actual weakest slot after Run 2.
-uv run ae_rl/train_stage2_ppo.py \
-    --updates 300 \
-    --episodes-per-update 128 \
-    --learners 1 \
-    --learner-slots agent_X \
-    --epochs 8 \
-    --seq-minibatch 16 \
-    --lr 8e-5 \
-    --clip 0.15 \
-    --entropy-coef 0.008 \
-    --stochastic-heuristic-prob 0.30 \
-    --advanced-prob 0.15 \
-    --validate-every 25 \
-    --validation-rounds 24 \
-    --save-every 10 \
-    --snapshot-every 50 \
-    -j 16
-
-# Stage 3 — league (only if every slot beats heuristic baseline +20 after Run 2/3)
-uv run ae_rl/train_stage3_league.py \
-    --updates 400 \
-    --episodes-per-update 64 \
-    --learners 2 \
-    --epochs 6 \
-    --seq-minibatch 12 \
-    --lr 8e-5 \
-    --clip 0.15 \
-    --entropy-coef 0.003 \
-    --heuristic-prob 0.40 \
-    --stochastic-heuristic-prob 0.30 \
-    --stochastic-jitter 0.25 \
-    --advanced-prob 0.20 \
-    --snapshot-every 25 \
-    --gated-snapshots \
-    --snapshot-margin 50 \
-    --validate-every 50 \
-    --validation-rounds 50 \
-    --validation-advanced-rounds 20 \
-    --validation-learners 2 \
-    --rollback-on-regress \
-    --rollback-margin 60 \
-    --save-every 10 \
-    -j 16
-
-# Final eval — sweep every snapshot
-for f in ae_rl/checkpoints/stage2_snapshots/*/*.pt ae_rl/checkpoints/stage3_snapshots/*/*.pt; do
-    echo "=== $f ==="
-    uv run ae_rl/benchmark.py --ckpt "$f" --rounds 100 --learners 1
-done | tee /tmp/all_snapshots_benchmark.log
+  # Phase 3: polish phase, no shaping, raw env reward, low LR
+  uv run python ae_rl/train_stage3_league.py \
+    --updates 300 --critic-warmup 8 --lr 3e-5 \
+    --no-shaping \
+    --episodes-per-update 24 --seq-minibatch 12 --epochs 3 \
+    --snapshot-every 0 --gated-snapshots --snapshot-margin 20 \
+    --validate-every 5 --validation-rounds 6 --validation-learners 1 \
+    --validation-baseline vanilla \
+    --rollback-on-regress --rollback-margin 20 \
+    -j 24
 

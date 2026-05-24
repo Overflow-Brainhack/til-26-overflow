@@ -206,7 +206,10 @@ def save_checkpoint(
 def load_checkpoint(
     path, device, eval_mode: bool = False
 ) -> RecurrentMaskableActorCritic:
-    ckpt = torch.load(path, map_location=device, weights_only=False)
+    # weights_only=True restricts unpickling to torch tensors + primitives so
+    # a hostile checkpoint can't execute code on load. Our checkpoints contain
+    # {model_state, arch, meta} — all safe under the restriction.
+    ckpt = torch.load(path, map_location=device, weights_only=True)
     arch = ckpt.get("arch", {})
     model = RecurrentMaskableActorCritic(
         feature_dim=arch.get("feature_dim", 256),

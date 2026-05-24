@@ -51,7 +51,7 @@ TEAM_BOMBS_NORM = 10.0
 SCALAR_DIM = 14
 STATIC_MAP_CHANNELS = 6
 
-DEFAULT_CHECKPOINT = "models/stage2_ppo.pt"
+DEFAULT_CHECKPOINT = "models/ppo.pt"
 
 _MASK_FILL = -1e9
 
@@ -114,21 +114,33 @@ class _ActorCritic(nn.Module):
         return torch.zeros(self.gru_layers, 1, self.gru_hidden, device=device)
 
     @torch.no_grad()
-    def act(self, viewcone, baseview, scalars, mask, staticmap, hidden, deterministic=False):
+    def act(
+        self, viewcone, baseview, scalars, mask, staticmap, hidden, deterministic=False
+    ):
+        """Returns (action, hidden, value, entropy). Value and entropy are
+        scalars used by ``LayeredRLPolicy`` for the heuristic-fallback decision;
+        existing callers can ignore the extra two."""
         v = self.agent_cnn(viewcone)
         b = self.base_cnn(baseview)
         m = self.static_cnn(staticmap)
         s = self.scalar_mlp(scalars)
         feat = self.fuse(torch.cat([v, b, m, s], dim=-1)).unsqueeze(0)  # (1, 1, F)
         out, hidden = self.gru(feat, hidden)
-        logits = self.actor(out.squeeze(0))
+        out_sq = out.squeeze(0)
+        logits = self.actor(out_sq)
         mb = mask.to(dtype=torch.bool)
         if mb.any():
             logits = logits.masked_fill(~mb, _MASK_FILL)
-        action = (
-            logits.argmax(-1) if deterministic else Categorical(logits=logits).sample()
+        dist = Categorical(logits=logits)
+        action = logits.argmax(-1) if deterministic else dist.sample()
+        value = self.critic(out_sq).squeeze(-1)
+        entropy = dist.entropy()
+        return (
+            int(action.item()),
+            hidden,
+            float(value.item()),
+            float(entropy.item()),
         )
-        return int(action.item()), hidden
 
 
 # ── feature encoding from ParsedObs ───────────────────────────────────────────
@@ -163,7 +175,7 @@ class RLPolicy(Policy):
         self.device = torch.device(device)
         self.deterministic = deterministic
         path = Path(checkpoint_path) if checkpoint_path else DEFAULT_CHECKPOINT
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        ckpt = torch.load(path, map_location=self.device, weights_only=True)
         arch = ckpt.get("arch", {})
         self.model = _ActorCritic(
             feature_dim=arch.get("feature_dim", 256),
@@ -172,7 +184,9 @@ class RLPolicy(Policy):
         ).to(self.device)
         state = ckpt["model_state"]
         own = self.model.state_dict()
-        loadable = {k: v for k, v in state.items() if k in own and own[k].shape == v.shape}
+        loadable = {
+            k: v for k, v in state.items() if k in own and own[k].shape == v.shape
+        }
         own.update(loadable)
         self.model.load_state_dict(own)
         self.model.eval()
@@ -182,6 +196,10 @@ class RLPolicy(Policy):
         self._debug_mode = "rl"
         self._debug_target = None
         self._debug_pos = (0, 0)
+        # Diagnostics from the last network forward; LayeredRLPolicy reads
+        # these to decide whether to fall back to the heuristic.
+        self._last_value: float = 0.0
+        self._last_entropy: float = 0.0
 
     def reset(self) -> None:
         self._hidden = self.model.initial_hidden(self.device)
@@ -213,13 +231,21 @@ class RLPolicy(Policy):
             )
         )
         sc = _scalars_from_obs(obs)
-        smap = memory.static_map_layer() if memory is not None else np.zeros(
-            (STATIC_MAP_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32
+        smap = (
+            memory.static_map_layer()
+            if memory is not None
+            else np.zeros((STATIC_MAP_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
         )
 
         t = lambda a: torch.as_tensor(a, device=self.device).unsqueeze(0)  # noqa: E731
-        action, self._hidden = self.model.act(
-            t(vc), t(bv), t(sc), t(mask), t(smap), self._hidden, deterministic=self.deterministic
+        action, self._hidden, self._last_value, self._last_entropy = self.model.act(
+            t(vc),
+            t(bv),
+            t(sc),
+            t(mask),
+            t(smap),
+            self._hidden,
+            deterministic=self.deterministic,
         )
         self._debug_mode = "rl"
         # Final mask guard (network can only pick legal actions, but be defensive).

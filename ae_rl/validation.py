@@ -13,23 +13,31 @@ def validate_model(
     novice: bool = True,
     seed: int = 0,
     advanced_rounds: int = 0,
+    baseline: str = "strong",
 ) -> dict:
     """Run quiet fixed-seed benchmark(s) and return a scalar promotion score.
 
-    The score is mean reward delta over the heuristic reference, averaged across
-    enabled map modes. Positive means the learned agents beat the 6x heuristic
+    The score is mean reward delta over the baseline reference, averaged across
+    enabled map modes. Positive means the learned agents beat the 6x baseline
     reference under this validation suite.
+
+    Set ``baseline`` to ``"vanilla"`` or ``"berserker"`` to validate against a
+    *held-out* opponent — i.e. a policy the RL was not primarily trained
+    against — which makes the score a generalisation metric rather than a
+    within-distribution fit metric.
     """
     results = []
     if rounds > 0:
         results.append(benchmark(
             None, rounds, learners, novice, seed,
             model=model, quiet=True, deterministic=True, rotate_slots=True,
+            baseline=baseline,
         ))
     if advanced_rounds > 0:
         results.append(benchmark(
             None, advanced_rounds, learners, False, seed + 10_000,
             model=model, quiet=True, deterministic=True, rotate_slots=True,
+            baseline=baseline,
         ))
 
     deltas = [r["delta"] for r in results if r.get("delta") is not None]
@@ -40,4 +48,5 @@ def validate_model(
         "rl_mean": float(sum(rl_means) / len(rl_means)) if rl_means else 0.0,
         "heur_baseline": float(sum(baselines) / len(baselines)) if baselines else 0.0,
         "num_suites": len(results),
+        "baseline": baseline,
     }

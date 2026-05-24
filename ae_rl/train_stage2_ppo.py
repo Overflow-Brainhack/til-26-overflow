@@ -34,7 +34,7 @@ from common import (
 )
 from controllers import heuristic_spec, stochastic_heuristic_spec
 from model import RecurrentMaskableActorCritic, load_checkpoint, save_checkpoint
-from ppo import ppo_update
+from ppo import RunningReturnNorm, ppo_update
 from rollout import SelfPlayCollector, default_workers
 from validation import validate_model
 
@@ -55,7 +55,7 @@ def _checkpoint_score(path) -> float:
     if not path.exists():
         return float("-inf")
     try:
-        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
         return float(ckpt.get("meta", {}).get("validation_score", float("-inf")))
     except Exception:
         return float("-inf")
@@ -117,6 +117,10 @@ def main():
                     help="advanced-map benchmark rounds per validation")
     ap.add_argument("--validation-learners", type=int, default=3,
                     help="RL agents used in validation benchmark")
+    ap.add_argument("--validation-baseline", type=str, default="strong",
+                    choices=("strong", "vanilla", "berserker"),
+                    help="opponent used in validation. 'strong' is the training opponent; "
+                         "'vanilla' / 'berserker' are held-out generalisation baselines.")
     ap.add_argument("--validation-seed", type=int, default=12345)
     ap.add_argument("--rollback-on-regress", action="store_true",
                     help="reload the best validated checkpoint if validation falls below best by rollback-margin")
@@ -128,6 +132,9 @@ def main():
                     help="train on randomised advanced maps")
     ap.add_argument("-j", "--num-workers", type=int, default=default_workers(),
                     help="parallel rollout processes (default: cpus-1; 1 = serial)")
+    ap.add_argument("--no-shaping", dest="shape_rewards", action="store_false", default=True,
+                    help="disable ALL training-time reward shaping and train against "
+                         "raw env reward (polish phase on a converged checkpoint)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -137,6 +144,8 @@ def main():
 
     model = _load_start_model(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # Running stats for return normalisation; shared across critic warmup + PPO.
+    return_norm = RunningReturnNorm()
     snapshot_dir = None
     if args.snapshot_every > 0:
         snapshot_dir = STAGE2_SNAPSHOT_DIR / time.strftime("%Y%m%d_%H%M%S")
@@ -153,8 +162,9 @@ def main():
         advanced_prob=args.advanced_prob,
         gamma=args.gamma, lam=args.lam,
         num_workers=args.num_workers,
+        shape_rewards=args.shape_rewards,
     )
-    print(f"Rollout workers: {args.num_workers}")
+    print(f"Rollout workers: {args.num_workers}  shape_rewards={args.shape_rewards}")
     if args.learner_slots:
         print(f"Learner slots: {_parse_learner_slots(args.learner_slots)}")
     print(
@@ -180,7 +190,8 @@ def main():
         for _ in trange(args.critic_warmup, desc="critic warmup", unit="upd"):
             batch, _ = collector.collect(args.episodes_per_update)
             wl = ppo_update(model, opt, batch, device, epochs=args.epochs,
-                            seq_minibatch=args.seq_minibatch, value_only=True)
+                            seq_minibatch=args.seq_minibatch, value_only=True,
+                            return_norm=return_norm)
             tqdm.write(f"  [warmup] v_loss={wl['value_loss']:.1f}")
         for p in model.parameters():
             p.requires_grad_(True)
@@ -198,6 +209,7 @@ def main():
             model, opt, batch, device,
             epochs=args.epochs, seq_minibatch=args.seq_minibatch,
             clip=args.clip, entropy_coef=args.entropy_coef,
+            return_norm=return_norm,
         )
         dt = time.time() - t0
         bar.set_postfix(ret=f"{stats['learner_return_mean']:.0f}",
@@ -229,6 +241,7 @@ def main():
                 novice=args.novice,
                 seed=args.validation_seed,
                 advanced_rounds=args.validation_advanced_rounds,
+                baseline=args.validation_baseline,
             )
             tqdm.write(
                 f"  [val] score={val['score']:+.1f} rl={val['rl_mean']:.1f} "

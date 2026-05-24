@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import random
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -32,6 +33,7 @@ from tqdm.auto import tqdm
 
 import common  # noqa: F401  (path bootstrap)
 from common import obs_to_arrays
+from constants import Action
 from controllers import _CACHE_TEMPLATE, build_controller
 from map_memory import MapMemory
 from observation import parse_observation
@@ -48,17 +50,162 @@ def _fresh_learner_memory(novice: bool) -> MapMemory:
     return mem
 
 
-def make_env(novice: bool = True) -> Bomberman:
+# ── PBRS potentials ──────────────────────────────────────────────────────────
+# Φ(s) is decomposed into two policy-invariant terms; per-step shaping reward
+# added to env reward is γ·Φ(s') − Φ(s). Off-policy invariance holds for any
+# choice of Φ as long as it depends only on s (not on the action taken).
+PBRS_TILE_WEIGHT = 0.2
+PBRS_BASE_WEIGHT = 0.2
+
+
+def _agent_xy(obs: dict) -> tuple[int, int]:
+    loc = obs.get("location", (0, 0))
+    arr = np.asarray(loc).flatten()
+    if arr.size < 2:
+        return (0, 0)
+    return (int(arr[0]), int(arr[1]))
+
+
+def _compute_phi(obs: dict, memory: MapMemory) -> float:
+    """State potential Φ(s) = -w_tile·dist_to_nearest_known_tile
+                              -w_base·dist_to_nearest_known_enemy_base  (if team_bombs >= 1).
+    Manhattan distance over MapMemory contents. Returns 0 when nothing is known."""
+    pos = _agent_xy(obs)
+    phi = 0.0
+
+    tiles = memory.collectible_cells()
+    if tiles:
+        d_tile = min(abs(pos[0] - t[0]) + abs(pos[1] - t[1]) for t in tiles)
+        phi += -PBRS_TILE_WEIGHT * d_tile
+
+    team_bombs = obs.get("team_bombs", 0)
+    try:
+        team_bombs = int(np.asarray(team_bombs).flatten()[0])
+    except Exception:
+        team_bombs = 0
+    if team_bombs >= 1:
+        bases = memory.enemy_bases
+        if bases:
+            d_base = min(abs(pos[0] - b[0]) + abs(pos[1] - b[1]) for b in bases)
+            phi += -PBRS_BASE_WEIGHT * d_base
+
+    return phi
+
+
+# ── reward shaping configuration (training-time only) ────────────────────────
+# Env-level cfg overrides applied in make_env. Set to 0.0 / 1.0 to disable.
+SHAPING_STEP_PENALTY = -0.02
+SHAPING_STATIONARY_PENALTY = -0.05
+SHAPING_INVALID_ACTION = -0.5
+# Own base loss is treated as inevitable / out of the policy's control, so
+# zero out the -50 default penalty. The bot still profits from breaking
+# enemy bases (SHAPING_DESTROY_ENEMY_BASE_MULT), it just doesn't try to
+# defend its own.
+SHAPING_OWN_BASE_DESTROYED = 0.0
+
+# Multipliers applied via a Rewards.award wrapper. Only boost positive
+# attack_damage (= damage dealt to enemies/bases). Negative attack_damage
+# (= damage taken / your base hit) is left at 1.0 so survival pressure is
+# preserved unchanged.
+SHAPING_ATTACK_DAMAGE_DEALT_MULT = 1.5
+SHAPING_DESTROY_ENEMY_BASE_MULT = 2.0
+SHAPING_ATTACK_KILL_MULT = 1.5
+# Amplify damage *taken* (negative attack_damage) so the policy weighs survival
+# more. >1.0 = stronger aversion. Pairs with the deploy-side dodge override.
+SHAPING_ATTACK_DAMAGE_TAKEN_MULT = 2.0
+
+# Per-step oscillation penalty: applied to the action that *completes* a
+# 2-step (action, position) cycle — i.e. the LEFT/RIGHT/LEFT/RIGHT shake the
+# RL policy falls into. Bookkept on the learner side in
+# ``_collect_selfplay_episodes`` so it doesn't depend on the env at all.
+SHAPING_OSCILLATION_PENALTY = -0.25
+# Rolling history depth fed into the loop check; matches the deploy-side
+# LayeredRLPolicy default so train/eval signals are consistent.
+OSCILLATION_WINDOW = 6
+_OSCILLATION_PERIODS = (2, 3)
+
+# ── turn-spam penalty ────────────────────────────────────────────────────────
+# Separate from oscillation: penalises *any* sustained turning without forward
+# progress, including unidirectional spins (LEFT, LEFT, LEFT, ...) that the
+# oscillation matcher misses. Applies to LEFT / RIGHT after they've been used
+# this many consecutive turns without a FORWARD / BACKWARD breaking the streak.
+TURN_SPAM_THRESHOLD = 2
+SHAPING_TURN_SPAM_PENALTY = -0.75
+
+
+def _is_oscillating(history, action: int, pos: tuple[int, int]) -> bool:
+    """True if appending (action, pos) would close a 2- or 3-step cycle.
+
+    Same matcher as ``EditedHeuristicPolicy._is_loop`` / LayeredRLPolicy so
+    train-time penalty and deploy-time guard agree on what counts as a loop.
+    """
+    entry = (action, pos)
+    buf = list(history)
+    n = len(buf)
+    for period in _OSCILLATION_PERIODS:
+        needed = 2 * period - 1
+        if n < needed:
+            continue
+        suffix = tuple(buf[n - (period - 1):]) + (entry,)
+        prev = tuple(buf[n - (2 * period - 1): n - (period - 1)])
+        if suffix == prev:
+            return True
+    return False
+
+
+def _wrap_offensive_rewards(env: Bomberman) -> None:
+    """Boost offensive reward events at award time (training only).
+
+    Positive ``attack_damage`` (dealt) and ``destroy_enemy_base`` / ``attack_kill``
+    are amplified to encourage aggression; negative ``attack_damage`` (taken) is
+    amplified by ``SHAPING_ATTACK_DAMAGE_TAKEN_MULT`` to teach damage aversion.
+    """
+    original_award = env.dynamics.rewards.award
+
+    def award_boosted(recipient_id: str, event: str, multiplier: float = 1.0) -> float:
+        if event == "attack_damage":
+            if multiplier > 0:
+                multiplier = multiplier * SHAPING_ATTACK_DAMAGE_DEALT_MULT
+            elif multiplier < 0:
+                multiplier = multiplier * SHAPING_ATTACK_DAMAGE_TAKEN_MULT
+        elif event == "destroy_enemy_base":
+            multiplier = multiplier * SHAPING_DESTROY_ENEMY_BASE_MULT
+        elif event == "attack_kill":
+            multiplier = multiplier * SHAPING_ATTACK_KILL_MULT
+        return original_award(recipient_id, event, multiplier)
+
+    env.dynamics.rewards.award = award_boosted
+
+
+def make_env(novice: bool = True, shape_rewards: bool = False) -> Bomberman:
+    """Build a Bomberman env. ``shape_rewards=True`` enables training-time
+    reward shaping (env cfg penalties + offensive multipliers). Eval / benchmark
+    / diagnostic callers must leave it False so they see raw env reward."""
     cfg = default_config()
     cfg.env.novice = novice
     cfg.env.render_mode = None
-    return Bomberman(cfg)
+    if shape_rewards:
+        # Surface A — env-config-level shaping. Only fills in 0-valued slots
+        # so eval semantics are unchanged (eval container builds its own env).
+        cfg.rewards.step_penalty = SHAPING_STEP_PENALTY
+        cfg.rewards.stationary_penalty = SHAPING_STATIONARY_PENALTY
+        cfg.rewards.invalid_action = SHAPING_INVALID_ACTION
+        cfg.rewards.own_base_destroyed = SHAPING_OWN_BASE_DESTROYED
+    env = Bomberman(cfg)
+    if shape_rewards:
+        _wrap_offensive_rewards(env)
+    return env
 
 
-def _make_env_pool(novice: bool = True, advanced_prob: float = 0.0) -> dict[bool, Bomberman]:
+def _make_env_pool(novice: bool = True, advanced_prob: float = 0.0,
+                   shape_rewards: bool = True) -> dict[bool, Bomberman]:
+    """Build the training-side env pool. ``shape_rewards`` defaults True here
+    because every caller is a training collector; eval/benchmark constructs its
+    own envs via ``make_env`` directly with default ``shape_rewards=False``."""
     if novice and advanced_prob > 0.0:
-        return {True: make_env(True), False: make_env(False)}
-    return {novice: make_env(novice)}
+        return {True: make_env(True, shape_rewards=shape_rewards),
+                False: make_env(False, shape_rewards=shape_rewards)}
+    return {novice: make_env(novice, shape_rewards=shape_rewards)}
 
 
 def _select_env(envs: dict[bool, Bomberman], advanced_prob: float, rng) -> Bomberman:
@@ -146,8 +293,14 @@ def _compute_gae(rewards, values, dones, gamma: float, lam: float,
 @torch.no_grad()
 def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
                                gamma, lam, n_episodes, rng, advanced_prob=0.0,
-                               learner_slots=None):
-    """Run *n_episodes* self-play games. Returns (trajs, learner_returns, opp_returns)."""
+                               learner_slots=None, shape_rewards=True):
+    """Run *n_episodes* self-play games. Returns (trajs, learner_returns, opp_returns).
+
+    ``shape_rewards`` controls the trajectory-level shaping (PBRS, oscillation
+    penalty, turn-spam penalty). Env-level shaping (step penalty, multipliers,
+    own_base_destroyed=0) is set when the env was built — see ``make_env``.
+    Set both to ``False`` for a polish phase that optimises raw eval reward.
+    """
     model.eval()
     all_trajs: list[dict] = []
     learner_returns: list[float] = []
@@ -173,6 +326,18 @@ def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
         traj = {a: _new_trajectory() for a in learner_ids}
         opened = {a: False for a in learner_ids}
         memories = {a: _fresh_learner_memory(episode_novice) for a in learner_ids}
+        # PBRS bookkeeping: prev_phi[a] holds Φ(s_t-1) — used to shape r_t-1.
+        prev_phi: dict[str, float] = {a: 0.0 for a in learner_ids}
+        # Anti-oscillation bookkeeping: per-agent rolling (action, pos) history
+        # and a pending penalty that gets folded into the next reward we record
+        # (which is the reward attributed to the action that completed the cycle).
+        action_history: dict[str, deque] = {
+            a: deque(maxlen=OSCILLATION_WINDOW) for a in learner_ids
+        }
+        pending_penalty: dict[str, float] = {a: 0.0 for a in learner_ids}
+        # Consecutive turn-action count per agent. Reset when the agent does
+        # any non-turn action (FORWARD / BACKWARD / STAY / PLACE_BOMB).
+        consecutive_turns: dict[str, int] = {a: 0 for a in learner_ids}
 
         while True:
             agent = env.agent_selection
@@ -186,20 +351,54 @@ def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
             obs = env.observe(agent)
 
             if agent in learner_ids:
-                if opened[agent]:
-                    traj[agent]["rewards"].append(reward)
-                    traj[agent]["dones"].append(0.0)
                 mem = memories[agent]
                 try:
                     mem.update(parse_observation(obs))
                 except Exception:
                     pass
+                # PBRS: Φ(s_t). Shape the just-completed transition's reward
+                # with γ·Φ(s_t) − Φ(s_{t-1}); store Φ(s_t) for next time.
+                # Also fold in any pending oscillation / turn-spam penalty
+                # attributed to the action that produced this transition.
+                # All three shaping terms gated by shape_rewards so the polish
+                # phase can train against the raw env reward.
+                phi_curr = _compute_phi(obs, mem) if shape_rewards else 0.0
+                if opened[agent]:
+                    if shape_rewards:
+                        shaped = (
+                            reward
+                            + gamma * phi_curr
+                            - prev_phi[agent]
+                            + pending_penalty[agent]
+                        )
+                    else:
+                        shaped = reward
+                    traj[agent]["rewards"].append(shaped)
+                    traj[agent]["dones"].append(0.0)
+                    pending_penalty[agent] = 0.0
+                prev_phi[agent] = phi_curr
                 vc, bv, sc, mk, smap = obs_to_arrays(obs, memory=mem)
                 tv = lambda a: torch.as_tensor(a, device=device).unsqueeze(0)  # noqa: E731
                 action, logp, value, _, hidden[agent] = model.act(
                     tv(vc), tv(bv), tv(sc), tv(mk), tv(smap), hidden[agent]
                 )
                 a_int = int(action.item())
+                loc_tuple = _agent_xy(obs)
+                if shape_rewards:
+                    # Anti-oscillation: this action closes a 2- or 3-step
+                    # (action, position) cycle → queue penalty against it.
+                    if _is_oscillating(action_history[agent], a_int, loc_tuple):
+                        pending_penalty[agent] += SHAPING_OSCILLATION_PENALTY
+                    # Turn-spam: agent spinning in place without forward motion.
+                    # Penalises every turn after TURN_SPAM_THRESHOLD consecutive
+                    # turns; a FORWARD / BACKWARD / STAY / BOMB resets the count.
+                    if a_int in (int(Action.LEFT), int(Action.RIGHT)):
+                        consecutive_turns[agent] += 1
+                        if consecutive_turns[agent] > TURN_SPAM_THRESHOLD:
+                            pending_penalty[agent] += SHAPING_TURN_SPAM_PENALTY
+                    else:
+                        consecutive_turns[agent] = 0
+                action_history[agent].append((a_int, loc_tuple))
                 traj[agent]["viewcone"].append(vc)
                 traj[agent]["baseview"].append(bv)
                 traj[agent]["scalars"].append(sc)
@@ -296,15 +495,17 @@ _SP: dict = {}   # self-play worker globals
 _TE: dict = {}   # teacher worker globals
 
 
-def _sp_worker_init(opponent_specs, n_learners, novice, advanced_prob, gamma, lam, learner_slots):
+def _sp_worker_init(opponent_specs, n_learners, novice, advanced_prob,
+                    gamma, lam, learner_slots, shape_rewards):
     torch.set_num_threads(1)
     from model import RecurrentMaskableActorCritic
     _SP.update(
         device=torch.device("cpu"),
         model=RecurrentMaskableActorCritic().to("cpu").eval(),
-        envs=_make_env_pool(novice, advanced_prob),
+        envs=_make_env_pool(novice, advanced_prob, shape_rewards=shape_rewards),
         specs=opponent_specs, n_learners=n_learners, gamma=gamma, lam=lam,
         advanced_prob=advanced_prob, learner_slots=learner_slots,
+        shape_rewards=shape_rewards,
     )
 
 
@@ -317,12 +518,15 @@ def _sp_worker_task(args):
         _SP["envs"], _SP["model"], _SP["device"], _SP["specs"],
         _SP["n_learners"], _SP["gamma"], _SP["lam"], n_episodes, rng,
         _SP["advanced_prob"], _SP["learner_slots"],
+        shape_rewards=_SP["shape_rewards"],
     )
 
 
 def _te_worker_init(novice):
     torch.set_num_threads(1)
-    _TE.update(env=make_env(novice), novice=novice)
+    # Teacher dataset = BC heuristic demonstrations — keep RAW reward (shaping is
+    # for the RL learner, not for cloning targets).
+    _TE.update(env=make_env(novice, shape_rewards=False), novice=novice)
 
 
 def _te_worker_task(args):
@@ -372,6 +576,7 @@ class SelfPlayCollector:
         gamma: float = 0.99,
         lam: float = 0.95,
         num_workers: int = 1,
+        shape_rewards: bool = True,
     ):
         self.model = model
         self.device = device
@@ -383,8 +588,12 @@ class SelfPlayCollector:
         self.gamma = gamma
         self.lam = lam
         self.num_workers = max(1, int(num_workers))
+        self.shape_rewards = bool(shape_rewards)
         self._pool = None
-        self.envs = _make_env_pool(novice, self.advanced_prob) if self.num_workers == 1 else None
+        self.envs = (
+            _make_env_pool(novice, self.advanced_prob, shape_rewards=self.shape_rewards)
+            if self.num_workers == 1 else None
+        )
 
     # Allow Stage 3 to swap in a larger opponent pool after a league snapshot.
     def set_opponent_specs(self, specs) -> None:
@@ -400,6 +609,7 @@ class SelfPlayCollector:
                 initargs=(
                     self.opponent_specs, self.n_learners, self.novice,
                     self.advanced_prob, self.gamma, self.lam, self.learner_slots,
+                    self.shape_rewards,
                 ),
             )
 
@@ -448,6 +658,7 @@ class SelfPlayCollector:
                 self.envs, self.model, self.device, self.opponent_specs,
                 self.n_learners, self.gamma, self.lam, 1, rng,
                 self.advanced_prob, self.learner_slots,
+                shape_rewards=self.shape_rewards,
             )
             trajs.extend(tj); lr.extend(l); opr.extend(o)
         return trajs, lr, opr
@@ -476,7 +687,7 @@ def collect_teacher_dataset(teacher_factory=None, n_episodes: int = 48, novice: 
     num_workers = max(1, int(num_workers))
 
     if num_workers == 1:
-        env = make_env(novice)
+        env = make_env(novice, shape_rewards=False)
         seqs = []
         it = range(n_episodes)
         if progress:

@@ -15,6 +15,60 @@ import torch.nn as nn
 from rollout import RolloutBatch
 
 
+class RunningReturnNorm:
+    """Welford running mean/std over scalar returns.
+
+    The critic sees ``returns / std`` (no mean subtraction — we want to preserve
+    sign so positive returns stay positive), which makes the value loss scale-
+    invariant and stable across reward magnitudes. ``targets_from(...)`` rescales
+    the GAE returns before they hit the value head; ``unnormalised(...)`` undoes
+    the rescaling for logging or downstream consumers.
+
+    A single shared instance lives on the trainer and is updated once per PPO
+    batch. ``min_count`` and ``eps`` keep early-training values finite.
+    """
+
+    def __init__(self, eps: float = 1e-8, min_count: int = 8):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = 0
+        self.eps = eps
+        self.min_count = min_count
+
+    def update(self, x: torch.Tensor | np.ndarray) -> None:
+        flat = np.asarray(x).reshape(-1).astype(np.float64)
+        if flat.size == 0:
+            return
+        batch_mean = flat.mean()
+        batch_var = flat.var()
+        batch_count = flat.size
+        if self.count == 0:
+            self.mean = float(batch_mean)
+            self.var = float(batch_var)
+            self.count = int(batch_count)
+            return
+        delta = batch_mean - self.mean
+        tot = self.count + batch_count
+        new_mean = self.mean + delta * batch_count / tot
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + delta**2 * self.count * batch_count / tot
+        self.mean = float(new_mean)
+        self.var = float(m2 / tot)
+        self.count = int(tot)
+
+    def std(self) -> float:
+        if self.count < self.min_count:
+            return 1.0
+        return float(np.sqrt(self.var) + self.eps)
+
+    def normalise(self, x: torch.Tensor) -> torch.Tensor:
+        return x / self.std()
+
+    def unnormalise(self, x: torch.Tensor) -> torch.Tensor:
+        return x * self.std()
+
+
 def ppo_update(
     model,
     optimizer,
@@ -28,6 +82,7 @@ def ppo_update(
     entropy_coef: float = 0.01,
     max_grad_norm: float = 0.5,
     value_only: bool = False,
+    return_norm: RunningReturnNorm | None = None,
 ) -> dict:
     """One PPO update over the rollout batch.
 
@@ -50,6 +105,18 @@ def ppo_update(
     adv = batch.advantages.to(device)
     ret = batch.returns.to(device)
     val_old = batch.values.to(device)
+
+    # Return normalisation: update running stats with this batch's returns,
+    # then rescale the regression targets + value-old (which the value head
+    # was trained against in the previous iteration's scale). The critic
+    # outputs are in *normalised* units throughout, so adv is also implicitly
+    # rescaled — but adv has already been advantage-normalised at rollout
+    # collection time, so we leave it untouched.
+    if return_norm is not None:
+        return_norm.update(ret.detach().cpu().numpy())
+        scale = return_norm.std()
+        ret = ret / scale
+        val_old = val_old / scale
 
     stats = {"policy_loss": [], "value_loss": [], "entropy": [], "approx_kl": [], "clipfrac": []}
 
