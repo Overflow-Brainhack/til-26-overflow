@@ -1,14 +1,20 @@
 {
-  "iteration": 0,
-  "branch": null,
+  "iteration": 1,
+  "branch": "tuning/auto",
   "best_eval_score": null,
   "best_eval_speed": null,
   "best_eval_tag": null,
   "best_checkpoint": "ae_rl/checkpoints/stage3_league_best.pt",
   "best_checkpoint_internal_score": 294,
   "best_git_commit": null,
-  "in_flight": null,
+  "in_flight": {
+    "kind": "submission",
+    "tag": "tune-001-baseline-stage3-best",
+    "submitted_at": null,
+    "hypothesis": "Baseline: submit stage3_league_best.pt to establish first real eval score",
+    "from_training_summary": null
+  },
   "paused_for_human": null,
-  "last_updated_at": null,
-  "notes": "Initial state. best_checkpoint is the Stage 3 league best (internal validation +294 vs heuristic baseline) — never submitted to the evaluator, so best_eval_score is null. First iteration should submit this checkpoint to establish a real eval-score baseline before changing anything."
+  "last_updated_at": "2026-05-24T08:34:00Z",
+  "notes": "Iteration 1: baseline submission of stage3_league_best.pt (internal +294). No prior eval scores."
 }

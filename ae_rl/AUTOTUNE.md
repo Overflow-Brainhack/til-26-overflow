@@ -107,6 +107,8 @@ END
    python rl_autorun.py &  # Bash(run_in_background=True)
    ```
    Needs `DISCORD_TOKEN` + `DISCORD_CHANNEL_ID` in `.env`. Without these, do not submit — the eval will land in Discord but never reach `eval_results.jsonl`, and `--await-eval` will hang.
+
+   **Dependency note:** `rl_autorun.py` and `discord_watcher.py` use `discord.py-self` (selfbot, user-token auth), NOT `discord.py`. The package is `discord.py-self>=2.1.0` — listed in `requirements-dev.txt` and `pyproject.toml`. If you see `ModuleNotFoundError: No module named 'discord'`, install via `pip install discord.py-self` (do NOT install plain `discord.py` — it is API-incompatible).
 2. **Docker reachable?** `docker info` exits 0.
 3. **gcloud authenticated?** `gcloud auth print-access-token` exits 0.
 4. **Checkpoint staged.** `rl_autorun.py --submit` calls `stage_ae_checkpoint` itself, which respects `RL_AUTORUN_STAGE` (default `2`) and `RL_AUTORUN_CHECKPOINT` (default `best`). For Stage 3 best, set `RL_AUTORUN_STAGE=3 RL_AUTORUN_CHECKPOINT=best`.
