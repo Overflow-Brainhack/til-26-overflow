@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import tomllib
 from collections import deque
 from dataclasses import asdict, dataclass
@@ -203,6 +204,62 @@ def parse_result(content: str) -> EvalResult | None:
     )
 
 
+# ── eval-result polling (for autonomous callers) ───────────────────────────────
+
+
+def await_eval(
+    challenge: str,
+    tag: str,
+    *,
+    since: datetime,
+    timeout_s: float,
+    poll_interval_s: float = 5.0,
+    logger: logging.Logger | None = None,
+) -> dict | None:
+    """Block until ``EVAL_LOG_PATH`` contains an entry matching ``challenge`` + ``tag``
+    with ``timestamp >= since``, or until ``timeout_s`` elapses.
+
+    Returns the matching JSON entry (a dict) or None on timeout. Reads the file
+    fresh on every poll (entries land here when a separately-running
+    discord_watcher or rl_autorun ingests an evaluation message from Discord),
+    so this works whether the watcher is run by a human or by Claude in the
+    background. Stale entries from previous submissions are filtered via the
+    ``since`` timestamp — pass ``datetime.now(timezone.utc)`` at submit time.
+    """
+    deadline = time.time() + timeout_s
+    log = logger or logging.getLogger("rl_autorun")
+    last_line_count = 0
+    while time.time() < deadline:
+        if EVAL_LOG_PATH.exists():
+            try:
+                with EVAL_LOG_PATH.open("r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            except OSError as exc:
+                log.warning("Could not read %s: %s", EVAL_LOG_PATH, exc)
+                lines = []
+            new_lines = lines[last_line_count:]
+            last_line_count = len(lines)
+            for raw in new_lines:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("challenge") != challenge or entry.get("tag") != tag:
+                    continue
+                ts_raw = entry.get("timestamp", "")
+                try:
+                    ts = datetime.fromisoformat(ts_raw)
+                except ValueError:
+                    ts = None
+                if ts is None or ts >= since:
+                    return entry
+        time.sleep(poll_interval_s)
+    return None
+
+
 # ── subprocess runner ──────────────────────────────────────────────────────────
 
 
@@ -298,7 +355,8 @@ def _resolve_rl_checkpoint(logger: logging.Logger) -> Path | None:
         if key == "current":
             return STAGE3_CURRENT_CKPT if STAGE3_CURRENT_CKPT.exists() else None
 
-    path = Path(raw).expanduser()
+    # Fall-through: treat raw_key as an explicit path (absolute or repo-relative).
+    path = Path(raw_key).expanduser()
     if not path.is_absolute():
         path = REPO_ROOT / path
     return path if path.exists() else None
@@ -321,6 +379,18 @@ def stage_ae_checkpoint(logger: logging.Logger, dry_run: bool = False) -> bool:
             "or an explicit .pt path."
         )
         return False
+
+    # If src and dst resolve to the same file (e.g. RL_AUTORUN_TARGET points
+    # back into ae_rl/checkpoints/), skip the copy. Windows shutil.copy2 to the
+    # same path raises WinError 32 ("file in use"); POSIX would silently
+    # truncate. The checkpoint is already where Docker will find it.
+    try:
+        same_file = src.resolve() == dst.resolve()
+    except OSError:
+        same_file = src == dst
+    if same_file:
+        logger.info("Checkpoint already in place at %s; skipping copy.", dst)
+        return True
 
     logger.info("Staging AE RL checkpoint: %s -> %s", src, dst)
     if dry_run:
@@ -420,11 +490,6 @@ async def _run_submit_locked(
         logger.error("AE checkpoint staging failed — aborting submission")
         return
 
-    # token = await _gcloud_token(logger)
-    # if not token:
-    #     logger.error("Could not fetch service-account token — aborting submission")
-    #     return
-
     gcloud_env = dict(os.environ)
     gcloud_env["CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT"] = _SERVICE_ACCOUNT
 
@@ -439,7 +504,11 @@ async def _run_submit_locked(
             logger.error("docker build failed (rc=%d) — aborting", rc)
             return
 
-    logger.info("=== docker login ===")
+    # logger.info("=== docker login ===")
+    # token = await _gcloud_token(logger)
+    # if not token:
+    #     logger.error("Could not fetch service-account token — aborting submission")
+    #     return
     token_proc = await asyncio.create_subprocess_exec(
         gcloud,
         "auth",
@@ -654,16 +723,73 @@ class WatcherClient(discord.Client):
 
 
 def main() -> None:
+    args = sys.argv[1:]
+    # --await-eval is a machine-readable mode: its single useful output is the
+    # JSON eval result on stdout, so route log lines to stderr to keep the
+    # streams separable for autonomous callers.
+    log_stream = sys.stderr if (args and args[0] == "--await-eval") else sys.stdout
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        stream=sys.stdout,
+        stream=log_stream,
     )
     logger = logging.getLogger("rl_autorun")
 
+    # Autonomous-caller mode: poll the eval-results log for a result and exit.
+    #   python rl_autorun.py --await-eval CHALLENGE TAG [--timeout SECONDS] [--since-iso ISO]
+    # Default timeout = 1800s (30 min); default since = now-UTC (only counts
+    # results that landed after this command started, so a stale entry from a
+    # prior submission with the same tag is ignored).
+    if args and args[0] == "--await-eval":
+        if len(args) < 3 or args[1].lower() not in VALID_CHALLENGES:
+            logger.error(
+                "Usage: python rl_autorun.py --await-eval CHALLENGE TAG "
+                "[--timeout SECONDS] [--since-iso ISO]"
+            )
+            sys.exit(2)
+        challenge = args[1].lower()
+        tag = args[2]
+        timeout_s = 1800.0
+        since = datetime.now(timezone.utc)
+        i = 3
+        while i < len(args):
+            if args[i] == "--timeout" and i + 1 < len(args):
+                try:
+                    timeout_s = float(args[i + 1])
+                except ValueError:
+                    logger.error("--timeout expects a number, got %r", args[i + 1])
+                    sys.exit(2)
+                i += 2
+            elif args[i] == "--since-iso" and i + 1 < len(args):
+                try:
+                    since = datetime.fromisoformat(args[i + 1])
+                except ValueError:
+                    logger.error(
+                        "--since-iso expects an ISO-8601 timestamp, got %r", args[i + 1]
+                    )
+                    sys.exit(2)
+                i += 2
+            else:
+                logger.error("Unknown argument: %s", args[i])
+                sys.exit(2)
+        logger.info(
+            "Awaiting eval for %s:%s (timeout=%.0fs, since=%s, log=%s)",
+            challenge, tag, timeout_s, since.isoformat(), EVAL_LOG_PATH,
+        )
+        result = await_eval(
+            challenge, tag, since=since, timeout_s=timeout_s, logger=logger
+        )
+        if result is None:
+            logger.error(
+                "Timed out after %.0fs waiting for %s:%s", timeout_s, challenge, tag
+            )
+            sys.exit(1)
+        # Machine-readable single-line JSON on stdout; logs are on stderr.
+        print(json.dumps(result))
+        return
+
     # One-shot mode: python rl_autorun.py --submit CHALLENGE [TAG]
-    args = sys.argv[1:]
     if args and args[0] == "--submit":
         if len(args) < 2 or args[1].lower() not in VALID_CHALLENGES:
             logger.error("Usage: python rl_autorun.py --submit CHALLENGE [TAG]")

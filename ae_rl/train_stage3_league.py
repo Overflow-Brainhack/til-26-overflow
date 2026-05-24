@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from pathlib import Path
 
 import torch
 from tqdm.auto import tqdm, trange
@@ -29,13 +30,13 @@ from tqdm.auto import tqdm, trange
 import common  # noqa: F401  (path bootstrap)
 from common import (
     LEAGUE_DIR,
-    STAGE1_CKPT,
     STAGE2_CKPT,
     STAGE3_BEST_CKPT,
     STAGE3_CKPT,
     get_device,
     seed_everything,
 )
+from run_summary import RunSummary, default_summary_path
 from controllers import (
     berserker_spec,
     heuristic_spec,
@@ -59,13 +60,17 @@ from validation import validate_model
 
 def _load_start_model(device):
     for path, label in ((STAGE3_CKPT, "resume Stage 3"),
-                        (STAGE2_CKPT, "warm-start from Stage 2"),
-                        (STAGE1_CKPT, "warm-start from BC")):
+                        (STAGE2_CKPT, "warm-start from Stage 2")):
         if path.exists():
             print(f"{label}: {path}")
             return load_checkpoint(path, device)
-    print("No prior checkpoint — starting fresh (run earlier stages first for a jump-start).")
-    return RecurrentMaskableActorCritic().to(device)
+    raise FileNotFoundError(
+        "Stage 3 requires a prerequisite checkpoint. Looked for:\n"
+        f"  {STAGE3_CKPT}  (resume an in-progress Stage 3 run)\n"
+        f"  {STAGE2_CKPT}  (warm-start from Stage 2)\n"
+        "Neither exists. Run train_stage2_ppo.py first (which in turn requires "
+        "train_stage1_bc.py)."
+    )
 
 
 def _checkpoint_score(path) -> float:
@@ -259,11 +264,23 @@ def main():
                          "already-converged checkpoint to remove shaping bias and align "
                          "the gradient with the real eval objective.")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--summary-json", type=str, default="",
+                    help="path for the run-summary JSON (default: ae_rl/runs/stage3_league/latest.json). "
+                         "Read this from an autonomous caller instead of parsing stdout.")
     args = ap.parse_args()
 
+    summary_path = Path(args.summary_json) if args.summary_json else default_summary_path("stage3_league")
+    with RunSummary(stage="stage3_league", args=vars(args), path=summary_path) as summary:
+        _run_stage3(args, summary)
+
+
+def _run_stage3(args, summary: RunSummary):
     seed_everything(args.seed)
     device = get_device()
+    summary.set("device", str(device))
+    summary.set("summary_path", str(summary.path))
     print(f"Device: {device}")
+    print(f"Run summary: {summary.path}")
 
     model = _load_start_model(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -279,6 +296,8 @@ def main():
         print(f"Seeded league with {seed_path}")
 
     specs = _build_opponent_specs(args)
+    summary.set("opponent_kinds", sorted({s["kind"] for s in specs}))
+    summary.set("opponent_pool_size", len(specs))
     collector = SelfPlayCollector(
         model, device,
         opponent_specs=specs,
@@ -294,9 +313,12 @@ def main():
         print(f"Arena mix: novice with advanced_prob={args.advanced_prob:.2f}")
 
     gen = len(league_checkpoints(LEAGUE_DIR))
+    summary.set("starting_generation", gen)
     best_validation = _checkpoint_score(STAGE3_BEST_CKPT)
     if best_validation > float("-inf"):
         print(f"Best validation checkpoint: {STAGE3_BEST_CKPT} score={best_validation:+.1f}")
+        summary.set("best_validation_score", best_validation)
+        summary.set("best_checkpoint", str(STAGE3_BEST_CKPT))
 
     # ── critic warm-up ───────────────────────────────────────────────────────
     # Stage 2's value head was fitted against (heuristic-only) opponents under the
@@ -343,6 +365,21 @@ def main():
             f"{stats['n_seqs']}seq {dt:.1f}s"
         )
 
+        summary.increment("updates_completed")
+        summary.set("latest_checkpoint", str(STAGE3_CKPT))
+        summary.set("current_generation", gen)
+        summary.record("updates", {
+            "update": update,
+            "ret_mean": float(stats["learner_return_mean"]),
+            "opp_ret_mean": float(stats["opp_return_mean"]),
+            "policy_loss": float(losses["policy_loss"]),
+            "value_loss": float(losses["value_loss"]),
+            "entropy": float(losses["entropy"]),
+            "approx_kl": float(losses["approx_kl"]),
+            "seconds": round(dt, 2),
+            "gen": gen,
+        })
+
         val = None
         rolled_back = False
         validation_due = args.validate_every > 0 and update % args.validate_every == 0
@@ -361,8 +398,18 @@ def main():
                 f"  [val] score={val['score']:+.1f} rl={val['rl_mean']:.1f} "
                 f"heur={val['heur_baseline']:.1f} suites={val['num_suites']}"
             )
+            summary.record("validations", {
+                "update": update,
+                "score": float(val["score"]),
+                "rl_mean": float(val["rl_mean"]),
+                "heur_baseline": float(val["heur_baseline"]),
+                "num_suites": int(val.get("num_suites", 0)),
+                "baseline": args.validation_baseline,
+            })
             if val["score"] > best_validation:
                 best_validation = val["score"]
+                summary.set("best_validation_score", float(best_validation))
+                summary.set("best_checkpoint", str(STAGE3_BEST_CKPT))
                 save_checkpoint(STAGE3_BEST_CKPT, model, meta={
                     "stage": "league_best",
                     "update": update,
@@ -402,14 +449,21 @@ def main():
                 save_checkpoint(snap, model, meta={"stage": "league", "update": update})
                 gen += 1
                 tqdm.write(f"  + league snapshot {snap.name}  (rebuilding opponent pool)")
+                summary.record("snapshots", {"update": update, "path": str(snap), "gen": gen})
+                summary.set("current_generation", gen)
                 collector.set_opponent_specs(_build_opponent_specs(args))
 
         if update % args.save_every == 0 or update == args.updates:
             save_checkpoint(STAGE3_CKPT, model, meta={"stage": "league", "update": update,
                                                       "learner_return_mean": stats["learner_return_mean"]})
 
+        # Persist progress every update so a polling reader sees fresh state.
+        summary.write()
+
     collector.close()
     save_checkpoint(STAGE3_CKPT, model, meta={"stage": "league", "update": args.updates})
+    summary.set("latest_checkpoint", str(STAGE3_CKPT))
+    summary.set("final_generation", gen)
     print(f"\nSaved Stage-3 checkpoint → {STAGE3_CKPT}")
     print("Benchmark:  python ae_rl/benchmark.py --ckpt ae_rl/checkpoints/stage3_league.pt")
 

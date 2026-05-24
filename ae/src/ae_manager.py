@@ -17,11 +17,11 @@ from typing import Any, Optional
 from constants import Action
 from map_memory import MapMemory, get_shared_memory
 from observation import parse_observation
-from policy import Policy
-from rl_policy import RLPolicy
-from layered_rl_policy import LayeredRLPolicy
+from policies.policy import Policy
+from policies.rl_policy import RLPolicy
+from policies.layered_rl_policy import LayeredRLPolicy
 
-from edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy
+from policies.edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy
 
 
 # Default cache path: bundled into the Docker image alongside source.
@@ -82,7 +82,18 @@ class AEManager:
         # self._policy: Policy = policy or BerserkerPolicy()
         # self._policy: Policy = policy or HeuristicPolicy()
         # self._policy: Policy = policy or RLPolicy()
-        self._policy: Policy = policy or LayeredRLPolicy()
+        if policy is not None:
+            self._policy = policy
+        else:
+            # RL load can fail (missing checkpoint, arch mismatch, corrupt file).
+            # Crashing __init__ takes down the server; fall back to the heuristic
+            # so the round still scores. Next /reset re-tries the RL load.
+            try:
+                self._policy = LayeredRLPolicy()
+            except Exception as exc:
+                print(f"[AEManager] LayeredRLPolicy load failed ({exc!r}); "
+                      f"falling back to heuristic.")
+                self._policy = HeuristicPolicy(**DEFAULT_POLICY_KWARGS)
 
     def _maybe_load_cache(self, path: Path) -> None:
         if not path.exists():

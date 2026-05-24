@@ -24,7 +24,7 @@ from constants import AGENT_MAX_HEALTH, Action, BOMB_TIMER, DIR_VECTOR
 from map_memory import MapMemory
 from observation import ParsedObs
 from pathfinding import first_action_to, from_can_traverse, next_pos_after
-from policy import Policy
+from policies.policy import Policy
 from threat import cells_in_blast, imminent_danger, project_danger
 
 

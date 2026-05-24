@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from pathlib import Path
 
 import torch
 from tqdm.auto import tqdm, trange
@@ -32,10 +33,18 @@ from common import (
     get_device,
     seed_everything,
 )
-from controllers import heuristic_spec, stochastic_heuristic_spec
+from controllers import (
+    berserker_spec,
+    heuristic_spec,
+    pure_collector_spec,
+    random_spec,
+    stochastic_heuristic_spec,
+    tactical_spec,
+)
 from model import RecurrentMaskableActorCritic, load_checkpoint, save_checkpoint
 from ppo import RunningReturnNorm, ppo_update
 from rollout import SelfPlayCollector, default_workers
+from run_summary import RunSummary, default_summary_path
 from validation import validate_model
 
 
@@ -46,9 +55,12 @@ def _load_start_model(device):
     if STAGE1_CKPT.exists():
         print(f"Warm-starting from BC checkpoint {STAGE1_CKPT}")
         return load_checkpoint(STAGE1_CKPT, device)
-    print("No prior checkpoint found — starting from a fresh network "
-          "(run train_stage1_bc.py first for a proper jump-start).")
-    return RecurrentMaskableActorCritic().to(device)
+    raise FileNotFoundError(
+        "Stage 2 requires a prerequisite checkpoint. Looked for:\n"
+        f"  {STAGE2_CKPT}  (resume an in-progress Stage 2 run)\n"
+        f"  {STAGE1_CKPT}  (warm-start from BC)\n"
+        "Neither exists. Run train_stage1_bc.py first."
+    )
 
 
 def _checkpoint_score(path) -> float:
@@ -61,20 +73,61 @@ def _checkpoint_score(path) -> float:
         return float("-inf")
 
 
-def _build_opponent_specs(args) -> list[dict]:
-    p = max(0.0, min(1.0, args.stochastic_heuristic_prob))
-    if p <= 0:
-        return [heuristic_spec()]
-    if p >= 1:
-        return [stochastic_heuristic_spec(args.stochastic_jitter, args.stochastic_action_noise)]
+_POOL_GRANULARITY = 100
 
-    slots = 20
-    n_stochastic = max(1, round(slots * p))
-    n_fixed = max(1, slots - n_stochastic)
-    return (
-        [heuristic_spec()] * n_fixed
-        + [stochastic_heuristic_spec(args.stochastic_jitter, args.stochastic_action_noise)] * n_stochastic
-    )
+
+def _build_opponent_specs(args) -> list[dict]:
+    """Probability-weighted opponent pool for Stage 2.
+
+    Heuristic family (deterministic + jittered) stays dominant — Stage 2's job
+    is to improve on the heuristic, so most opponents should still be it. A
+    small share of diverse opponents (berserker, pure-collector, random,
+    tactical) widens the distribution beyond EditedHeuristicPolicyV2 so the
+    learner doesn't just relearn the policy it was BC'd from.
+
+    Pool layout: each kind gets ``round(_POOL_GRANULARITY * prob)`` entries;
+    ``random.choice`` over the pool samples each kind with frequency ≈ prob.
+    Probs that sum to >1 are renormalised. Unlike Stage 3, no league snapshots
+    fill the remainder — anything not assigned is wasted (zero-weight slots).
+    """
+    probs = {
+        "heuristic": max(0.0, min(1.0, args.heuristic_prob)),
+        "stochastic_heuristic": max(0.0, min(1.0, args.stochastic_heuristic_prob)),
+        "berserker": max(0.0, min(1.0, args.berserker_prob)),
+        "pure_collector": max(0.0, min(1.0, args.pure_collector_prob)),
+        "random": max(0.0, min(1.0, args.random_prob)),
+        "tactical": max(0.0, min(1.0, args.tactical_prob)),
+    }
+    total = sum(probs.values())
+    if total > 1.0:
+        probs = {k: v / total for k, v in probs.items()}
+
+    spec_builders = {
+        "heuristic": lambda: heuristic_spec(),
+        "stochastic_heuristic": lambda: stochastic_heuristic_spec(
+            args.stochastic_jitter, args.stochastic_action_noise
+        ),
+        "berserker": lambda: berserker_spec(),
+        "pure_collector": lambda: pure_collector_spec(),
+        "random": lambda: random_spec(),
+        "tactical": lambda: tactical_spec(),
+    }
+
+    specs: list[dict] = []
+    counts: dict[str, int] = {}
+    for kind, p in probs.items():
+        c = round(_POOL_GRANULARITY * p)
+        counts[kind] = c
+        specs.extend(spec_builders[kind]() for _ in range(c))
+
+    if not specs:
+        # All probs zeroed — fall back to a single heuristic so training runs.
+        specs = [heuristic_spec()]
+        counts["heuristic"] = 1
+
+    parts = [f"{c}x{kind}" for kind, c in counts.items() if c > 0]
+    print(f"Stage 2 opponents ({len(specs)} total): " + " + ".join(parts))
+    return specs
 
 
 def _parse_learner_slots(raw: str) -> list[str]:
@@ -101,12 +154,22 @@ def main():
     ap.add_argument("--save-every", type=int, default=10)
     ap.add_argument("--snapshot-every", type=int, default=50,
                     help="save a unique per-run checkpoint every N updates; 0 disables")
-    ap.add_argument("--stochastic-heuristic-prob", type=float, default=0.0,
+    ap.add_argument("--heuristic-prob", type=float, default=0.50,
+                    help="fraction of opponents drawn from the strong EditedHeuristicPolicyV2 (deterministic)")
+    ap.add_argument("--stochastic-heuristic-prob", type=float, default=0.30,
                     help="fraction of heuristic opponents built from randomized heuristic parameters")
     ap.add_argument("--stochastic-jitter", type=float, default=0.35,
                     help="relative jitter for stochastic heuristic numeric knobs")
     ap.add_argument("--stochastic-action-noise", type=float, default=0.03,
                     help="chance stochastic heuristic takes a random legal action")
+    ap.add_argument("--berserker-prob", type=float, default=0.07,
+                    help="fraction of opponents drawn from BerserkerPolicy (rushes enemy bases)")
+    ap.add_argument("--pure-collector-prob", type=float, default=0.05,
+                    help="fraction of opponents that only collect tiles, never bomb")
+    ap.add_argument("--random-prob", type=float, default=0.05,
+                    help="fraction of opponents that pick uniform random legal actions")
+    ap.add_argument("--tactical-prob", type=float, default=0.03,
+                    help="fraction of opponents drawn from TacticalPolicy (1-step lookahead, non-heuristic)")
     ap.add_argument("--advanced-prob", type=float, default=0.0,
                     help="when training on --novice, probability a rollout episode uses an advanced random map")
     ap.add_argument("--validate-every", type=int, default=0,
@@ -136,11 +199,23 @@ def main():
                     help="disable ALL training-time reward shaping and train against "
                          "raw env reward (polish phase on a converged checkpoint)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--summary-json", type=str, default="",
+                    help="path for the run-summary JSON (default: ae_rl/runs/stage2_ppo/latest.json). "
+                         "Read this from an autonomous caller instead of parsing stdout.")
     args = ap.parse_args()
 
+    summary_path = Path(args.summary_json) if args.summary_json else default_summary_path("stage2_ppo")
+    with RunSummary(stage="stage2_ppo", args=vars(args), path=summary_path) as summary:
+        _run_stage2(args, summary)
+
+
+def _run_stage2(args, summary: RunSummary):
     seed_everything(args.seed)
     device = get_device()
+    summary.set("device", str(device))
+    summary.set("summary_path", str(summary.path))
     print(f"Device: {device}")
+    print(f"Run summary: {summary.path}")
 
     model = _load_start_model(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -153,6 +228,8 @@ def main():
         print(f"Stage-2 snapshots: {snapshot_dir}")
 
     opponent_specs = _build_opponent_specs(args)
+    summary.set("opponent_kinds", sorted({s["kind"] for s in opponent_specs}))
+    summary.set("opponent_pool_size", len(opponent_specs))
     collector = SelfPlayCollector(
         model, device,
         opponent_specs=opponent_specs,
@@ -200,6 +277,8 @@ def main():
     best_validation = _checkpoint_score(STAGE2_BEST_CKPT)
     if best_validation > float("-inf"):
         print(f"Best validation checkpoint: {STAGE2_BEST_CKPT} score={best_validation:+.1f}")
+        summary.set("best_validation_score", best_validation)
+        summary.set("best_checkpoint", str(STAGE2_BEST_CKPT))
     bar = trange(1, args.updates + 1, desc="PPO", unit="upd")
     for update in bar:
         val = None
@@ -225,6 +304,21 @@ def main():
             f"{stats['n_seqs']}seq {dt:.1f}s"
         )
 
+        summary.increment("updates_completed")
+        summary.set("latest_checkpoint", str(STAGE2_CKPT))
+        # Lightweight per-update record — keep it small so the JSON stays
+        # readable. Heavy metrics (action histogram etc) come from diagnose.py.
+        summary.record("updates", {
+            "update": update,
+            "ret_mean": float(stats["learner_return_mean"]),
+            "opp_ret_mean": float(stats["opp_return_mean"]),
+            "policy_loss": float(losses["policy_loss"]),
+            "value_loss": float(losses["value_loss"]),
+            "entropy": float(losses["entropy"]),
+            "approx_kl": float(losses["approx_kl"]),
+            "seconds": round(dt, 2),
+        })
+
         if update % args.save_every == 0 or update == args.updates:
             save_checkpoint(STAGE2_CKPT, model, meta={
                 "stage": "ppo_vs_heuristic", "update": update,
@@ -232,6 +326,7 @@ def main():
             })
         if stats["learner_return_mean"] > best_return:
             best_return = stats["learner_return_mean"]
+            summary.set("best_train_return_mean", float(best_return))
 
         if args.validate_every > 0 and update % args.validate_every == 0:
             val = validate_model(
@@ -247,8 +342,18 @@ def main():
                 f"  [val] score={val['score']:+.1f} rl={val['rl_mean']:.1f} "
                 f"heur={val['heur_baseline']:.1f} suites={val['num_suites']}"
             )
+            summary.record("validations", {
+                "update": update,
+                "score": float(val["score"]),
+                "rl_mean": float(val["rl_mean"]),
+                "heur_baseline": float(val["heur_baseline"]),
+                "num_suites": int(val.get("num_suites", 0)),
+                "baseline": args.validation_baseline,
+            })
             if val["score"] > best_validation:
                 best_validation = val["score"]
+                summary.set("best_validation_score", float(best_validation))
+                summary.set("best_checkpoint", str(STAGE2_BEST_CKPT))
                 save_checkpoint(STAGE2_BEST_CKPT, model, meta={
                     "stage": "ppo_vs_diverse_heuristic_best",
                     "update": update,
@@ -288,9 +393,15 @@ def main():
                 })
             save_checkpoint(snap, model, meta=meta)
             tqdm.write(f"  [snap] saved {snap}")
+            summary.record("snapshots", {"update": update, "path": str(snap)})
+
+        # Persist progress every update so a polling reader sees fresh state.
+        summary.write()
 
     collector.close()
     save_checkpoint(STAGE2_CKPT, model, meta={"stage": "ppo_vs_heuristic", "update": args.updates})
+    summary.set("latest_checkpoint", str(STAGE2_CKPT))
+    summary.set("final_train_return_mean", float(best_return))
     print(f"\nSaved Stage-2 checkpoint → {STAGE2_CKPT}  (best mean return {best_return:.1f})")
     print("Benchmark:  python ae_rl/benchmark.py")
     print("Next:       python ae_rl/train_stage3_league.py")

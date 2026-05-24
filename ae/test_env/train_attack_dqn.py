@@ -53,7 +53,7 @@ from constants import Action  # noqa: E402
 from diagnostic_policies import PROFILES, make_diagnostic_policy  # noqa: E402
 from map_memory import MapMemory  # noqa: E402
 from observation import ParsedObs  # noqa: E402
-from policy import HeuristicPolicy, Policy  # noqa: E402
+from policies.policy import HeuristicPolicy, Policy  # noqa: E402
 from rl_attack import (  # noqa: E402
     RL_ATTACK_FEATURE_DIM,
     RL_ATTACK_SPATIAL_CHANNELS,

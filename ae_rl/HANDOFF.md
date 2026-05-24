@@ -76,9 +76,49 @@ Per-event scoring breakdown for a checkpoint. Spies on `env.dynamics.rewards.awa
 5. **Commit boundaries.** The three experiments are independent — split into three commits (safety/`weights_only` is a fourth trivial one) so a regression can be bisected.
 6. **`week_long_edits/` drift.** Currently `ppo.py` + `train_stage2_ppo.py` are mirrored but `rollout.py` is not. Decide whether to mirror or to delete `week_long_edits/ae_rl/` outright.
 
+## Autonomous-caller pipeline (for Claude / scripts)
+
+Both training and submission produce machine-readable outputs so an autonomous
+caller can drive them without parsing tqdm stdout or watching Discord.
+
+**Training** — each script writes `ae_rl/runs/<stage>/latest.json` (and a
+timestamped history copy). Override the path with `--summary-json PATH`. The
+JSON is rewritten every update, so a polling reader sees live progress; final
+`status` is `completed` / `failed` / `interrupted`. Key fields: `status`,
+`updates_completed`, `validations[]`, `best_validation_score`,
+`best_checkpoint`, `latest_checkpoint`, `error` (on failure).
+
+```bash
+# Launch training in background, then poll the summary:
+python ae_rl/train_stage2_ppo.py --updates 200 --validate-every 5 &
+while jq -r .status ae_rl/runs/stage2_ppo/latest.json | grep -q running; do
+    sleep 60
+done
+jq .best_validation_score ae_rl/runs/stage2_ppo/latest.json
+```
+
+**Submission** — `python rl_autorun.py --submit ae <tag>` builds, pushes and
+uploads. To wait for the eval result that lands later via Discord:
+
+```bash
+python rl_autorun.py --await-eval ae <tag> --timeout 1800 > result.json
+# Logs go to stderr; stdout is a single JSON line with {challenge, tag,
+# errors, score, speed, timestamp}. Exits 1 on timeout. The --since-iso
+# defaults to "now" so stale entries with the same tag are ignored.
+```
+
+The `--await-eval` mode reads `logs/eval_results.jsonl`, which is populated
+when *some* watcher process (`discord_watcher.py` or `rl_autorun.py` running
+without --submit) ingests the Discord notification. A human-run watcher works
+fine; Claude can also launch the watcher via `Bash(run_in_background)` if a
+human isn't around.
+
 ## Things to be careful about
 
-- **User runs scripts.** Don't burn time on long RL training runs from inside Claude; hand the command over.
+- **Long RL training is now Claude-runnable** via `Bash(run_in_background)` +
+  polling the run-summary JSON. The earlier "user runs scripts" rule is
+  superseded — but if a checkpoint is being deployed to production, the user
+  still drives the actual eval submission.
 - **No git commits without asking** — `Bash(git:*)` is denied for `ae/` and the user prefers to drive git themselves.
 - **AE container reset semantics** (per CLAUDE.md): the RL policy state must clear on `obs.step == 0` or `/reset`. The deployment-side `RLPolicy.choose` already resets `self._hidden` on step 0; nothing here changes that, but if you add round-persistent state in the RL stack, mirror it.
 - **The deploy bundle** (`ae/src/rl_policy.py`) loads `models/stage2_ppo.pt` by default. If you ship a Stage 3 league checkpoint, either update `DEFAULT_CHECKPOINT` or wire `checkpoint_path` in `ae_manager.py`. The arch fallback in `_ActorCritic.__init__` defaults must stay in sync with `ae_rl/model.py::RecurrentMaskableActorCritic` defaults.

@@ -18,7 +18,7 @@ import torch
 
 import common  # noqa: F401  (path bootstrap)
 from ae_manager import DEFAULT_CACHE_PATH, DEFAULT_POLICY_KWARGS, AEManager
-from berserker_policy import BerserkerPolicy
+from policies.berserker_policy import BerserkerPolicy
 from constants import Action
 from diverse_opponents import (
     IdlePolicy,
@@ -29,10 +29,10 @@ from diverse_opponents import (
     TacticalPolicy,
     TrapSetterPolicy,
 )
-from edited_policy_v2 import EditedHeuristicPolicyV2
+from policies.edited_policy_v2 import EditedHeuristicPolicyV2
 from map_memory import MapMemory
 from observation import parse_observation
-from policy import HeuristicPolicy
+from policies.policy import HeuristicPolicy
 
 from common import obs_to_arrays
 

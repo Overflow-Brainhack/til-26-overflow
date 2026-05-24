@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(ls \"c:\\\\\\\\Users\\\\\\\\zedon\\\\\\\\Documents\\\\\\\\GitHub\\\\\\\\til-26-overflow\\\\\\\\ae\\\\\\\\\")",
-      "Bash(ls \"c:\\\\\\\\Users\\\\\\\\zedon\\\\\\\\Documents\\\\\\\\GitHub\\\\\\\\til-26-overflow\\\\\\\\ae\\\\\\\\src\\\\\\\\\")"
+      "Bash(ls \"c:\\\\\\\\Users\\\\\\\\zedon\\\\\\\\Documents\\\\\\\\GitHub\\\\\\\\til-26-overflow\\\\\\\\ae\\\\\\\\src\\\\\\\\\")",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\zedon\\\\Documents\\\\GitHub\\\\til-26-overflow\\\\ae\\\\\" -Recurse -File | Select-Object FullName | head -50)",
+      "Bash(grep -v \"^--$\")"
     ]
   },
   "systemPrompt": "Always give clear and concise responses. No unnecessary padding or repetition. Get to the point. Always ask for confirmation before executing console/shell commands."

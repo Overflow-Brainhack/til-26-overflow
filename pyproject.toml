@@ -13,7 +13,7 @@ dependencies = [
   "transformers",
   "torch>=2.7.1",
   "torchvision>=0.22.1",
-  "numpy==2.0.1",
+  "numpy>=2.0.1",
   "scikit-image",
   "lightning",
   "scikit-learn>=1.8.0",

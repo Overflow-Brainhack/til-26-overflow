@@ -50,16 +50,16 @@ from til_environment.bomberman_env import Bomberman  # noqa: E402
 from til_environment.config import default_config, load_config  # noqa: E402
 
 from ae_manager import DEFAULT_CACHE_PATH, DEFAULT_POLICY_KWARGS, AEManager  # noqa: E402
-from berserker_policy import BerserkerPolicy  # noqa: E402
+from policies.berserker_policy import BerserkerPolicy  # noqa: E402
 from constants import Action, GRID_SIZE  # noqa: E402
-# from edited_policy import EditedHeuristicPolicy as HeuristicPolicy  # noqa: E402
+# from policies.edited_policy import EditedHeuristicPolicy as HeuristicPolicy  # noqa: E402
 
-from edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy  # noqa: E402
+from policies.edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy  # noqa: E402
 from map_memory import MapMemory  # noqa: E402
 from observation import ParsedObs  # noqa: E402
-from policy import Policy  # noqa: E402
-from rl_policy import RLPolicy  # noqa: E402
-from layered_rl_policy import LayeredRLPolicy  # noqa: E402
+from policies.policy import Policy  # noqa: E402
+from policies.rl_policy import RLPolicy  # noqa: E402
+from policies.layered_rl_policy import LayeredRLPolicy  # noqa: E402
 
 
 AGENT_TYPES = (

@@ -5,6 +5,6 @@ from . import (
     map_memory,
     observation,
     pathfinding,
-    policy,
+    policies,
     threat,
 )
