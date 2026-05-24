@@ -1124,6 +1124,16 @@ class EditedHeuristicPolicy(Policy):
 
     # ── overridable hooks (no-ops here; subclasses layer behaviour on) ───────
 
+    def _extra_danger_cells(
+        self, obs: ParsedObs, memory: MapMemory
+    ) -> set[tuple[int, int]]:
+        """Additional cells to soft-avoid during collect/explore routing.
+
+        No-op in the base class. Subclasses override to inject threat signals
+        (e.g. anticipated enemy bomb placements) without touching dodge logic.
+        """
+        return set()
+
     def _collect_value(self, cell: tuple[int, int], memory: MapMemory) -> float:
         """Scoring numerator for a collectible cell (before /(dist+1)).
 
