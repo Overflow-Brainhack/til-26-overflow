@@ -264,6 +264,10 @@ RL_AUTORUN_STAGE=3 RL_AUTORUN_CHECKPOINT=best \
 python rl_autorun.py --await-eval ae "$TAG" \
     --since-iso "$SUBMITTED_AT" --timeout 1800 > /tmp/eval-$TAG.json
 jq . /tmp/eval-$TAG.json  # {challenge,tag,errors,score,speed,timestamp}
+# Verify returned .tag == $TAG before treating as our result — other teams share
+# the same Discord channel and their evals will appear too.
+# If --await-eval times out (30 min, no result): another submission may have
+# overwritten ours in the queue. Resubmit and await again before giving up.
 ```
 
 ## When to stop and ask the user

@@ -576,7 +576,7 @@ async def _run_submit_locked(
         env=gcloud_env,
     )
     if rc == 0:
-        logger.info("✓ Submitted %s as %s on %s", local_ref, image_name, _REGION)
+        logger.info("[OK] Submitted %s as %s on %s", local_ref, image_name, _REGION)
     else:
         logger.error("gcloud ai models upload failed (rc=%d)", rc)
 

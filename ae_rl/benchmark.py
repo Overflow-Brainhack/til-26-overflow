@@ -175,12 +175,13 @@ def benchmark(
         return f"{mean(xs):7.2f} ± {s:5.2f}"
 
     if not quiet:
-        print("\n" + "═" * 56)
+        sep = "=" * 56
+        print("\n" + sep)
         if model is not None:
             print(f"  RL agents          {_fmt(rl_scores)}")
             print(f"  Heuristic (in-game){_fmt(heur_scores)}")
-        print(f"  Heuristic baseline {_fmt(base_scores)}  (6×heuristic reference)")
-        print("═" * 56)
+        print(f"  Heuristic baseline {_fmt(base_scores)}  (6x heuristic reference)")
+        print(sep)
     delta = None
     if model is not None and rl_scores and base_scores:
         delta = mean(rl_scores) - mean(base_scores)
