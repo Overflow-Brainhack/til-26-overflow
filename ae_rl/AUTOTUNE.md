@@ -42,7 +42,7 @@ If in doubt: commit, don't delete. Disk is cheap; lost work is expensive.
 1. **Read `ae_rl/tuning/state.json`.** If it doesn't exist, initialise (see "Initialising" below) and continue.
 2. **If `state.in_flight.kind == "submission"`:** the previous session submitted a tag and was waiting for the eval. Resume:
    ```bash
-   python rl_autorun.py --await-eval ae "$TAG" --since-iso "$SUBMITTED_AT" --timeout 1800 > /tmp/eval.json
+   uv run rl_autorun.py --await-eval ae "$TAG" --since-iso "$SUBMITTED_AT" --timeout 1800 > /tmp/eval.json
    ```
    On success, parse the result, append to `log.jsonl`, clear `in_flight`, update `best_*` if improved. On timeout, leave `in_flight` set and pause for human input (the watcher may be down).
 3. **If `state.in_flight.kind == "training"`:** read `state.in_flight.summary_path`. If `status == "running"`, the previous training is still alive — either wait with `Bash(run_in_background)` monitoring, or check whether the bash shell ID is still tracked. If `status == "completed"`, proceed to staging + submission. If `status == "failed"` or `"interrupted"`, log the failure, clear `in_flight`, and pick a different hypothesis.
@@ -82,8 +82,8 @@ WHILE not bored AND not blocked:
   
   preflight_checks()  # watcher up? docker? gcloud? checkpoint present?
   
-  python rl_autorun.py --submit ae <tag>
-  python rl_autorun.py --await-eval ae <tag> --since-iso <submitted_at> --timeout 1800
+  uv run rl_autorun.py --submit ae <tag>
+  uv run rl_autorun.py --await-eval ae <tag> --since-iso <submitted_at> --timeout 1800
   
   parse eval result
   append entry to log.jsonl
@@ -104,7 +104,7 @@ END
 
 1. **Watcher alive?** `logs/eval_results.jsonl` should have entries within the last few hours. If absent or stale, launch:
    ```bash
-   python rl_autorun.py &  # Bash(run_in_background=True)
+   uv run rl_autorun.py &  # Bash(run_in_background=True)
    ```
    Needs `DISCORD_TOKEN` + `DISCORD_CHANNEL_ID` in `.env`. Without these, do not submit — the eval will land in Discord but never reach `eval_results.jsonl`, and `--await-eval` will hang.
 
@@ -145,13 +145,13 @@ Single-eval deltas are unreliable. Decision rule:
 - **|Δ| ≥ 0.05 and confirmed by `ae_rl/benchmark.py` showing the same direction on the internal baseline:** treat as real.
 - **|Δ| ≥ 0.15:** real regardless of internal benchmark.
 
-The internal benchmark (`python ae_rl/benchmark.py --ckpt <path> --rounds 50 --baseline vanilla`) is deterministic at fixed seed and runs in ~5 min. Use it as a cheap pre-flight before every submission to avoid burning eval submissions on changes that don't move the in-house score.
+The internal benchmark (`uv run ae_rl/benchmark.py --ckpt <path> --rounds 50 --baseline vanilla`) is deterministic at fixed seed and runs in ~5 min. Use it as a cheap pre-flight before every submission to avoid burning eval submissions on changes that don't move the in-house score.
 
 ## Stuck detection
 
 If the last 5 logged iterations all have `verdict == "no improvement"`:
 1. Stop adding more shallow tweaks.
-2. Re-examine `log.jsonl` for patterns — is the eval score plateauing at a specific value? Is one event dominating (run `python ae_rl/diagnose.py --ckpt ae_rl/checkpoints/stage3_league_best.pt --rounds 30`)?
+2. Re-examine `log.jsonl` for patterns — is the eval score plateauing at a specific value? Is one event dominating (run `uv run ae_rl/diagnose.py --ckpt ae_rl/checkpoints/stage3_league_best.pt --rounds 30`)?
 3. Escalate to the next tier of the hypothesis menu.
 4. If even expensive experiments don't move the score after 3 attempts, write a checkpoint note in `state.json` (`paused_for_human: "<reason>"`) and stop the loop.
 
@@ -241,15 +241,15 @@ Don't delete checkpoints referenced in `log.jsonl` even if they appear unused �
 
 ```bash
 # Internal benchmark (5 min, deterministic — use before every submission)
-python ae_rl/benchmark.py --ckpt ae_rl/checkpoints/stage3_league_best.pt \
+uv run ae_rl/benchmark.py --ckpt ae_rl/checkpoints/stage3_league_best.pt \
     --rounds 50 --baseline vanilla
 
 # Per-event diagnostics (when score plateaus)
-python ae_rl/diagnose.py --ckpt ae_rl/checkpoints/stage3_league_best.pt \
+uv run ae_rl/diagnose.py --ckpt ae_rl/checkpoints/stage3_league_best.pt \
     --rounds 30 --focus-slot agent_0 --sample-actions
 
 # Stage 3 continuation from current best (medium-cost iteration)
-python ae_rl/train_stage3_league.py --updates 50 --validate-every 5 \
+uv run ae_rl/train_stage3_league.py --updates 50 --validate-every 5 \
     --rollback-on-regress \
     --summary-json ae_rl/runs/stage3_league/latest.json &  # background
 
@@ -258,10 +258,10 @@ jq -r .status ae_rl/runs/stage3_league/latest.json
 
 # Submit + await (the canonical autonomous round-trip)
 TAG="tune-$(date +%Y%m%dT%H%M%S)-<descriptor>"
-SUBMITTED_AT="$(python -c 'from datetime import datetime,timezone;print(datetime.now(timezone.utc).isoformat())')"
+SUBMITTED_AT="$(uv run python -c 'from datetime import datetime,timezone;print(datetime.now(timezone.utc).isoformat())')"
 RL_AUTORUN_STAGE=3 RL_AUTORUN_CHECKPOINT=best \
-    python rl_autorun.py --submit ae "$TAG"
-python rl_autorun.py --await-eval ae "$TAG" \
+    uv run rl_autorun.py --submit ae "$TAG"
+uv run rl_autorun.py --await-eval ae "$TAG" \
     --since-iso "$SUBMITTED_AT" --timeout 1800 > /tmp/eval-$TAG.json
 jq . /tmp/eval-$TAG.json  # {challenge,tag,errors,score,speed,timestamp}
 # Verify returned .tag == $TAG before treating as our result — other teams share

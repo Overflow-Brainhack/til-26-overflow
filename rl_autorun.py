@@ -789,6 +789,23 @@ def main() -> None:
         print(json.dumps(result))
         return
 
+    # Watch-only mode: listen for Discord eval results and write to eval_results.jsonl,
+    # but never load queue.toml or fire any submissions.
+    if args and args[0] == "--watch-only":
+        try:
+            config = load_config()
+        except ValueError as exc:
+            logger.error("Configuration error:\n%s", exc)
+            sys.exit(1)
+        client = WatcherClient(config, {}, logger)  # empty queue = no auto-submit ever
+        try:
+            client.run(config.token)
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received")
+        finally:
+            _terminate_all(logger)
+        return
+
     # One-shot mode: python rl_autorun.py --submit CHALLENGE [TAG]
     if args and args[0] == "--submit":
         if len(args) < 2 or args[1].lower() not in VALID_CHALLENGES:

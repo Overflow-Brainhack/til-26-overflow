@@ -68,6 +68,14 @@ class RunningReturnNorm:
     def unnormalise(self, x: torch.Tensor) -> torch.Tensor:
         return x * self.std()
 
+    def state_dict(self) -> dict:
+        return {"mean": float(self.mean), "var": float(self.var), "count": int(self.count)}
+
+    def load_state_dict(self, state: dict) -> None:
+        self.mean = float(state.get("mean", 0.0))
+        self.var = float(state.get("var", 1.0))
+        self.count = int(state.get("count", 0))
+
 
 def ppo_update(
     model,

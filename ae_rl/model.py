@@ -140,12 +140,19 @@ class RecurrentMaskableActorCritic(nn.Module):
         staticmap,
         hidden,
         deterministic: bool = False,
+        temperature: float = 1.0,
     ):
         """One timestep for a batch of B agents.
 
         Shapes: viewcone (B, C, H, W); baseview (B, C, H, W); scalars (B, D);
         mask (B, A); staticmap (B, Cs, Gs, Gs); hidden (layers, B, gru_hidden).
         Returns action (B,), logp (B,), value (B,), entropy (B,), new_hidden.
+
+        ``temperature`` scales logits before forming the Categorical. >1 flattens
+        the distribution (more exploration); <1 sharpens it. Has no effect when
+        ``deterministic=True`` since argmax is invariant to positive scaling.
+        Used by adversary opponents to inject stochastic versions of past selves
+        into the league pool.
         """
         feat = self._features(viewcone, baseview, scalars, staticmap).unsqueeze(
             0
@@ -153,6 +160,8 @@ class RecurrentMaskableActorCritic(nn.Module):
         out, new_hidden = self.gru(feat, hidden)  # (1, B, H)
         out = out.squeeze(0)
         logits = masked_logits(self.actor(out), mask)
+        if temperature != 1.0:
+            logits = logits / float(temperature)
         dist = Categorical(logits=logits)
         action = logits.argmax(dim=-1) if deterministic else dist.sample()
         value = self.critic(out).squeeze(-1)
@@ -187,20 +196,42 @@ class RecurrentMaskableActorCritic(nn.Module):
 
 
 def save_checkpoint(
-    path, model: RecurrentMaskableActorCritic, meta: dict | None = None
+    path,
+    model: RecurrentMaskableActorCritic,
+    meta: dict | None = None,
+    extras: dict | None = None,
 ):
-    torch.save(
-        {
-            "model_state": model.state_dict(),
-            "arch": {
-                "feature_dim": model.fuse[0].out_features,
-                "gru_hidden": model.gru_hidden,
-                "gru_layers": model.gru_layers,
-            },
-            "meta": meta or {},
+    """Persist model weights, arch, meta, and optional ``extras``.
+
+    ``extras`` carries auxiliary training state (e.g. RunningReturnNorm running
+    stats) that must survive a restart. Kept separate from ``meta`` so meta can
+    remain a small human-readable dict of summary numbers.
+    """
+    payload = {
+        "model_state": model.state_dict(),
+        "arch": {
+            "feature_dim": model.fuse[0].out_features,
+            "gru_hidden": model.gru_hidden,
+            "gru_layers": model.gru_layers,
         },
-        path,
-    )
+        "meta": meta or {},
+    }
+    if extras:
+        payload["extras"] = extras
+    torch.save(payload, path)
+
+
+def load_extras(path) -> dict:
+    """Return the ``extras`` dict from a checkpoint, or ``{}`` if absent / unreadable.
+
+    Safe to call on checkpoints saved before extras existed.
+    """
+    try:
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:
+        return {}
+    raw = ckpt.get("extras", {})
+    return dict(raw) if isinstance(raw, dict) else {}
 
 
 def load_checkpoint(

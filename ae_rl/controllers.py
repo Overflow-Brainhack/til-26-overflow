@@ -175,12 +175,14 @@ class NetController:
         name: str = "net",
         deterministic: bool = False,
         novice: bool = True,
+        temperature: float = 1.0,
     ):
         self.model = model
         self.device = device
         self.name = name
         self.deterministic = deterministic
         self.novice = novice
+        self.temperature = float(temperature)
         self._hidden = self.model.initial_hidden(1, device)
         self._memory = self._fresh_memory()
         # Last forward diagnostics — populated by act(); used by
@@ -217,6 +219,7 @@ class NetController:
             t(smap),
             self._hidden,
             deterministic=self.deterministic,
+            temperature=self.temperature,
         )
         self._last_value = float(value.item())
         self._last_entropy = float(entropy.item())
@@ -616,12 +619,18 @@ def tactical_spec(use_cache: bool = True) -> dict:
     return {"kind": "tactical", "use_cache": use_cache}
 
 
-def net_spec(path, deterministic: bool = False, novice: bool = True) -> dict:
+def net_spec(
+    path,
+    deterministic: bool = False,
+    novice: bool = True,
+    temperature: float = 1.0,
+) -> dict:
     return {
         "kind": "net",
         "path": str(path),
         "deterministic": deterministic,
         "novice": novice,
+        "temperature": float(temperature),
     }
 
 
@@ -663,11 +672,16 @@ def build_controller(spec: dict, device):
             for p in model.parameters():
                 p.requires_grad_(False)
             _NET_CACHE[path] = model
+        temperature = float(spec.get("temperature", 1.0))
+        name = Path(path).stem
+        if temperature != 1.0:
+            name = f"{name}_T{temperature:.1f}"
         return NetController(
             model,
             device,
-            name=Path(path).stem,
+            name=name,
             deterministic=spec.get("deterministic", False),
             novice=spec.get("novice", True),
+            temperature=temperature,
         )
     raise ValueError(f"unknown opponent spec kind: {kind!r}")

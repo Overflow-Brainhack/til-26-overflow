@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import shutil
 import time
 from pathlib import Path
 
@@ -52,24 +53,29 @@ from controllers import (
     trap_setter_spec,
     vanilla_heuristic_spec,
 )
-from model import RecurrentMaskableActorCritic, load_checkpoint, save_checkpoint
+from model import RecurrentMaskableActorCritic, load_checkpoint, load_extras, save_checkpoint
 from ppo import RunningReturnNorm, ppo_update
 from rollout import SelfPlayCollector, default_workers
 from validation import validate_model
 
 
-def _load_start_model(device):
+def _load_start_model(device, init_ckpt=None):
+    """Return ``(model, source_path)``; caller uses source_path to load extras."""
+    if init_ckpt is not None:
+        path = Path(init_ckpt)
+        print(f"init checkpoint (--ckpt): {path}")
+        return load_checkpoint(path, device), path
     for path, label in ((STAGE3_CKPT, "resume Stage 3"),
                         (STAGE2_CKPT, "warm-start from Stage 2")):
         if path.exists():
             print(f"{label}: {path}")
-            return load_checkpoint(path, device)
+            return load_checkpoint(path, device), path
     raise FileNotFoundError(
         "Stage 3 requires a prerequisite checkpoint. Looked for:\n"
         f"  {STAGE3_CKPT}  (resume an in-progress Stage 3 run)\n"
         f"  {STAGE2_CKPT}  (warm-start from Stage 2)\n"
-        "Neither exists. Run train_stage2_ppo.py first (which in turn requires "
-        "train_stage1_bc.py)."
+        "Pass --ckpt PATH to specify an explicit init checkpoint, or run "
+        "train_stage2_ppo.py first."
     )
 
 
@@ -86,7 +92,7 @@ def _checkpoint_score(path) -> float:
 _POOL_GRANULARITY = 100
 
 
-def _build_opponent_specs(args):
+def _build_opponent_specs(args, league_dir=None):
     """Return a weighted list of picklable opponent specs.
 
     Each non-net opponent type gets ``round(N * prob)`` entries in the pool where
@@ -99,7 +105,9 @@ def _build_opponent_specs(args):
     idle) widen the pool beyond the EditedHeuristicPolicyV2 family to fight the
     overfit-to-own-heuristic problem.
     """
-    pool = league_checkpoints(LEAGUE_DIR)
+    if league_dir is None:
+        league_dir = LEAGUE_DIR
+    pool = league_checkpoints(league_dir)
     n_nets = max(1, len(pool))
 
     # Per-type non-net probabilities, clamped to [0, 1].
@@ -122,7 +130,13 @@ def _build_opponent_specs(args):
         # blowing up — nets get 0% in that case.
         probs = {k: v / non_net_share for k, v in probs.items()}
         non_net_share = 1.0
-    net_share = max(0.0, 1.0 - non_net_share)
+    # Reserve adversary_prob out of the remaining pool. Adversary copies are
+    # high-temperature reruns of the same league snapshots; they compete with
+    # regular (deterministic-temperature) net opponents for the remaining share.
+    adv_share = max(0.0, min(1.0, getattr(args, "adversary_prob", 0.0)))
+    if non_net_share + adv_share > 1.0:
+        adv_share = max(0.0, 1.0 - non_net_share)
+    net_share = max(0.0, 1.0 - non_net_share - adv_share)
 
     spec_builders = {
         "heuristic": lambda: heuristic_spec(),
@@ -157,6 +171,19 @@ def _build_opponent_specs(args):
         for _ in range(net_copies_per_snap):
             specs.append(net_spec(ckpt))
 
+    # Adversary copies: same snapshots but with --adversary-temperature applied at
+    # action sampling. Widens the opponent distribution beyond what frozen
+    # deterministic-temperature snapshots cover, without needing extra training.
+    adv_temperature = float(getattr(args, "adversary_temperature", 2.0))
+    adv_copies_per_snap = (
+        max(1, round(_POOL_GRANULARITY * adv_share / n_nets)) if adv_share > 0 else 0
+    )
+    if adv_copies_per_snap == 0 and adv_share > 0:
+        adv_copies_per_snap = 1
+    for ckpt in pool:
+        for _ in range(adv_copies_per_snap):
+            specs.append(net_spec(ckpt, temperature=adv_temperature))
+
     if not specs:
         # Pathological all-zero config — fall back to one heuristic so training
         # doesn't crash.
@@ -166,6 +193,8 @@ def _build_opponent_specs(args):
     total = len(specs)
     parts = [f"{c}x{kind}" for kind, c in counts.items() if c > 0]
     parts.append(f"{net_copies_per_snap}x{len(pool)} frozen snapshots")
+    if adv_copies_per_snap > 0:
+        parts.append(f"{adv_copies_per_snap}x{len(pool)} adversary @T={adv_temperature:.1f}")
     print("League opponents (" + str(total) + " total): " + " + ".join(parts))
     return specs
 
@@ -180,7 +209,19 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--lam", type=float, default=0.95)
-    ap.add_argument("--entropy-coef", type=float, default=0.01)
+    ap.add_argument("--entropy-coef", type=float, default=0.01,
+                    help="entropy bonus coefficient at the START of training. "
+                         "If --entropy-coef-end is set, this is linearly annealed to "
+                         "--entropy-coef-end over --entropy-anneal-until updates.")
+    ap.add_argument("--entropy-coef-end", type=float, default=-1.0,
+                    help="entropy coef at the end of the anneal window. Negative "
+                         "(default) disables annealing — entropy_coef is held at "
+                         "--entropy-coef for the whole run. Typical schedule for a "
+                         "20k-update run: --entropy-coef 0.02 --entropy-coef-end 0.005.")
+    ap.add_argument("--entropy-anneal-until", type=int, default=0,
+                    help="updates over which to linearly anneal from --entropy-coef to "
+                         "--entropy-coef-end. 0 (default) = use --updates so the anneal "
+                         "covers the whole run. Has no effect if --entropy-coef-end < 0.")
     ap.add_argument("--clip", type=float, default=0.2)
     # Default opponent mix is "heuristic-free": the EditedHeuristicPolicyV2
     # family (heuristic, stochastic_heuristic, vanilla_heuristic) is zeroed out
@@ -218,6 +259,16 @@ def main():
                     help="relative jitter for stochastic heuristic numeric knobs")
     ap.add_argument("--stochastic-action-noise", type=float, default=0.03,
                     help="chance stochastic heuristic takes a random legal action")
+    ap.add_argument("--adversary-prob", type=float, default=0.0,
+                    help="fraction of opponent pool drawn from HIGH-TEMPERATURE copies of "
+                         "league snapshots. Reuses existing frozen snapshots but samples "
+                         "actions with --adversary-temperature, exposing the learner to "
+                         "stochastic variants of past selves without needing best-response "
+                         "training. Comes out of the net share (regular snapshots get less).")
+    ap.add_argument("--adversary-temperature", type=float, default=2.0,
+                    help="logit temperature for adversary copies. >1 flattens the action "
+                         "distribution (more exploration); 1 is the deterministic-temperature "
+                         "policy. Default 2.0 is moderately noisy without becoming uniform.")
     ap.add_argument("--critic-warmup", type=int, default=8,
                     help="value-only updates before PPO begins (re-fits the value head to "
                          "the new opponent/reward distribution after warm-starting from Stage 2; "
@@ -227,6 +278,12 @@ def main():
                     help="only add league snapshots that pass the validation gate")
     ap.add_argument("--snapshot-margin", type=float, default=50.0,
                     help="allowed validation-score drop from best for gated snapshots")
+    ap.add_argument("--league-max-size", type=int, default=0,
+                    help="cap on number of league snapshots kept on disk. When a new "
+                         "snapshot pushes the count above this, the oldest gen_*.pt is "
+                         "deleted. 0 (default) = unlimited. Keeps the pool fresh — old "
+                         "snapshots represent obsolete play styles that consume sample "
+                         "budget without teaching anything new.")
     ap.add_argument("--save-every", type=int, default=10)
     ap.add_argument("--advanced-prob", type=float, default=0.0,
                     help="when training on --novice, probability a rollout episode uses an advanced random map")
@@ -267,6 +324,19 @@ def main():
     ap.add_argument("--summary-json", type=str, default="",
                     help="path for the run-summary JSON (default: ae_rl/runs/stage3_league/latest.json). "
                          "Read this from an autonomous caller instead of parsing stdout.")
+    ap.add_argument("--ckpt", type=str, default="",
+                    help="explicit init checkpoint path; overrides auto-discovery of stage3_league.pt / stage2_ppo.pt")
+    ap.add_argument("--output-ckpt", type=str, default="",
+                    help="path for the running checkpoint (default: ae_rl/checkpoints/stage3_league.pt)")
+    ap.add_argument("--output-best", type=str, default="",
+                    help="path for the best validated checkpoint (default: ae_rl/checkpoints/stage3_league_best.pt)")
+    ap.add_argument("--league-dir", type=str, default="",
+                    help="directory for league snapshots (default: ae_rl/checkpoints/league/)")
+    ap.add_argument("--milestone-every", type=int, default=0,
+                    help="save a timestamped copy of the current checkpoint AND the current best "
+                         "every N updates into <output-ckpt-dir>/milestones/. 0 = disabled. "
+                         "Recommended: 1000. Milestones are never overwritten and give safe "
+                         "resume points regardless of rollback state or baseline changes.")
     args = ap.parse_args()
 
     summary_path = Path(args.summary_json) if args.summary_json else default_summary_path("stage3_league")
@@ -282,20 +352,52 @@ def _run_stage3(args, summary: RunSummary):
     print(f"Device: {device}")
     print(f"Run summary: {summary.path}")
 
-    model = _load_start_model(device)
+    # Resolve configurable output paths (flags override defaults from common.py).
+    ckpt_path = Path(args.output_ckpt) if args.output_ckpt else STAGE3_CKPT
+    best_ckpt_path = Path(args.output_best) if args.output_best else STAGE3_BEST_CKPT
+    league_dir = Path(args.league_dir) if args.league_dir else LEAGUE_DIR
+    league_dir.mkdir(parents=True, exist_ok=True)
+    milestone_dir = ckpt_path.parent / "milestones" if args.milestone_every > 0 else None
+    if milestone_dir is not None:
+        milestone_dir.mkdir(parents=True, exist_ok=True)
+
+    model, init_ckpt_path = _load_start_model(device, init_ckpt=args.ckpt or None)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     # Shared running stats for return normalisation — critical at Stage 3 because
     # raw shaped returns are in the hundreds, which makes the value loss explode
     # (saw v_loss=3000+ in the un-normalised version) and the critic chases noise.
     return_norm = RunningReturnNorm()
+    # Restore running stats from the init checkpoint if present. Without this a
+    # restart cold-starts the normaliser, so the critic re-fits to a shifting
+    # scale for the first few hundred updates — visible as a value-loss spike
+    # and a brief return dip on every resume.
+    init_extras = load_extras(init_ckpt_path) if init_ckpt_path is not None else {}
+    if "return_norm" in init_extras:
+        return_norm.load_state_dict(init_extras["return_norm"])
+        print(
+            f"Restored return_norm from {init_ckpt_path.name}: "
+            f"mean={return_norm.mean:+.2f} std={return_norm.std():.2f} count={return_norm.count}"
+        )
+
+    def _extras() -> dict:
+        return {"return_norm": return_norm.state_dict()}
+
+    def _entropy_coef_for(update: int) -> float:
+        if args.entropy_coef_end < 0:
+            return args.entropy_coef
+        anneal_until = args.entropy_anneal_until or args.updates
+        if anneal_until <= 0:
+            return args.entropy_coef_end
+        frac = min(1.0, max(0.0, (update - 1) / anneal_until))
+        return args.entropy_coef + (args.entropy_coef_end - args.entropy_coef) * frac
 
     # Seed the league with the starting policy so there's at least one net opponent.
-    if not league_checkpoints(LEAGUE_DIR):
-        seed_path = LEAGUE_DIR / "gen_000.pt"
+    if not league_checkpoints(league_dir):
+        seed_path = league_dir / "gen_000.pt"
         save_checkpoint(seed_path, model, meta={"stage": "league_seed"})
         print(f"Seeded league with {seed_path}")
 
-    specs = _build_opponent_specs(args)
+    specs = _build_opponent_specs(args, league_dir)
     summary.set("opponent_kinds", sorted({s["kind"] for s in specs}))
     summary.set("opponent_pool_size", len(specs))
     collector = SelfPlayCollector(
@@ -312,13 +414,13 @@ def _run_stage3(args, summary: RunSummary):
     if args.novice and args.advanced_prob > 0:
         print(f"Arena mix: novice with advanced_prob={args.advanced_prob:.2f}")
 
-    gen = len(league_checkpoints(LEAGUE_DIR))
+    gen = len(league_checkpoints(league_dir))
     summary.set("starting_generation", gen)
-    best_validation = _checkpoint_score(STAGE3_BEST_CKPT)
+    best_validation = _checkpoint_score(best_ckpt_path)
     if best_validation > float("-inf"):
-        print(f"Best validation checkpoint: {STAGE3_BEST_CKPT} score={best_validation:+.1f}")
+        print(f"Best validation checkpoint: {best_ckpt_path} score={best_validation:+.1f}")
         summary.set("best_validation_score", best_validation)
-        summary.set("best_checkpoint", str(STAGE3_BEST_CKPT))
+        summary.set("best_checkpoint", str(best_ckpt_path))
 
     # ── critic warm-up ───────────────────────────────────────────────────────
     # Stage 2's value head was fitted against (heuristic-only) opponents under the
@@ -345,10 +447,11 @@ def _run_stage3(args, summary: RunSummary):
     for update in bar:
         t0 = time.time()
         batch, stats = collector.collect(args.episodes_per_update, progress=True)
+        ent_coef = _entropy_coef_for(update)
         losses = ppo_update(
             model, opt, batch, device,
             epochs=args.epochs, seq_minibatch=args.seq_minibatch,
-            clip=args.clip, entropy_coef=args.entropy_coef,
+            clip=args.clip, entropy_coef=ent_coef,
             return_norm=return_norm,
         )
         dt = time.time() - t0
@@ -361,12 +464,12 @@ def _run_stage3(args, summary: RunSummary):
             f"min={stats['learner_return_min']:6.1f} max={stats['learner_return_max']:6.1f} "
             f"sd={stats['learner_return_std']:5.1f}  "
             f"pi={losses['policy_loss']:+.3f} v={losses['value_loss']:.2f} "
-            f"H={losses['entropy']:.3f} kl={losses['approx_kl']:.4f}  "
+            f"H={losses['entropy']:.3f} kl={losses['approx_kl']:.4f} ec={ent_coef:.4f}  "
             f"{stats['n_seqs']}seq {dt:.1f}s"
         )
 
         summary.increment("updates_completed")
-        summary.set("latest_checkpoint", str(STAGE3_CKPT))
+        summary.set("latest_checkpoint", str(ckpt_path))
         summary.set("current_generation", gen)
         summary.record("updates", {
             "update": update,
@@ -376,6 +479,7 @@ def _run_stage3(args, summary: RunSummary):
             "value_loss": float(losses["value_loss"]),
             "entropy": float(losses["entropy"]),
             "approx_kl": float(losses["approx_kl"]),
+            "entropy_coef": float(ent_coef),
             "seconds": round(dt, 2),
             "gen": gen,
         })
@@ -409,23 +513,26 @@ def _run_stage3(args, summary: RunSummary):
             if val["score"] > best_validation:
                 best_validation = val["score"]
                 summary.set("best_validation_score", float(best_validation))
-                summary.set("best_checkpoint", str(STAGE3_BEST_CKPT))
-                save_checkpoint(STAGE3_BEST_CKPT, model, meta={
+                summary.set("best_checkpoint", str(best_ckpt_path))
+                save_checkpoint(best_ckpt_path, model, meta={
                     "stage": "league_best",
                     "update": update,
                     "validation_score": val["score"],
                     "validation_rl_mean": val["rl_mean"],
                     "validation_heur_baseline": val["heur_baseline"],
-                })
-                tqdm.write(f"  [val] promoted best checkpoint -> {STAGE3_BEST_CKPT}")
+                }, extras=_extras())
+                tqdm.write(f"  [val] promoted best checkpoint -> {best_ckpt_path}")
             elif (
                 args.rollback_on_regress
-                and STAGE3_BEST_CKPT.exists()
+                and best_ckpt_path.exists()
                 and val["score"] < best_validation - args.rollback_margin
             ):
-                best_model = load_checkpoint(STAGE3_BEST_CKPT, device)
+                best_model = load_checkpoint(best_ckpt_path, device)
                 model.load_state_dict(best_model.state_dict())
                 opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+                best_extras = load_extras(best_ckpt_path)
+                if "return_norm" in best_extras:
+                    return_norm.load_state_dict(best_extras["return_norm"])
                 rolled_back = True
                 tqdm.write(
                     f"  [val] rollback to best checkpoint "
@@ -445,27 +552,56 @@ def _run_stage3(args, summary: RunSummary):
                     f"best {best_validation:+.1f})"
                 )
             else:
-                snap = LEAGUE_DIR / f"gen_{gen:03d}.pt"
+                snap = league_dir / f"gen_{gen:03d}.pt"
                 save_checkpoint(snap, model, meta={"stage": "league", "update": update})
                 gen += 1
                 tqdm.write(f"  + league snapshot {snap.name}  (rebuilding opponent pool)")
                 summary.record("snapshots", {"update": update, "path": str(snap), "gen": gen})
                 summary.set("current_generation", gen)
-                collector.set_opponent_specs(_build_opponent_specs(args))
+                # Prune oldest snapshots if the league has outgrown its cap. Keeps
+                # the opponent distribution centred on recent play styles instead
+                # of bleeding sample budget on obsolete generations.
+                if args.league_max_size > 0:
+                    all_snaps = sorted(league_dir.glob("*.pt"))
+                    pruned = []
+                    while len(all_snaps) > args.league_max_size:
+                        oldest = all_snaps.pop(0)
+                        try:
+                            oldest.unlink()
+                            pruned.append(oldest.name)
+                        except OSError as e:
+                            tqdm.write(f"  ! prune failed for {oldest.name}: {e}")
+                    if pruned:
+                        tqdm.write(f"  - pruned {len(pruned)} old snapshot(s): {', '.join(pruned)}")
+                        summary.record("snapshot_prunes", {"update": update, "pruned": pruned})
+                collector.set_opponent_specs(_build_opponent_specs(args, league_dir))
 
         if update % args.save_every == 0 or update == args.updates:
-            save_checkpoint(STAGE3_CKPT, model, meta={"stage": "league", "update": update,
-                                                      "learner_return_mean": stats["learner_return_mean"]})
+            save_checkpoint(ckpt_path, model, meta={"stage": "league", "update": update,
+                                                    "learner_return_mean": stats["learner_return_mean"]},
+                            extras=_extras())
+
+        if milestone_dir is not None and args.milestone_every > 0 and update % args.milestone_every == 0:
+            ms = milestone_dir / f"update_{update:06d}.pt"
+            save_checkpoint(ms, model, meta={"stage": "league_milestone", "update": update,
+                                             "learner_return_mean": stats["learner_return_mean"]},
+                            extras=_extras())
+            tqdm.write(f"  [milestone] saved {ms.name}")
+            if best_ckpt_path.exists():
+                ms_best = milestone_dir / f"update_{update:06d}_best.pt"
+                shutil.copy2(best_ckpt_path, ms_best)
+                tqdm.write(f"  [milestone] saved {ms_best.name}")
 
         # Persist progress every update so a polling reader sees fresh state.
         summary.write()
 
     collector.close()
-    save_checkpoint(STAGE3_CKPT, model, meta={"stage": "league", "update": args.updates})
-    summary.set("latest_checkpoint", str(STAGE3_CKPT))
+    save_checkpoint(ckpt_path, model, meta={"stage": "league", "update": args.updates},
+                    extras=_extras())
+    summary.set("latest_checkpoint", str(ckpt_path))
     summary.set("final_generation", gen)
-    print(f"\nSaved Stage-3 checkpoint → {STAGE3_CKPT}")
-    print("Benchmark:  python ae_rl/benchmark.py --ckpt ae_rl/checkpoints/stage3_league.pt")
+    print(f"\nSaved Stage-3 checkpoint → {ckpt_path}")
+    print(f"Benchmark:  uv run ae_rl/benchmark.py --ckpt {ckpt_path}")
 
 
 if __name__ == "__main__":

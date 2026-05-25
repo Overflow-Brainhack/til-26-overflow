@@ -27,7 +27,20 @@
       "Bash(.venv/bin/python -m pip index versions torch --index-url https://download.pytorch.org/whl/cpu)",
       "Bash(.venv/bin/python -c \"import torch; print\\('train torch', torch.__version__\\)\")",
       "Bash(../../.venv/bin/python -c \"import rl_policy; print\\('rl_policy imports OK in flat layout'\\)\")",
-      "Bash(grep -nE \"checkpoint|\\\\.pt$|ae_rl\" .gitignore)"
+      "Bash(grep -nE \"checkpoint|\\\\.pt$|ae_rl\" .gitignore)",
+      "Bash(git -C /home/shadowmachete/dev/til-26-overflow branch --show-current)",
+      "Bash(git -C /home/shadowmachete/dev/til-26-overflow lfs ls-files)",
+      "Bash(git -C /home/shadowmachete/dev/til-26-overflow log --oneline -5)",
+      "Bash(git -C /home/shadowmachete/dev/til-26-overflow show HEAD:ae_rl/checkpoints/)",
+      "Bash(git -C /home/shadowmachete/dev/til-26-overflow ls-files ae_rl/checkpoints/)",
+      "Bash(python3 -c ' *)",
+      "Bash(uv run python ae_rl/tuning/hourly_eval.py 2>&1 | tee *)",
+      "Bash(tee *)",
+      "Bash(python3 -c \"from datetime import datetime,timezone,timedelta; now=datetime.now\\(timezone.utc\\); t=now.replace\\(minute=0,second=0,microsecond=0\\)+timedelta\\(hours=1\\); print\\(int\\(\\(t-now\\).total_seconds\\(\\)\\)\\)\")",
+      "Bash(python3 *)",
+      "Bash(pkill -9 -f \"rl_autorun.*watch-only\")",
+      "Bash(echo \"clean watcher pid=$!\")",
+      "Bash(echo \"watcher started pid=$!\")"
     ]
   }
 }

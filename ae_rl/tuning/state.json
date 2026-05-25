@@ -5,22 +5,24 @@
   "best_eval_speed": null,
   "best_eval_tag": null,
   "best_checkpoint": "ae_rl/checkpoints/stage3_league_best.pt",
-  "best_checkpoint_internal_score": 294,
+  "best_checkpoint_internal_score": 133.15,
+  "best_checkpoint_internal_rl_mean": 349.82,
   "best_git_commit": null,
   "in_flight": {
     "kind": "submission",
-    "tag": "tune-001b-baseline-fix",
-    "submitted_at": "2026-05-24T08:58:22.337938+00:00",
-    "hypothesis": "Baseline: stage3_league_best.pt (+294 internal). Fixed staging — ae/models/ppo.pt updated to stage3 (was old stage2 with -242 score).",
-    "from_training_summary": null,
+    "tag": "tune-001-stage3-fresh",
+    "submitted_at": null,
+    "hypothesis": "Fresh BC->PPO->League pipeline (300 updates). Internal: RL=349.8 vs vanilla=216.7 (+133.15).",
+    "from_training_summary": "ae_rl/runs/stage3_league/latest.json",
     "internal_benchmark": {
-      "rl_mean": 417.8,
-      "heur_baseline": 216.7,
-      "delta": 201.1,
-      "rounds": 50
+      "rl_mean": 349.82,
+      "heur_baseline": 216.67,
+      "delta": 133.15,
+      "rounds": 50,
+      "baseline": "vanilla"
     },
-    "notes": "Previous tag tune-001-baseline-stage3-best shipped wrong model (ae/models/ppo.pt was old -242 checkpoint). This tag corrects it. Also submitted as tune-001-baseline-stage3-best (wrong model, discard that eval)."
+    "notes": "Submission held until after 2359 local time per user. Stage 3 best checkpoint at update ~35-40 (score +167.9 internal validation)."
   },
-  "paused_for_human": "Session terminated by user at 2026-05-24T09:04Z. Await eval for tune-001b-baseline-fix. Per user: if no Discord response in 30 min after next submit, resubmit. Verify returned tag matches submitted tag.",
-  "last_updated_at": "2026-05-24T09:04:00Z"
+  "paused_for_human": null,
+  "last_updated_at": "2026-05-24T21:55:00Z"
 }
