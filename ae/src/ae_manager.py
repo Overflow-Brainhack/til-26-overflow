@@ -22,9 +22,11 @@ from policy import Policy
 # from edited_policy import EditedHeuristicPolicy as HeuristicPolicy
 # from edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy
 # from berserker_policy import BerserkerPolicy
-# from berserker_base_policy import BerserkerBasePolicy as HeuristicPolicy
-# from scoremax_policy import ScoreMaxPolicy as HeuristicPolicy
 from berserker_base_policy import BerserkerBasePolicy as HeuristicPolicy
+# from scoremax_policy import ScoreMaxPolicy as HeuristicPolicy
+# from azbase_preserved.berserker_base_azbase_policy import (
+#     BerserkerBasePolicy as HeuristicPolicy,
+# )
 
 
 from rl_attack import load_attack_module

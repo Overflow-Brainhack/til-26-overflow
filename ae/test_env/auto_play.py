@@ -54,6 +54,9 @@ from til_environment.bomberman_env import Bomberman  # noqa: E402
 from til_environment.config import default_config, load_config  # noqa: E402
 
 from ae_manager import DEFAULT_CACHE_PATH, DEFAULT_POLICY_KWARGS, AEManager  # noqa: E402
+from azbase_preserved.berserker_base_azbase_policy import (  # noqa: E402
+    BerserkerBasePolicy as BerserkerBaseAzbasePolicy,
+)
 from berserker_base_policy import BerserkerBasePolicy  # noqa: E402
 from berserker_base_submit_policy import BerserkerBaseSubmitPolicy  # noqa: E402
 from berserker_policy import BerserkerPolicy  # noqa: E402
@@ -78,6 +81,7 @@ AGENT_TYPES = (
     "rl_attack",
     "berserker",
     "berserker_base",
+    "berserker_base_azbase",
     "berserker_base_submit",
     "scoremax",
     "random",
@@ -136,6 +140,8 @@ def _make_policy(
         policy = BerserkerPolicy()
     elif agent_type == "berserker_base":
         policy = BerserkerBasePolicy(**policy_kwargs)
+    elif agent_type == "berserker_base_azbase":
+        policy = BerserkerBaseAzbasePolicy(**policy_kwargs)
     elif agent_type == "berserker_base_submit":
         policy = BerserkerBaseSubmitPolicy(**policy_kwargs)
     elif agent_type == "scoremax":
@@ -782,6 +788,7 @@ _TYPE_COLORS: dict[str, tuple[int, int, int]] = {
     "rl_attack": (120, 255, 220),
     "berserker": (255, 80, 80),
     "berserker_base": (255, 150, 120),
+    "berserker_base_azbase": (255, 120, 80),
     "berserker_base_submit": (255, 175, 120),
     "scoremax": (255, 215, 90),
     "random": (200, 200, 80),
