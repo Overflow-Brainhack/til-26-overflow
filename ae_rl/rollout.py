@@ -293,7 +293,8 @@ def _compute_gae(rewards, values, dones, gamma: float, lam: float,
 @torch.no_grad()
 def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
                                gamma, lam, n_episodes, rng, advanced_prob=0.0,
-                               learner_slots=None, shape_rewards=True):
+                               learner_slots=None, shape_rewards=True,
+                               live_nets=None):
     """Run *n_episodes* self-play games. Returns (trajs, learner_returns, opp_returns).
 
     ``shape_rewards`` controls the trajectory-level shaping (PBRS, oscillation
@@ -316,7 +317,11 @@ def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
         learner_ids = set(rng.sample(eligible, n_learners))
         opp_ids = [a for a in agents if a not in learner_ids]
         controllers = {
-            a: build_controller(_spec_for_map(rng.choice(opponent_specs), episode_novice), device)
+            a: build_controller(
+                _spec_for_map(rng.choice(opponent_specs), episode_novice),
+                device,
+                live_nets=live_nets,
+            )
             for a in opp_ids
         }
 
@@ -496,12 +501,18 @@ _TE: dict = {}   # teacher worker globals
 
 
 def _sp_worker_init(opponent_specs, n_learners, novice, advanced_prob,
-                    gamma, lam, learner_slots, shape_rewards):
+                    gamma, lam, learner_slots, shape_rewards,
+                    n_live_slots=0):
     torch.set_num_threads(1)
     from model import RecurrentMaskableActorCritic
+    live_nets = {
+        i: RecurrentMaskableActorCritic().to("cpu").eval()
+        for i in range(int(n_live_slots))
+    }
     _SP.update(
         device=torch.device("cpu"),
         model=RecurrentMaskableActorCritic().to("cpu").eval(),
+        live_nets=live_nets,
         envs=_make_env_pool(novice, advanced_prob, shape_rewards=shape_rewards),
         specs=opponent_specs, n_learners=n_learners, gamma=gamma, lam=lam,
         advanced_prob=advanced_prob, learner_slots=learner_slots,
@@ -510,15 +521,33 @@ def _sp_worker_init(opponent_specs, n_learners, novice, advanced_prob,
 
 
 def _sp_worker_task(args):
-    state_dict, n_episodes, seed = args
+    # Two task shapes are accepted:
+    #   legacy: (state_dict, n_episodes, seed) — Stage 3 / earlier
+    #   evolutionary: (state_dict, live_state_dicts, opp_specs_or_None, n_episodes, seed)
+    # The evolutionary form lets the parent ship the latest weights of every
+    # active population learner per chunk and override the opponent spec list
+    # per learner (each learner can train against a different mix).
+    if len(args) == 3:
+        state_dict, n_episodes, seed = args
+        live_state_dicts = None
+        opp_specs = None
+    else:
+        state_dict, live_state_dicts, opp_specs, n_episodes, seed = args
     random.seed(seed)
     _SP["model"].load_state_dict(state_dict)
+    if live_state_dicts:
+        for slot, sd in live_state_dicts.items():
+            slot = int(slot)
+            if slot in _SP["live_nets"]:
+                _SP["live_nets"][slot].load_state_dict(sd)
+    specs = opp_specs if opp_specs is not None else _SP["specs"]
     rng = random.Random(seed)
     return _collect_selfplay_episodes(
-        _SP["envs"], _SP["model"], _SP["device"], _SP["specs"],
+        _SP["envs"], _SP["model"], _SP["device"], specs,
         _SP["n_learners"], _SP["gamma"], _SP["lam"], n_episodes, rng,
         _SP["advanced_prob"], _SP["learner_slots"],
         shape_rewards=_SP["shape_rewards"],
+        live_nets=_SP["live_nets"],
     )
 
 
@@ -577,6 +606,7 @@ class SelfPlayCollector:
         lam: float = 0.95,
         num_workers: int = 1,
         shape_rewards: bool = True,
+        n_live_slots: int = 0,
     ):
         self.model = model
         self.device = device
@@ -589,6 +619,13 @@ class SelfPlayCollector:
         self.lam = lam
         self.num_workers = max(1, int(num_workers))
         self.shape_rewards = bool(shape_rewards)
+        # Evolutionary mode: K live-opponent models pre-allocated per worker.
+        # When > 0, .collect() expects live_state_dicts keyed by slot index.
+        self.n_live_slots = max(0, int(n_live_slots))
+        # Serial-path counterpart of the per-worker live_nets dict. Lazily
+        # instantiated on first collect() so the cost is only paid in
+        # evolutionary mode.
+        self._serial_live_nets: dict = {}
         self._pool = None
         self.envs = (
             _make_env_pool(novice, self.advanced_prob, shape_rewards=self.shape_rewards)
@@ -609,7 +646,7 @@ class SelfPlayCollector:
                 initargs=(
                     self.opponent_specs, self.n_learners, self.novice,
                     self.advanced_prob, self.gamma, self.lam, self.learner_slots,
-                    self.shape_rewards,
+                    self.shape_rewards, self.n_live_slots,
                 ),
             )
 
@@ -622,16 +659,53 @@ class SelfPlayCollector:
     def close(self):
         self._close_pool()
 
-    def collect(self, n_episodes: int, progress: bool = False):
+    def collect(
+        self,
+        n_episodes: int,
+        progress: bool = False,
+        live_state_dicts: dict | None = None,
+        opp_specs_override: list | None = None,
+    ):
+        """Collect rollouts using ``self.model`` as the learner.
+
+        In evolutionary mode the caller passes:
+        - ``live_state_dicts``: dict[slot_idx -> state_dict] for the K active
+          population learners; workers refresh their live-net models from this
+          dict before sampling opponents.
+        - ``opp_specs_override``: per-collect spec list (per-learner mix) that
+          replaces the init-time pool for this collect only.
+
+        Both default to None for backwards compatibility with Stage 3.
+        """
         if self.num_workers == 1:
-            trajs, lr, opr = self._collect_serial(n_episodes, progress)
+            trajs, lr, opr = self._collect_serial(
+                n_episodes, progress, live_state_dicts, opp_specs_override
+            )
             return self._finish(trajs, lr, opr)
 
         self._ensure_pool()
         cpu_sd = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
         chunks = _split(n_episodes, self.num_workers)
         base = random.randint(0, 2_000_000_000)
-        tasks = [(cpu_sd, k, base + i) for i, k in enumerate(chunks)]
+        # CPU-detach the live state dicts once per collect (workers all see the
+        # same snapshot for a given chunk). Workers only load the slot ints
+        # that were allocated at init time; extra slots are silently ignored.
+        live_cpu: dict | None = None
+        if live_state_dicts is not None:
+            live_cpu = {
+                int(slot): {k: v.detach().cpu() for k, v in sd.items()}
+                for slot, sd in live_state_dicts.items()
+            }
+        use_new_task_shape = (
+            live_cpu is not None or opp_specs_override is not None
+        )
+        if use_new_task_shape:
+            tasks = [
+                (cpu_sd, live_cpu or {}, opp_specs_override, k, base + i)
+                for i, k in enumerate(chunks)
+            ]
+        else:
+            tasks = [(cpu_sd, k, base + i) for i, k in enumerate(chunks)]
 
         results = self._pool.imap_unordered(_sp_worker_task, tasks)
         if progress:
@@ -646,8 +720,30 @@ class SelfPlayCollector:
             opr.extend(o)
         return self._finish(trajs, lr, opr)
 
-    def _collect_serial(self, n_episodes, progress):
+    def _ensure_serial_live_nets(self):
+        """Build the serial-path live-net cache lazily — mirrors per-worker setup."""
+        if self.n_live_slots <= 0:
+            return
+        if len(self._serial_live_nets) == self.n_live_slots:
+            return
+        from model import RecurrentMaskableActorCritic
+        self._serial_live_nets = {
+            i: RecurrentMaskableActorCritic().to(self.device).eval()
+            for i in range(self.n_live_slots)
+        }
+
+    def _collect_serial(self, n_episodes, progress,
+                        live_state_dicts=None, opp_specs_override=None):
         rng = random
+        live_nets = None
+        if live_state_dicts is not None and self.n_live_slots > 0:
+            self._ensure_serial_live_nets()
+            for slot, sd in live_state_dicts.items():
+                slot = int(slot)
+                if slot in self._serial_live_nets:
+                    self._serial_live_nets[slot].load_state_dict(sd)
+            live_nets = self._serial_live_nets
+        specs = opp_specs_override if opp_specs_override is not None else self.opponent_specs
         # Inline the loop so we can show a per-game bar in the serial path.
         trajs, lr, opr = [], [], []
         it = range(n_episodes)
@@ -655,10 +751,11 @@ class SelfPlayCollector:
             it = tqdm(it, desc="  collect", leave=False, unit="game")
         for _ in it:
             tj, l, o = _collect_selfplay_episodes(
-                self.envs, self.model, self.device, self.opponent_specs,
+                self.envs, self.model, self.device, specs,
                 self.n_learners, self.gamma, self.lam, 1, rng,
                 self.advanced_prob, self.learner_slots,
                 shape_rewards=self.shape_rewards,
+                live_nets=live_nets,
             )
             trajs.extend(tj); lr.extend(l); opr.extend(o)
         return trajs, lr, opr

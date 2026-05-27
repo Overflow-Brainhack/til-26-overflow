@@ -634,7 +634,29 @@ def net_spec(
     }
 
 
-def build_controller(spec: dict, device):
+def live_net_spec(
+    slot: int,
+    deterministic: bool = False,
+    novice: bool = True,
+    temperature: float = 1.0,
+) -> dict:
+    """Spec for an active-population learner whose weights change every update.
+
+    Unlike ``net_spec`` (which loads a frozen file and caches it for the worker's
+    lifetime), live nets are looked up by integer ``slot`` from a dict passed in
+    at controller-build time. The state dict for slot N is refreshed by the
+    parent process each rollout chunk, so workers always see the latest weights.
+    """
+    return {
+        "kind": "live_net",
+        "slot": int(slot),
+        "deterministic": deterministic,
+        "novice": novice,
+        "temperature": float(temperature),
+    }
+
+
+def build_controller(spec: dict, device, live_nets: dict | None = None):
     kind = spec["kind"]
     if kind == "heuristic":
         return HeuristicController(use_cache=spec.get("use_cache", True))
@@ -674,6 +696,30 @@ def build_controller(spec: dict, device):
             _NET_CACHE[path] = model
         temperature = float(spec.get("temperature", 1.0))
         name = Path(path).stem
+        if temperature != 1.0:
+            name = f"{name}_T{temperature:.1f}"
+        return NetController(
+            model,
+            device,
+            name=name,
+            deterministic=spec.get("deterministic", False),
+            novice=spec.get("novice", True),
+            temperature=temperature,
+        )
+    if kind == "live_net":
+        if live_nets is None:
+            raise ValueError(
+                "live_net spec requires live_nets dict to be passed to build_controller"
+            )
+        slot = int(spec["slot"])
+        model = live_nets.get(slot)
+        if model is None:
+            raise KeyError(
+                f"live_net spec references slot {slot} but live_nets only has "
+                f"slots {sorted(live_nets.keys())}"
+            )
+        temperature = float(spec.get("temperature", 1.0))
+        name = f"live_{slot}"
         if temperature != 1.0:
             name = f"{name}_T{temperature:.1f}"
         return NetController(

@@ -31,10 +31,14 @@ CKPT_DIR = HERE / "checkpoints"
 LEAGUE_DIR = CKPT_DIR / "league"
 STAGE2_SNAPSHOT_DIR = CKPT_DIR / "stage2_snapshots"
 STAGE3_SNAPSHOT_DIR = CKPT_DIR / "stage3_snapshots"
+EVOLUTION_DIR = CKPT_DIR / "evolution"
+EVOLUTION_ARCHIVE_DIR = EVOLUTION_DIR / "archive"
 CKPT_DIR.mkdir(parents=True, exist_ok=True)
 LEAGUE_DIR.mkdir(parents=True, exist_ok=True)
 STAGE2_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 STAGE3_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+EVOLUTION_DIR.mkdir(parents=True, exist_ok=True)
+EVOLUTION_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Stage checkpoint filenames (latest snapshot per stage).
 STAGE1_CKPT = CKPT_DIR / "stage1_bc.pt"
@@ -42,6 +46,8 @@ STAGE2_CKPT = CKPT_DIR / "stage2_ppo.pt"
 STAGE3_CKPT = CKPT_DIR / "stage3_league.pt"
 STAGE2_BEST_CKPT = CKPT_DIR / "stage2_ppo_best.pt"
 STAGE3_BEST_CKPT = CKPT_DIR / "stage3_league_best.pt"
+STAGE4_CKPT = CKPT_DIR / "stage4_evolution.pt"
+STAGE4_BEST_CKPT = CKPT_DIR / "stage4_evolution_best.pt"
 
 # Normalisation constants — imported from the (now importable) ae/src/constants.
 from constants import (  # noqa: E402
