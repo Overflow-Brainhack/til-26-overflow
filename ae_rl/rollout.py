@@ -31,6 +31,19 @@ import torch
 import torch.multiprocessing as mp
 from tqdm.auto import tqdm
 
+# Stage 4 (evolution) ships 1 learner + K live-opponent state dicts per chunk,
+# which is ~5x more CPU tensors per task than Stage 3. torch's default
+# 'file_descriptor' sharing strategy opens an fd per shared CPU tensor and
+# exhausts ulimit -n quickly under that traffic ("OSError: [Errno 24] Too
+# many open files" during reduce_storage). 'file_system' uses filesystem
+# entries instead — no fd ceiling. Set in the PARENT process; workers use
+# spawn, and we re-set it in _sp_worker_init so child reductions match.
+try:
+    mp.set_sharing_strategy("file_system")
+except (RuntimeError, AttributeError):
+    # Some platforms (notably Windows) don't expose this. Harmless to skip.
+    pass
+
 import common  # noqa: F401  (path bootstrap)
 from common import obs_to_arrays
 from constants import Action
@@ -504,6 +517,11 @@ def _sp_worker_init(opponent_specs, n_learners, novice, advanced_prob,
                     gamma, lam, learner_slots, shape_rewards,
                     n_live_slots=0):
     torch.set_num_threads(1)
+    # Match the parent's sharing strategy — see module-level comment.
+    try:
+        mp.set_sharing_strategy("file_system")
+    except (RuntimeError, AttributeError):
+        pass
     from model import RecurrentMaskableActorCritic
     live_nets = {
         i: RecurrentMaskableActorCritic().to("cpu").eval()
