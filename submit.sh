@@ -37,6 +37,29 @@ REGISTRY="${REGION}-docker.pkg.dev"
 PROJECT="til-ai-2026"
 SERVICE_ACCOUNT="svc-overflow@til-ai-2026.iam.gserviceaccount.com"
 
+OS="$(uname)"
+case $OS in
+'Linux')
+  OS='Linux'
+  alias ls='ls --color=auto'
+  ;;
+'FreeBSD')
+  OS='FreeBSD'
+  alias ls='ls -G'
+  ;;
+'WindowsNT')
+  OS='Windows'
+  ;;
+'Darwin')
+  OS='Mac'
+  ;;
+'SunOS')
+  OS='Solaris'
+  ;;
+'AIX') ;;
+*) ;;
+esac
+
 # ─── per-challenge config (port + predict route) ───────────────────────────
 challenge_port() {
   case "$1" in
@@ -50,7 +73,11 @@ challenge_port() {
 }
 challenge_route() {
   # All challenges' predict route is /<challenge>.
-  echo "/$1"
+  if [[ "$OS" = "Windows" ]]; then
+    echo "//$1"
+  else
+    echo "/$1"
+  fi
 }
 VALID_CHALLENGES="asr cv noise nlp ae"
 
@@ -99,6 +126,11 @@ if ! PORT=$(challenge_port "$CHALLENGE"); then
   exit 2
 fi
 ROUTE=$(challenge_route "$CHALLENGE")
+if [[ "$OS" = "Windows" ]]; then
+  HEALTH="//health"
+else
+  HEALTH="/health"
+fi
 
 # ─── env config ────────────────────────────────────────────────────────────
 # Source .env if present (without polluting the user's shell).
@@ -212,8 +244,8 @@ run gcloud ai models upload \
   --region="$REGION" \
   --display-name="$IMAGE_NAME" \
   --container-image-uri="$REMOTE_REF" \
-  --container-health-route="//health" \
-  --container-predict-route="/$ROUTE" \
+  --container-health-route="$HEALTH" \
+  --container-predict-route="$ROUTE" \
   --container-ports="$PORT" \
   --version-aliases="default"
 
