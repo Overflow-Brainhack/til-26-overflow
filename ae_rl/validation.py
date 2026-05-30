@@ -21,10 +21,10 @@ def validate_model(
     enabled map modes. Positive means the learned agents beat the 6x baseline
     reference under this validation suite.
 
-    Set ``baseline`` to ``"vanilla"`` or ``"berserker"`` to validate against a
-    *held-out* opponent — i.e. a policy the RL was not primarily trained
-    against — which makes the score a generalisation metric rather than a
-    within-distribution fit metric.
+    Set ``baseline`` to ``"vanilla"``, ``"berserker"``, or ``"azbasev1"`` to
+    validate against a *held-out* opponent — i.e. a policy the RL was not
+    primarily trained against — which makes the score a generalisation metric
+    rather than a within-distribution fit metric.
     """
     results = []
     if rounds > 0:

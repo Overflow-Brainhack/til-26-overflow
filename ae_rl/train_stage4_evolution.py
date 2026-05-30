@@ -114,7 +114,7 @@ def main():
                          "K=4 → ~12*16 = 192 episodes per tournament (≈one collect).")
     ap.add_argument("--mutation-jitter", type=float, default=0.5,
                     help="log-normal stddev for hyperparameter perturbation at "
-                         "exploit-and-explore time. 0.5 ≈ ±50% per knob per mutation.")
+                         "exploit-and-explore time. 0.5 ~= +/-50%% per knob per mutation.")
     # ── archive & validation ──────────────────────────────────────────────
     ap.add_argument("--archive-every", type=int, default=200,
                     help="updates between adding the current best learner to the "
@@ -129,7 +129,7 @@ def main():
     ap.add_argument("--validation-advanced-rounds", type=int, default=0)
     ap.add_argument("--validation-learners", type=int, default=1)
     ap.add_argument("--validation-baseline", type=str, default="vanilla",
-                    choices=("strong", "vanilla", "berserker"),
+                    choices=("strong", "vanilla", "berserker", "azbasev1"),
                     help="opponent for the validation benchmark. Default 'vanilla' "
                          "(held-out) measures generalisation; switch to 'strong' "
                          "if you specifically want within-distribution scores.")

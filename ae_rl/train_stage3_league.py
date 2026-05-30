@@ -309,10 +309,10 @@ def main():
                     help="RL agents used in validation benchmark (default matches "
                          "benchmark.py's --learners 1 so scores are comparable)")
     ap.add_argument("--validation-baseline", type=str, default="strong",
-                    choices=("strong", "vanilla", "berserker"),
+                    choices=("strong", "vanilla", "berserker", "azbasev1"),
                     help="opponent used in validation. 'strong' = EditedHeuristicPolicyV2 "
                          "(what you trained against — measures within-distribution fit). "
-                         "'vanilla' / 'berserker' = held-out, measures generalisation. "
+                         "'vanilla' / 'berserker' / 'azbasev1' = held-out, measures generalisation. "
                          "Switch to a held-out baseline so checkpoint promotion + rollback "
                          "optimise for transfer to unseen opponents.")
     ap.add_argument("--validation-seed", type=int, default=22345)

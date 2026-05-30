@@ -21,6 +21,8 @@ from tqdm.auto import tqdm, trange
 import common  # noqa: F401  (path bootstrap)
 from common import CKPT_DIR, STAGE1_CKPT, STAGE2_CKPT, STAGE3_CKPT, get_device
 from controllers import (
+    AzbaseV1Controller,
+    AzbaseV4Controller,
     BerserkerController,
     HeuristicController,
     LayeredNetController,
@@ -33,6 +35,8 @@ _OPPONENT_FACTORIES = {
     "strong": lambda novice: HeuristicController(use_cache=novice),
     "vanilla": lambda novice: VanillaHeuristicController(use_cache=novice),
     "berserker": lambda novice: BerserkerController(use_cache=novice),
+    "azbasev1": lambda novice: AzbaseV1Controller(use_cache=novice),
+    "azbasev4": lambda novice: AzbaseV4Controller(use_cache=novice),
 }
 
 
@@ -244,7 +248,7 @@ def main():
                     choices=sorted(_OPPONENT_FACTORIES.keys()),
                     help="opponent policy used both in-game and as the 6x reference. "
                          "'strong' (default) = EditedHeuristicPolicyV2 (what you trained against). "
-                         "'vanilla' / 'berserker' = held-out baselines that measure generalisation.")
+                         "'vanilla' / 'berserker' / 'azbasev1' = held-out baselines that measure generalisation.")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 

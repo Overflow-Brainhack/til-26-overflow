@@ -242,19 +242,27 @@ def ppo_update_asymmetric(
     g_scal = batch.global_scalars.to(device)
 
     # ── privileged V_old + GAE (computed once, no grad) ───────────────────
+    # CRITICAL — unit consistency. The privileged critic is trained to predict
+    # *normalised* returns (regression target ret/scale below), so its outputs
+    # live in normalised-return units. GAE's TD error r + γV' − V is only
+    # coherent if the rewards are in the SAME units, otherwise the value
+    # baseline never actually cancels reward variance and the critic becomes a
+    # no-op (the whole point of the asymmetric critic is variance reduction).
+    # So we divide rewards by the running return std before GAE, keep everything
+    # in normalised space, and undo the scaling only when updating the running
+    # stat (which tracks raw-return magnitude).
+    scale = float(return_norm.std()) if return_norm is not None else 1.0
     with torch.no_grad():
-        v_old = model.critic(g_grid, g_scal)            # (T, B)
-        adv, ret = _gae_batched(rewards, v_old, dones, gamma, lam)
+        v_old = model.critic(g_grid, g_scal)            # (T, B), normalised units
+        rewards_norm = rewards / scale
+        adv, ret = _gae_batched(rewards_norm, v_old, dones, gamma, lam)
         # Advantage normalisation (whole batch) — same as the symmetric path.
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
     if return_norm is not None:
-        return_norm.update(ret.detach().cpu().numpy())
-        scale = return_norm.std()
-        ret = ret / scale
-        v_old_scaled = v_old / scale
-    else:
-        v_old_scaled = v_old
+        # Track raw-return magnitude so ``scale`` is right next iteration.
+        return_norm.update((ret * scale).detach().cpu().numpy())
+    v_old_scaled = v_old   # already in normalised units; ret is too
 
     stats = {"policy_loss": [], "value_loss": [], "entropy": [], "approx_kl": [],
              "clipfrac": [], "kl_anchor": []}

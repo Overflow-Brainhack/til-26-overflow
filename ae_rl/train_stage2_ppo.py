@@ -194,9 +194,9 @@ def main():
     ap.add_argument("--validation-learners", type=int, default=3,
                     help="RL agents used in validation benchmark")
     ap.add_argument("--validation-baseline", type=str, default="strong",
-                    choices=("strong", "vanilla", "berserker"),
+                    choices=("strong", "vanilla", "berserker", "azbasev1"),
                     help="opponent used in validation. 'strong' is the training opponent; "
-                         "'vanilla' / 'berserker' are held-out generalisation baselines.")
+                         "'vanilla' / 'berserker' / 'azbasev1' are held-out generalisation baselines.")
     ap.add_argument("--validation-seed", type=int, default=12345)
     ap.add_argument("--rollback-on-regress", action="store_true",
                     help="reload the best validated checkpoint if validation falls below best by rollback-margin")

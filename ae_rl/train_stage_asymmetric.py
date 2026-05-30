@@ -170,9 +170,11 @@ def main():
     ap.add_argument("--validation-advanced-rounds", type=int, default=0)
     ap.add_argument("--validation-learners", type=int, default=1)
     ap.add_argument("--validation-baseline", type=str, default="vanilla",
-                    choices=("strong", "vanilla", "berserker"),
-                    help="held-out opponent for the benchmark. 'vanilla' measures "
-                         "generalisation (recommended); 'strong' = within-distribution.")
+                    choices=("strong", "vanilla", "berserker", "azbasev1", "azbasev4"),
+                    help="held-out opponent gating best-promotion + rollback. "
+                         "'vanilla' = broad generalisation; 'azbasev1'/'azbasev4' "
+                         "gate on the STRONG tier we actually need to beat — use "
+                         "these if vanilla-promotion isn't tracking real eval.")
     ap.add_argument("--validation-seed", type=int, default=22345)
     ap.add_argument("--rollback-on-regress", action="store_true",
                     help="reload best checkpoint if validation drops > rollback-margin")
