@@ -30,6 +30,8 @@ from diverse_opponents import (
     TrapSetterPolicy,
 )
 from policies.edited_policy_v2 import EditedHeuristicPolicyV2
+from policies.azbasev1_policy import AzbaseV1Policy
+from policies.azbasev4_policy import AzbaseV4Policy
 from map_memory import MapMemory
 from observation import parse_observation
 from policies.policy import HeuristicPolicy
@@ -334,6 +336,35 @@ class KamikazeController(HeuristicController):
         return AEManager(policy=KamikazePolicy(), memory=mem)
 
 
+class AzbaseV1Controller(HeuristicController):
+    """``AzbaseV1Policy`` — preserved baseline of the azbase submission family.
+    Aggressive enemy-base routing on top of the v2 safety stack. Scored
+    0.66-0.72 in real eval (the v3 submission used the same Python class
+    and scored 0.68-0.75). Among the strongest scripted opponents available."""
+
+    name = "azbasev1"
+
+    def _build(self) -> AEManager:
+        mem = MapMemory()
+        if self.use_cache and _CACHE_TEMPLATE is not None:
+            mem.merge_static_from(_CACHE_TEMPLATE)
+        return AEManager(policy=AzbaseV1Policy(), memory=mem)
+
+
+class AzbaseV4Controller(HeuristicController):
+    """``AzbaseV4Policy`` — v1 plus collected-tile cooldown (re-visits a tile
+    after 35 steps) and dead-base filtering (skips bases at HP=0). Scored
+    0.72 in real eval. Distinct enough from v1 to be worth carrying both."""
+
+    name = "azbasev4"
+
+    def _build(self) -> AEManager:
+        mem = MapMemory()
+        if self.use_cache and _CACHE_TEMPLATE is not None:
+            mem.merge_static_from(_CACHE_TEMPLATE)
+        return AEManager(policy=AzbaseV4Policy(), memory=mem)
+
+
 class TacticalController(HeuristicController):
     """``TacticalPolicy`` — 1-step lookahead with hand-tuned scoring. Provides
     a 'good but non-heuristic' opponent so the RL has a strong adversary
@@ -619,6 +650,14 @@ def tactical_spec(use_cache: bool = True) -> dict:
     return {"kind": "tactical", "use_cache": use_cache}
 
 
+def azbasev1_spec(use_cache: bool = True) -> dict:
+    return {"kind": "azbasev1", "use_cache": use_cache}
+
+
+def azbasev4_spec(use_cache: bool = True) -> dict:
+    return {"kind": "azbasev4", "use_cache": use_cache}
+
+
 def net_spec(
     path,
     deterministic: bool = False,
@@ -684,6 +723,10 @@ def build_controller(spec: dict, device, live_nets: dict | None = None):
         return KamikazeController(use_cache=spec.get("use_cache", True))
     if kind == "tactical":
         return TacticalController(use_cache=spec.get("use_cache", True))
+    if kind == "azbasev1":
+        return AzbaseV1Controller(use_cache=spec.get("use_cache", True))
+    if kind == "azbasev4":
+        return AzbaseV4Controller(use_cache=spec.get("use_cache", True))
     if kind == "net":
         from model import load_checkpoint  # local import avoids a cycle at import time
 

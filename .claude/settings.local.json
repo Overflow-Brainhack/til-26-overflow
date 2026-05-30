@@ -40,7 +40,8 @@
       "Bash(python3 *)",
       "Bash(pkill -9 -f \"rl_autorun.*watch-only\")",
       "Bash(echo \"clean watcher pid=$!\")",
-      "Bash(echo \"watcher started pid=$!\")"
+      "Bash(echo \"watcher started pid=$!\")",
+      "Bash(grep -v \"^\\\\s*$\")"
     ]
   }
 }

@@ -27,14 +27,48 @@ from tqdm.auto import tqdm, trange
 
 import common  # noqa: F401  (path bootstrap)
 from common import STAGE1_CKPT, get_device, seed_everything
+from controllers import azbasev1_spec, azbasev4_spec, heuristic_spec
 from model import RecurrentMaskableActorCritic, save_checkpoint
 from rollout import collect_teacher_dataset, default_workers
 from run_summary import RunSummary, default_summary_path
 
 
+# Teacher name → picklable controller spec builder. Pass one or more via
+# --teacher; episodes are split evenly across the chosen teachers and the
+# per-teacher datasets are concatenated, so the BC target becomes a blend.
+_TEACHER_SPECS = {
+    "heuristic": heuristic_spec,
+    "azbasev1": azbasev1_spec,
+    "azbasev4": azbasev4_spec,
+}
+
+
+def _concat_teacher_data(blocks: list[dict]) -> dict:
+    """Concatenate per-teacher datasets along the sequence (axis-1) dimension.
+
+    Each block is (T_i, B_i, …); different teachers can yield different episode
+    lengths, so we truncate every block to the global-minimum T before stacking
+    so the time axis lines up. Single-block input is returned unchanged.
+    """
+    if len(blocks) == 1:
+        return blocks[0]
+    t = min(b["actions"].shape[0] for b in blocks)
+    out = {}
+    for key in blocks[0]:
+        out[key] = np.concatenate([b[key][:t] for b in blocks], axis=1)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--episodes", type=int, default=48, help="teacher games to record (×6 agents = sequences)")
+    ap.add_argument("--teacher", type=str, default="heuristic",
+                    help="comma-separated teacher(s) to clone from: any of "
+                         f"{sorted(_TEACHER_SPECS)}. Episodes are split evenly "
+                         "across them and the datasets concatenated. Default "
+                         "'heuristic'. Example: --teacher azbasev1,azbasev4 to "
+                         "clone the strongest scripted policies, or "
+                         "--teacher heuristic,azbasev1,azbasev4 for a blend.")
     ap.add_argument("--epochs", type=int, default=8)
     ap.add_argument("--seq-minibatch", type=int, default=16)
     ap.add_argument("--lr", type=float, default=3e-4)
@@ -45,6 +79,11 @@ def main():
     ap.add_argument("-j", "--num-workers", type=int, default=default_workers(),
                     help="parallel processes for teacher collection (default: cpus-1)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--output-ckpt", type=str, default="",
+                    help="path for the BC checkpoint (default: ae_rl/checkpoints/stage1_bc.pt). "
+                         "Set a distinct path when cloning a non-default teacher so you "
+                         "don't clobber the heuristic-BC seed, e.g. "
+                         "--output-ckpt ae_rl/checkpoints/stage1_bc_azbase.pt")
     ap.add_argument("--summary-json", type=str, default="",
                     help="path for the run-summary JSON (default: ae_rl/runs/stage1_bc/latest.json). "
                          "Read this from an autonomous caller instead of parsing stdout.")
@@ -59,11 +98,39 @@ def main():
         print(f"Device: {device}")
         print(f"Run summary: {summary_path}")
 
-        print(f"Collecting teacher demonstrations: {args.episodes} games (6×heuristic), "
-              f"{args.num_workers} worker(s) …")
+        # Resolve the teacher list. Unknown names fail loudly here rather than
+        # silently falling back to the heuristic.
+        teacher_names = [t.strip() for t in args.teacher.split(",") if t.strip()]
+        unknown = [t for t in teacher_names if t not in _TEACHER_SPECS]
+        if unknown:
+            raise SystemExit(
+                f"--teacher: unknown teacher(s) {unknown}; "
+                f"choose from {sorted(_TEACHER_SPECS)}"
+            )
+        if not teacher_names:
+            teacher_names = ["heuristic"]
+        summary.set("teachers", teacher_names)
+
+        # Split episodes evenly across teachers (remainder goes to the first).
+        per_teacher = max(1, args.episodes // len(teacher_names))
+        episode_alloc = {t: per_teacher for t in teacher_names}
+        episode_alloc[teacher_names[0]] += args.episodes - per_teacher * len(teacher_names)
+
+        print(f"Collecting teacher demonstrations: {args.episodes} games across "
+              f"{teacher_names} (6 agents each), {args.num_workers} worker(s) …")
         t0 = time.time()
-        data = collect_teacher_dataset(n_episodes=args.episodes, novice=args.novice,
-                                       progress=True, num_workers=args.num_workers)
+        per_data = []
+        for tname in teacher_names:
+            n_ep = episode_alloc[tname]
+            if n_ep <= 0:
+                continue
+            print(f"  teacher={tname}: {n_ep} games")
+            per_data.append(collect_teacher_dataset(
+                n_episodes=n_ep, novice=args.novice, progress=True,
+                num_workers=args.num_workers,
+                teacher_spec=_TEACHER_SPECS[tname](),
+            ))
+        data = _concat_teacher_data(per_data)
         n_seq = data["actions"].shape[1]
         t_len = data["actions"].shape[0]
         collect_dt = time.time() - t0
@@ -130,14 +197,15 @@ def main():
             summary.write()
 
         final_acc = float(np.mean(accs))
+        out_ckpt = Path(args.output_ckpt) if args.output_ckpt else STAGE1_CKPT
         save_checkpoint(
-            STAGE1_CKPT, model,
+            out_ckpt, model,
             meta={"stage": "bc", "episodes": args.episodes, "epochs": args.epochs,
-                  "action_acc": final_acc},
+                  "action_acc": final_acc, "teachers": teacher_names},
         )
-        summary.set("latest_checkpoint", str(STAGE1_CKPT))
+        summary.set("latest_checkpoint", str(out_ckpt))
         summary.set("final_action_acc", final_acc)
-        print(f"\nSaved Stage-1 BC checkpoint → {STAGE1_CKPT}")
+        print(f"\nSaved Stage-1 BC checkpoint → {out_ckpt}")
         print("Next: python ae_rl/train_stage2_ppo.py")
 
 

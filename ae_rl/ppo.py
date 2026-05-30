@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.distributions import Categorical
 
 from rollout import RolloutBatch
 
@@ -173,3 +174,158 @@ def ppo_update(
             stats["clipfrac"].append(clipfrac.item())
 
     return {k: float(np.mean(v)) if v else 0.0 for k, v in stats.items()}
+
+
+# ── asymmetric (CTDE) PPO ─────────────────────────────────────────────────────
+def _gae_batched(rewards, values, dones, gamma: float, lam: float):
+    """Batched GAE over (T, B). Episodes truncate (never terminate) in this env,
+    so the final step bootstraps with its own value — matching the per-sequence
+    convention in ``rollout._compute_gae`` (next_v at the last step = last value)."""
+    t = rewards.shape[0]
+    adv = torch.zeros_like(rewards)
+    last = torch.zeros_like(rewards[0])
+    for i in reversed(range(t)):
+        nonterminal = 1.0 - dones[i]
+        next_v = values[i + 1] if i + 1 < t else values[t - 1]
+        delta = rewards[i] + gamma * next_v * nonterminal - values[i]
+        last = delta + gamma * lam * nonterminal * last
+        adv[i] = last
+    return adv, adv + values
+
+
+def ppo_update_asymmetric(
+    model,
+    optimizer,
+    batch: RolloutBatch,
+    device,
+    *,
+    gamma: float = 0.99,
+    lam: float = 0.95,
+    epochs: int = 4,
+    seq_minibatch: int = 8,
+    clip: float = 0.2,
+    value_coef: float = 0.5,
+    entropy_coef: float = 0.01,
+    max_grad_norm: float = 0.5,
+    return_norm: RunningReturnNorm | None = None,
+    value_only: bool = False,
+    bc_model=None,
+    kl_anchor_coef: float = 0.0,
+) -> dict:
+    """One PPO update for an ``AsymmetricActorCritic`` (CTDE).
+
+    Advantages come from the **privileged** critic, run over the recorded global
+    state, NOT from the actor's local value head. GAE is recomputed here (once)
+    because the privileged critic isn't evaluated during rollout — workers stay
+    actor-only. The actor's own local critic head is left untrained (deploy may
+    read it but the user's pipeline doesn't rely on it).
+
+    ``bc_model`` (a frozen recurrent actor) + ``kl_anchor_coef`` add a
+    ``coef · KL(π_current ‖ π_BC)`` penalty that keeps the policy from drifting
+    off the behaviour-cloned manifold — the catastrophic-forgetting guard.
+    ``value_only=True`` trains just the privileged critic (warm-up).
+    """
+    assert batch.has_global, "ppo_update_asymmetric needs a batch with global state"
+    model.train()
+    b = batch.num_seqs
+
+    vc = batch.viewcone.to(device)
+    bv = batch.baseview.to(device)
+    sc = batch.scalars.to(device)
+    mk = batch.mask.to(device)
+    sm = batch.staticmap.to(device)
+    act = batch.actions.to(device)
+    logp_old = batch.logp.to(device)
+    rewards = batch.rewards.to(device)
+    dones = batch.dones.to(device)
+    g_grid = batch.global_grid.to(device)
+    g_scal = batch.global_scalars.to(device)
+
+    # ── privileged V_old + GAE (computed once, no grad) ───────────────────
+    with torch.no_grad():
+        v_old = model.critic(g_grid, g_scal)            # (T, B)
+        adv, ret = _gae_batched(rewards, v_old, dones, gamma, lam)
+        # Advantage normalisation (whole batch) — same as the symmetric path.
+        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+    if return_norm is not None:
+        return_norm.update(ret.detach().cpu().numpy())
+        scale = return_norm.std()
+        ret = ret / scale
+        v_old_scaled = v_old / scale
+    else:
+        v_old_scaled = v_old
+
+    stats = {"policy_loss": [], "value_loss": [], "entropy": [], "approx_kl": [],
+             "clipfrac": [], "kl_anchor": []}
+
+    for _ in range(epochs):
+        perm = np.random.permutation(b)
+        for start in range(0, b, seq_minibatch):
+            cols = perm[start : start + seq_minibatch]
+            idx = torch.as_tensor(cols, device=device)
+
+            # Actor forward (recurrent BPTT over the sequence minibatch).
+            logits, _, _ = model.actor.forward_sequence(
+                vc[:, idx], bv[:, idx], sc[:, idx], mk[:, idx], sm[:, idx]
+            )
+            dist = Categorical(logits=logits)
+            logp = dist.log_prob(act[:, idx])
+            entropy = dist.entropy().mean()
+
+            # Privileged critic forward on the same minibatch's global state.
+            values = model.critic(g_grid[:, idx], g_scal[:, idx])
+
+            mb_adv = adv[:, idx]
+            mb_ret = ret[:, idx]
+            mb_v_old = v_old_scaled[:, idx]
+
+            ratio = torch.exp(logp - logp_old[:, idx])
+            surr1 = ratio * mb_adv
+            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * mb_adv
+            policy_loss = -torch.min(surr1, surr2).mean()
+
+            v_clip = mb_v_old + torch.clamp(values - mb_v_old, -clip, clip)
+            v_loss = torch.max((values - mb_ret) ** 2, (v_clip - mb_ret) ** 2).mean()
+
+            # KL anchor to the frozen BC policy (optional).
+            kl_anchor = torch.zeros((), device=device)
+            if bc_model is not None and kl_anchor_coef > 0.0:
+                with torch.no_grad():
+                    bc_logits, _, _ = bc_model.forward_sequence(
+                        vc[:, idx], bv[:, idx], sc[:, idx], mk[:, idx], sm[:, idx]
+                    )
+                    bc_dist = Categorical(logits=bc_logits)
+                # KL(current ‖ bc): pushes current back toward the BC policy.
+                kl_anchor = torch.distributions.kl.kl_divergence(dist, bc_dist).mean()
+
+            if value_only:
+                loss = v_loss
+            else:
+                loss = (
+                    policy_loss
+                    + value_coef * v_loss
+                    - entropy_coef * entropy
+                    + kl_anchor_coef * kl_anchor
+                )
+
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            optimizer.step()
+
+            with torch.no_grad():
+                log_ratio = logp - logp_old[:, idx]
+                approx_kl = ((torch.exp(log_ratio) - 1) - log_ratio).mean()
+                clipfrac = ((ratio - 1.0).abs() > clip).float().mean()
+            stats["policy_loss"].append(policy_loss.item())
+            stats["value_loss"].append(v_loss.item())
+            stats["entropy"].append(entropy.item())
+            stats["approx_kl"].append(approx_kl.item())
+            stats["clipfrac"].append(clipfrac.item())
+            stats["kl_anchor"].append(float(kl_anchor.item()))
+
+    out = {k: float(np.mean(v)) if v else 0.0 for k, v in stats.items()}
+    # Surface the unnormalised return scale for logging parity with Stage 3.
+    out["return_mean"] = float(ret.mean().item())
+    return out

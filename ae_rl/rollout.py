@@ -48,6 +48,11 @@ import common  # noqa: F401  (path bootstrap)
 from common import obs_to_arrays
 from constants import Action
 from controllers import _CACHE_TEMPLATE, build_controller
+from global_state import (
+    GLOBAL_GRID_SHAPE,
+    GLOBAL_SCALAR_DIM,
+    build_global_state,
+)
 from map_memory import MapMemory
 from observation import parse_observation
 from til_environment.bomberman_env import Bomberman
@@ -257,21 +262,34 @@ class RolloutBatch:
     dones: torch.Tensor
     advantages: torch.Tensor
     returns: torch.Tensor
+    # Privileged global state for the asymmetric critic — only populated when the
+    # collector was built with ``collect_global_state=True``; otherwise None.
+    global_grid: torch.Tensor | None = None
+    global_scalars: torch.Tensor | None = None
 
     @property
     def num_seqs(self) -> int:
         return self.viewcone.shape[1]
 
+    @property
+    def has_global(self) -> bool:
+        return self.global_grid is not None
+
 
 def _new_trajectory() -> dict:
+    # ``global_grid`` / ``global_scalars`` stay empty unless the collector was
+    # asked for privileged state (asymmetric/CTDE training). Keeping the keys
+    # present always lets _stack_trajectory branch on emptiness rather than on
+    # a flag it would have to be threaded.
     return {k: [] for k in (
         "viewcone", "baseview", "scalars", "mask", "staticmap",
         "actions", "logp", "values", "rewards", "dones",
+        "global_grid", "global_scalars",
     )}
 
 
 def _stack_trajectory(traj: dict) -> dict:
-    return {
+    out = {
         "viewcone": np.stack(traj["viewcone"]).astype(np.float32),
         "baseview": np.stack(traj["baseview"]).astype(np.float32),
         "scalars": np.stack(traj["scalars"]).astype(np.float32),
@@ -283,6 +301,10 @@ def _stack_trajectory(traj: dict) -> dict:
         "rewards": np.asarray(traj["rewards"], dtype=np.float32),
         "dones": np.asarray(traj["dones"], dtype=np.float32),
     }
+    if traj["global_grid"]:
+        out["global_grid"] = np.stack(traj["global_grid"]).astype(np.float32)
+        out["global_scalars"] = np.stack(traj["global_scalars"]).astype(np.float32)
+    return out
 
 
 def _compute_gae(rewards, values, dones, gamma: float, lam: float,
@@ -307,13 +329,18 @@ def _compute_gae(rewards, values, dones, gamma: float, lam: float,
 def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
                                gamma, lam, n_episodes, rng, advanced_prob=0.0,
                                learner_slots=None, shape_rewards=True,
-                               live_nets=None):
+                               live_nets=None, collect_global_state=False):
     """Run *n_episodes* self-play games. Returns (trajs, learner_returns, opp_returns).
 
     ``shape_rewards`` controls the trajectory-level shaping (PBRS, oscillation
     penalty, turn-spam penalty). Env-level shaping (step penalty, multipliers,
     own_base_destroyed=0) is set when the env was built — see ``make_env``.
     Set both to ``False`` for a polish phase that optimises raw eval reward.
+
+    ``collect_global_state`` (asymmetric/CTDE training): also record the
+    privileged global-state arrays per learner step. The privileged critic is
+    NOT run here — workers stay actor-only — so we just dump the raw arrays and
+    let the PPO update compute V(global) + GAE in the main process.
     """
     model.eval()
     all_trajs: list[dict] = []
@@ -425,6 +452,11 @@ def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
                 traj[agent]["actions"].append(a_int)
                 traj[agent]["logp"].append(float(logp.item()))
                 traj[agent]["values"].append(float(value.item()))
+                if collect_global_state:
+                    # Ground-truth privileged state, aligned with this obs/action.
+                    g_grid, g_scal = build_global_state(env, agent)
+                    traj[agent]["global_grid"].append(g_grid)
+                    traj[agent]["global_scalars"].append(g_scal)
                 opened[agent] = True
                 env.step(a_int)
             else:
@@ -466,15 +498,28 @@ def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
     return all_trajs, learner_returns, opp_returns
 
 
-def _collect_teacher_episodes(env, n_episodes, rng, novice: bool = True):
-    """Every agent driven by the heuristic teacher; records (obs, action) per agent."""
-    from controllers import HeuristicController
+def _collect_teacher_episodes(env, n_episodes, rng, novice: bool = True,
+                              teacher_spec: dict | None = None):
+    """Every agent driven by the chosen teacher; records (obs, action) per agent.
+
+    ``teacher_spec`` is a picklable spec from ``controllers`` (e.g.
+    ``heuristic_spec()``, ``azbasev1_spec()``, ``azbasev4_spec()``). Defaults
+    to the production heuristic if None. All 6 agents in every episode use
+    the SAME teacher — to get a mixed-teacher dataset, run BC collection
+    multiple times with different teachers and concatenate.
+    """
+    from controllers import HeuristicController, build_controller
+    import torch as _torch
 
     seqs: list[dict] = []
+    _device = _torch.device("cpu")
     for _ in range(n_episodes):
         env.reset(seed=rng.randint(0, 2_000_000_000))
         agents = list(env.possible_agents)
-        controllers = {a: HeuristicController() for a in agents}
+        if teacher_spec is None:
+            controllers = {a: HeuristicController() for a in agents}
+        else:
+            controllers = {a: build_controller(teacher_spec, _device) for a in agents}
         memories = {a: _fresh_learner_memory(novice) for a in agents}
         rec = {a: {"viewcone": [], "baseview": [], "scalars": [], "mask": [],
                    "staticmap": [], "actions": []}
@@ -515,7 +560,7 @@ _TE: dict = {}   # teacher worker globals
 
 def _sp_worker_init(opponent_specs, n_learners, novice, advanced_prob,
                     gamma, lam, learner_slots, shape_rewards,
-                    n_live_slots=0):
+                    n_live_slots=0, collect_global_state=False):
     torch.set_num_threads(1)
     # Match the parent's sharing strategy — see module-level comment.
     try:
@@ -535,6 +580,7 @@ def _sp_worker_init(opponent_specs, n_learners, novice, advanced_prob,
         specs=opponent_specs, n_learners=n_learners, gamma=gamma, lam=lam,
         advanced_prob=advanced_prob, learner_slots=learner_slots,
         shape_rewards=shape_rewards,
+        collect_global_state=bool(collect_global_state),
     )
 
 
@@ -566,20 +612,26 @@ def _sp_worker_task(args):
         _SP["advanced_prob"], _SP["learner_slots"],
         shape_rewards=_SP["shape_rewards"],
         live_nets=_SP["live_nets"],
+        collect_global_state=_SP.get("collect_global_state", False),
     )
 
 
-def _te_worker_init(novice):
+def _te_worker_init(novice, teacher_spec=None):
     torch.set_num_threads(1)
-    # Teacher dataset = BC heuristic demonstrations — keep RAW reward (shaping is
-    # for the RL learner, not for cloning targets).
-    _TE.update(env=make_env(novice, shape_rewards=False), novice=novice)
+    # Teacher dataset = BC demonstrations — keep RAW reward (shaping is for
+    # the RL learner, not for cloning targets).
+    _TE.update(
+        env=make_env(novice, shape_rewards=False),
+        novice=novice,
+        teacher_spec=teacher_spec,
+    )
 
 
 def _te_worker_task(args):
     n_episodes, seed = args
     return _collect_teacher_episodes(
-        _TE["env"], n_episodes, random.Random(seed), novice=_TE["novice"]
+        _TE["env"], n_episodes, random.Random(seed), novice=_TE["novice"],
+        teacher_spec=_TE.get("teacher_spec"),
     )
 
 
@@ -597,12 +649,17 @@ def _normalise_and_assemble(trajs: list[dict]) -> RolloutBatch:
 
     adv = stack("advantages")
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+    has_global = all("global_grid" in tr for tr in trajs) and bool(trajs) and \
+        all(len(tr.get("global_grid", [])) for tr in trajs)
+    g_grid = stack("global_grid") if has_global else None
+    g_scal = stack("global_scalars") if has_global else None
     return RolloutBatch(
         viewcone=stack("viewcone"), baseview=stack("baseview"), scalars=stack("scalars"),
         mask=stack("mask"), staticmap=stack("staticmap"),
         actions=stack("actions"), logp=stack("logp"),
         values=stack("values"), rewards=stack("rewards"), dones=stack("dones"),
         advantages=adv, returns=stack("returns"),
+        global_grid=g_grid, global_scalars=g_scal,
     )
 
 
@@ -625,6 +682,7 @@ class SelfPlayCollector:
         num_workers: int = 1,
         shape_rewards: bool = True,
         n_live_slots: int = 0,
+        collect_global_state: bool = False,
     ):
         self.model = model
         self.device = device
@@ -637,6 +695,8 @@ class SelfPlayCollector:
         self.lam = lam
         self.num_workers = max(1, int(num_workers))
         self.shape_rewards = bool(shape_rewards)
+        # Asymmetric/CTDE: record privileged global state for the critic.
+        self.collect_global_state = bool(collect_global_state)
         # Evolutionary mode: K live-opponent models pre-allocated per worker.
         # When > 0, .collect() expects live_state_dicts keyed by slot index.
         self.n_live_slots = max(0, int(n_live_slots))
@@ -664,7 +724,7 @@ class SelfPlayCollector:
                 initargs=(
                     self.opponent_specs, self.n_learners, self.novice,
                     self.advanced_prob, self.gamma, self.lam, self.learner_slots,
-                    self.shape_rewards, self.n_live_slots,
+                    self.shape_rewards, self.n_live_slots, self.collect_global_state,
                 ),
             )
 
@@ -774,6 +834,7 @@ class SelfPlayCollector:
                 self.advanced_prob, self.learner_slots,
                 shape_rewards=self.shape_rewards,
                 live_nets=live_nets,
+                collect_global_state=self.collect_global_state,
             )
             trajs.extend(tj); lr.extend(l); opr.extend(o)
         return trajs, lr, opr
@@ -793,11 +854,14 @@ class SelfPlayCollector:
 
 # ── BC teacher dataset (parallelisable) ───────────────────────────────────────
 def collect_teacher_dataset(teacher_factory=None, n_episodes: int = 48, novice: bool = True,
-                            progress: bool = False, num_workers: int = 1):
-    """Run *n_episodes* heuristic-only games, recording (obs, action) per agent.
+                            progress: bool = False, num_workers: int = 1,
+                            teacher_spec: dict | None = None):
+    """Run *n_episodes* teacher-only games, recording (obs, action) per agent.
 
-    ``teacher_factory`` is ignored (the teacher is always the heuristic); kept for
-    call-site compatibility. Returns a dict of (T, B, …) numpy arrays.
+    ``teacher_spec`` is a picklable controller spec (e.g. ``heuristic_spec()``,
+    ``azbasev1_spec()``, ``azbasev4_spec()``). ``None`` → the production
+    heuristic. ``teacher_factory`` is unused (legacy call-site arg). Returns a
+    dict of (T, B, …) numpy arrays.
     """
     num_workers = max(1, int(num_workers))
 
@@ -808,13 +872,15 @@ def collect_teacher_dataset(teacher_factory=None, n_episodes: int = 48, novice: 
         if progress:
             it = tqdm(it, desc="  teacher games", unit="game")
         for _ in it:
-            seqs.extend(_collect_teacher_episodes(env, 1, random, novice=novice))
+            seqs.extend(_collect_teacher_episodes(
+                env, 1, random, novice=novice, teacher_spec=teacher_spec))
     else:
         ctx = mp.get_context("spawn")
         chunks = _split(n_episodes, num_workers)
         base = random.randint(0, 2_000_000_000)
         tasks = [(k, base + i) for i, k in enumerate(chunks)]
-        with ctx.Pool(num_workers, initializer=_te_worker_init, initargs=(novice,)) as pool:
+        with ctx.Pool(num_workers, initializer=_te_worker_init,
+                      initargs=(novice, teacher_spec)) as pool:
             results = pool.imap_unordered(_te_worker_task, tasks)
             if progress:
                 results = tqdm(results, total=len(tasks), desc="  teacher chunks", unit="chunk")

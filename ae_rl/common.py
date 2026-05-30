@@ -48,6 +48,11 @@ STAGE2_BEST_CKPT = CKPT_DIR / "stage2_ppo_best.pt"
 STAGE3_BEST_CKPT = CKPT_DIR / "stage3_league_best.pt"
 STAGE4_CKPT = CKPT_DIR / "stage4_evolution.pt"
 STAGE4_BEST_CKPT = CKPT_DIR / "stage4_evolution_best.pt"
+# Asymmetric (CTDE) stage — privileged-critic PPO + PFSP + KL-anchor.
+STAGE_ASYM_CKPT = CKPT_DIR / "stage_asym.pt"
+STAGE_ASYM_BEST_CKPT = CKPT_DIR / "stage_asym_best.pt"
+ASYM_LEAGUE_DIR = CKPT_DIR / "asym_league"
+ASYM_LEAGUE_DIR.mkdir(parents=True, exist_ok=True)
 
 # Normalisation constants — imported from the (now importable) ae/src/constants.
 from constants import (  # noqa: E402

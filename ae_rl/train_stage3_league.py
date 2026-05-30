@@ -39,6 +39,8 @@ from common import (
 )
 from run_summary import RunSummary, default_summary_path
 from controllers import (
+    azbasev1_spec,
+    azbasev4_spec,
     berserker_spec,
     heuristic_spec,
     idle_spec,
@@ -123,6 +125,8 @@ def _build_opponent_specs(args, league_dir=None):
         "patroller": max(0.0, min(1.0, args.patroller_prob)),
         "kamikaze": max(0.0, min(1.0, args.kamikaze_prob)),
         "tactical": max(0.0, min(1.0, args.tactical_prob)),
+        "azbasev1": max(0.0, min(1.0, args.azbasev1_prob)),
+        "azbasev4": max(0.0, min(1.0, args.azbasev4_prob)),
     }
     non_net_share = sum(probs.values())
     if non_net_share > 1.0:
@@ -152,6 +156,8 @@ def _build_opponent_specs(args, league_dir=None):
         "patroller": lambda: patroller_spec(),
         "kamikaze": lambda: kamikaze_spec(),
         "tactical": lambda: tactical_spec(),
+        "azbasev1": lambda: azbasev1_spec(),
+        "azbasev4": lambda: azbasev4_spec(),
     }
 
     specs: list[dict] = []
@@ -255,6 +261,12 @@ def main():
                     help="fraction of opponents that walk FORWARD-until-blocked (non-adversarial)")
     ap.add_argument("--kamikaze-prob", type=float, default=0.05,
                     help="fraction of opponents that bomb at own feet when low-HP / cornered")
+    ap.add_argument("--azbasev1-prob", type=float, default=0.10,
+                    help="fraction of opponents drawn from AzbaseV1Policy (preserved azbase "
+                         "baseline; eval ~0.66-0.72 — among the strongest scripted opponents)")
+    ap.add_argument("--azbasev4-prob", type=float, default=0.10,
+                    help="fraction of opponents drawn from AzbaseV4Policy (v1 + collected-tile "
+                         "cooldown + dead-base filtering; eval ~0.72)")
     ap.add_argument("--stochastic-jitter", type=float, default=0.35,
                     help="relative jitter for stochastic heuristic numeric knobs")
     ap.add_argument("--stochastic-action-noise", type=float, default=0.03,

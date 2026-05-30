@@ -34,6 +34,8 @@ from common import (
     seed_everything,
 )
 from controllers import (
+    azbasev1_spec,
+    azbasev4_spec,
     berserker_spec,
     heuristic_spec,
     pure_collector_spec,
@@ -97,6 +99,8 @@ def _build_opponent_specs(args) -> list[dict]:
         "pure_collector": max(0.0, min(1.0, args.pure_collector_prob)),
         "random": max(0.0, min(1.0, args.random_prob)),
         "tactical": max(0.0, min(1.0, args.tactical_prob)),
+        "azbasev1": max(0.0, min(1.0, args.azbasev1_prob)),
+        "azbasev4": max(0.0, min(1.0, args.azbasev4_prob)),
     }
     total = sum(probs.values())
     if total > 1.0:
@@ -111,6 +115,8 @@ def _build_opponent_specs(args) -> list[dict]:
         "pure_collector": lambda: pure_collector_spec(),
         "random": lambda: random_spec(),
         "tactical": lambda: tactical_spec(),
+        "azbasev1": lambda: azbasev1_spec(),
+        "azbasev4": lambda: azbasev4_spec(),
     }
 
     specs: list[dict] = []
@@ -170,6 +176,13 @@ def main():
                     help="fraction of opponents that pick uniform random legal actions")
     ap.add_argument("--tactical-prob", type=float, default=0.03,
                     help="fraction of opponents drawn from TacticalPolicy (1-step lookahead, non-heuristic)")
+    ap.add_argument("--azbasev1-prob", type=float, default=0.0,
+                    help="fraction of opponents drawn from AzbaseV1Policy (preserved azbase "
+                         "baseline; eval ~0.66-0.72). Default 0 in Stage 2 — BC teacher dominates "
+                         "this stage; turn on if you want azbase exposure here too.")
+    ap.add_argument("--azbasev4-prob", type=float, default=0.0,
+                    help="fraction of opponents drawn from AzbaseV4Policy (v1 + tile cooldown + "
+                         "dead-base filtering; eval ~0.72). Default 0 in Stage 2.")
     ap.add_argument("--advanced-prob", type=float, default=0.0,
                     help="when training on --novice, probability a rollout episode uses an advanced random map")
     ap.add_argument("--validate-every", type=int, default=0,

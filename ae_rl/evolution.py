@@ -44,6 +44,8 @@ from tqdm.auto import tqdm
 import common  # noqa: F401  (path bootstrap)
 from common import EVOLUTION_ARCHIVE_DIR, EVOLUTION_DIR
 from controllers import (
+    azbasev1_spec,
+    azbasev4_spec,
     berserker_spec,
     heuristic_spec,
     idle_spec,
@@ -68,6 +70,8 @@ from rollout import SelfPlayCollector
 # perturbation on positive quantities so a single mutation doesn't accidentally
 # zero out a knob.
 SCRIPTED_MIX_KEYS = (
+    "azbasev1",
+    "azbasev4",
     "tactical",
     "berserker",
     "vanilla_heuristic",
@@ -81,17 +85,21 @@ SCRIPTED_MIX_KEYS = (
 
 # Default mix vector seeded for every learner at init. Mutation jitters these.
 # Note: heuristic + vanilla_heuristic are intentionally low because of the
-# overfit-to-own-heuristic finding from Stage 3.
+# overfit-to-own-heuristic finding from Stage 3. azbase v1/v4 get the largest
+# scripted slice — they're the strongest non-RL opponents available (eval
+# 0.66-0.75) so exposure to them should transfer best to real eval.
 DEFAULT_SCRIPTED_MIX = {
-    "tactical": 0.30,
-    "berserker": 0.15,
-    "vanilla_heuristic": 0.05,
-    "random": 0.10,
-    "idle": 0.05,
+    "azbasev1": 0.18,
+    "azbasev4": 0.18,
+    "tactical": 0.20,
+    "berserker": 0.10,
+    "vanilla_heuristic": 0.03,
+    "random": 0.06,
+    "idle": 0.03,
     "trap_setter": 0.05,
-    "kamikaze": 0.10,
-    "pure_collector": 0.10,
-    "heuristic": 0.10,
+    "kamikaze": 0.07,
+    "pure_collector": 0.05,
+    "heuristic": 0.05,
 }
 
 # Bounds on the perturbed scalars. Hard clamps so a chain of mutations can't
@@ -204,6 +212,8 @@ _SCRIPTED_SPEC_BUILDERS = {
     "trap_setter": lambda: trap_setter_spec(),
     "kamikaze": lambda: kamikaze_spec(),
     "tactical": lambda: tactical_spec(),
+    "azbasev1": lambda: azbasev1_spec(),
+    "azbasev4": lambda: azbasev4_spec(),
 }
 
 
