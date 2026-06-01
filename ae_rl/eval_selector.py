@@ -59,6 +59,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 TUNING_DIR = HERE / "tuning"
 LEADERBOARD_PATH = TUNING_DIR / "eval_leaderboard.json"
+SELECTOR_LOG_PATH = TUNING_DIR / "eval_selector_log.jsonl"   # append-only, tail-friendly
 EVAL_LOG_PATH = REPO / "logs" / "eval_results.jsonl"
 
 
@@ -109,6 +110,14 @@ def save_leaderboard(board: dict) -> None:
     tmp.replace(LEADERBOARD_PATH)
 
 
+def append_eval_log(entry: "EvalEntry") -> None:
+    """Append one eval to a tail-friendly JSONL (one line per submission).
+    Easier to `tail -f` than the rewritten leaderboard JSON."""
+    TUNING_DIR.mkdir(parents=True, exist_ok=True)
+    with SELECTOR_LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(asdict(entry)) + "\n")
+
+
 # ── watcher preflight ──────────────────────────────────────────────────────────
 def watcher_fresh(max_age_s: float) -> bool:
     """True if the Discord watcher looks alive (eval_results.jsonl touched
@@ -128,9 +137,12 @@ def launch_watch_only(logger=print) -> subprocess.Popen:
     ae/models/ppo.pt staging mid-build. `--watch-only` uses an empty queue, so it
     only writes eval_results.jsonl and never submits — exactly what we want, since
     the selector is the sole AE submitter."""
-    logger("launching ingest-only watcher: rl_autorun.py --watch-only")
+    watcher_log = REPO / "logs" / "watcher.log"
+    watcher_log.parent.mkdir(parents=True, exist_ok=True)
+    logger(f"launching ingest-only watcher: rl_autorun.py --watch-only → {watcher_log}")
     return subprocess.Popen(
-        ["uv", "run", "rl_autorun.py", "--watch-only"], cwd=str(REPO))
+        ["uv", "run", "rl_autorun.py", "--watch-only"], cwd=str(REPO),
+        stdout=open(watcher_log, "a", encoding="utf-8"), stderr=subprocess.STDOUT)
 
 
 # ── the eval round-trip ────────────────────────────────────────────────────────
@@ -251,16 +263,24 @@ def run_selector(args) -> int:
             log(f"    {_file_hash(c)}  {c}")
         return 0
 
-    # Optionally bring up our own ingest-only watcher. When we own it we trust
-    # it's coming up and skip the (mtime-based) freshness gate, which would false-
-    # negative until the first result lands.
+    # --launch-watcher ALWAYS spawns our own ingest-only watcher. Do NOT gate this
+    # on watcher_fresh(): a recently-written eval_results.jsonl only means SOME
+    # watcher wrote it recently, NOT that one is alive now — e.g. an earlier
+    # baseline run's watcher that has since exited. Gating on the file made the
+    # selector skip launching and then hang forever with no watcher running.
     owns_watcher = None
-    if args.launch_watcher and not watcher_fresh(args.watcher_max_age):
+    if args.launch_watcher:
         owns_watcher = launch_watch_only(log)
         import atexit
         atexit.register(
             lambda: owns_watcher.poll() is None and owns_watcher.terminate())
-        time.sleep(8)  # let it log in to Discord
+        time.sleep(10)  # let it log in to Discord
+        if owns_watcher.poll() is not None:
+            log(f"! watcher exited immediately (rc={owns_watcher.returncode}). Check "
+                f"logs/watcher.log — usually a missing/expired DISCORD_TOKEN or "
+                f"discord.py-self not installed. Awaits will hang until a "
+                f"`rl_autorun.py --watch-only` watcher is running.")
+            owns_watcher = None
     require_watcher = args.require_watcher and owns_watcher is None
 
     while True:
@@ -306,6 +326,7 @@ def run_selector(args) -> int:
 
         entry.source = str(ckpt.parent)
         board["entries"].append(asdict(entry))
+        append_eval_log(entry)
         evaluated[sha] = {"tag": entry.tag, "score": entry.score, "at": entry.finished_at}
 
         # New real-eval best → optionally confirm with a second eval (cheap
@@ -319,6 +340,7 @@ def run_selector(args) -> int:
                     ckpt, tag2, stage=args.stage, timeout_s=args.timeout, logger=log)
                 if second is not None:
                     board["entries"].append(asdict(second))
+                    append_eval_log(second)
                     # Use the mean of the two as the confirmed score.
                     confirmed = entry
                     confirmed.score = (entry.score + second.score) / 2.0

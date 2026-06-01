@@ -144,10 +144,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--init-ckpt", type=str,
-                    default="ae_rl/checkpoints/stage1_bc_azbase.pt",
-                    help="shared warm-start checkpoint for every variant. Default is the "
-                         "azbase BC seed (the strongest teacher); use a league checkpoint to "
-                         "continue from there.")
+                    default="ae_rl/checkpoints/stage3_league_best.pt",
+                    help="shared warm-start checkpoint for every variant. Default is the best "
+                         "LEAGUE checkpoint (~0.65), NOT the BC seed — raw BC evals ~0.2, so "
+                         "the self-play phase is the value-add and each variant should push "
+                         "PAST the league result, not re-climb to it. Swap for whichever of "
+                         "your league checkpoints scored highest on the real eval.")
     ap.add_argument("--variants", type=int, default=len(VARIANTS),
                     help=f"how many of the default variants to run (max {len(VARIANTS)}).")
     ap.add_argument("--only", type=str, default="",
@@ -226,6 +228,9 @@ def main() -> None:
         return
 
     # Launch. Per-variant stdout/stderr → log files so the console stays readable.
+    # PYTHONUNBUFFERED so the logs flush line-by-line (otherwise block buffering
+    # makes `tail -f` look frozen for minutes).
+    child_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     POP_DIR.mkdir(parents=True, exist_ok=True)
     procs: list[tuple[str, subprocess.Popen, Path]] = []
     for cmd, v in train_cmds:
@@ -234,7 +239,8 @@ def main() -> None:
         paths["summary"].parent.mkdir(parents=True, exist_ok=True)
         log_path = POP_DIR / v["name"] / "train.log"
         log = open(log_path, "w", encoding="utf-8")
-        proc = subprocess.Popen(cmd, cwd=str(REPO), stdout=log, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, cwd=str(REPO), stdout=log,
+                                stderr=subprocess.STDOUT, env=child_env)
         procs.append((v["name"], proc, log_path))
         print(f"  launched {v['name']} pid={proc.pid} → {log_path}")
         time.sleep(2)  # stagger spawns so the env imports don't thundering-herd
@@ -243,7 +249,7 @@ def main() -> None:
     if selector_cmd:
         sel_log = POP_DIR / "selector.log"
         selector_proc = subprocess.Popen(
-            selector_cmd, cwd=str(REPO),
+            selector_cmd, cwd=str(REPO), env=child_env,
             stdout=open(sel_log, "w", encoding="utf-8"), stderr=subprocess.STDOUT)
         print(f"  launched selector pid={selector_proc.pid} → {sel_log}")
 
