@@ -41,7 +41,11 @@
       "Bash(pkill -9 -f \"rl_autorun.*watch-only\")",
       "Bash(echo \"clean watcher pid=$!\")",
       "Bash(echo \"watcher started pid=$!\")",
-      "Bash(grep -v \"^\\\\s*$\")"
+      "Bash(grep -v \"^\\\\s*$\")",
+      "Bash(exit 1)",
+      "Bash(rm -rf /tmp/smoke_league)",
+      "Bash(mkdir -p /tmp/smoke_league)",
+      "Bash(echo \"=== exit: $? ===\")"
     ]
   }
 }
