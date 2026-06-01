@@ -1,0 +1,194 @@
+# example custom compose. you only need to give us your participant stack,
+# i.e, the server and whatever it depends on.
+# remember to update TEAM-NAME to your team name
+
+services:
+  til-finals:
+    build: finals/
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-TEAM-NAME/TEAM-NAME-server:finals
+    container_name: TEAM-NAME-finals
+    restart: unless-stopped
+    network_mode: host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # DO NOT REMOVE THIS LINE ABOUT THE .env
+    env_file:
+      - .env
+    shm_size: 32gb
+    depends_on:
+      til-asr:
+        condition: service_healthy
+      til-cv:
+        condition: service_healthy
+      til-noise:
+        condition: service_healthy
+      til-nlp:
+        condition: service_healthy
+      til-ae:
+        condition: service_healthy
+    command: ["python", "participant_server.py"]
+    # "healthy" == connected to HQ: /health returns the JSON bool `true` only once the
+    # WebSocket is live. til-starter gates /start on this, so the match never begins
+    # before the participant has actually joined.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/health').read().strip()==b'true' else 1)",
+        ]
+      interval: 5s
+      timeout: 30s
+      retries: 30
+      start_period: 3s
+
+  til-asr:
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-TEAM-NAME/TEAM-NAME-asr:finals
+    container_name: TEAM-NAME-asr
+    restart: unless-stopped
+    environment:
+      NVIDIA_VISIBLE_DEVICES: 0
+      CUDA_VISIBLE_DEVICES: 0
+    ports:
+      - 5001:5001
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')",
+        ]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 3s
+
+  til-cv:
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-TEAM-NAME/TEAM-NAME-cv:finals
+    container_name: TEAM-NAME-cv
+    restart: unless-stopped
+    environment:
+      NVIDIA_VISIBLE_DEVICES: 0
+      CUDA_VISIBLE_DEVICES: 0
+    ports:
+      - 5002:5002
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:5002/health')",
+        ]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 3s
+
+  til-noise:
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-TEAM-NAME/TEAM-NAME-noise:finals
+    container_name: TEAM-NAME-noise
+    restart: unless-stopped
+    environment:
+      NVIDIA_VISIBLE_DEVICES: 0
+      CUDA_VISIBLE_DEVICES: 0
+    ports:
+      - 5003:5003
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:5003/health')",
+        ]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 3s
+
+  til-nlp:
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-TEAM-NAME/TEAM-NAME-nlp:finals
+    container_name: TEAM-NAME-nlp
+    restart: unless-stopped
+    environment:
+      NVIDIA_VISIBLE_DEVICES: 0
+      CUDA_VISIBLE_DEVICES: 0
+    ports:
+      - 5004:5004
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:5004/health')",
+        ]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 3s
+
+  til-ae:
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-TEAM-NAME/TEAM-NAME-ae:finals
+    container_name: TEAM-NAME-ae
+    restart: unless-stopped
+    environment:
+      NVIDIA_VISIBLE_DEVICES: 0
+      CUDA_VISIBLE_DEVICES: 0
+    ports:
+      - 5005:5005
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:5005/health')",
+        ]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 3s

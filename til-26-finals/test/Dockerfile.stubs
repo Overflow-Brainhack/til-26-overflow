@@ -1,0 +1,8 @@
+FROM python:3.11-slim
+
+RUN pip install --no-cache-dir websockets==13.1 Pillow numpy
+
+WORKDIR /workspace
+COPY stub_participants.py ae_manager.py _obs_adapter.py /workspace/
+
+CMD ["python", "-m", "stub_participants"]

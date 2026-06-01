@@ -1,0 +1,243 @@
+services:
+  til-competition-test:
+    build:
+      context: test_competition_server/
+      additional_contexts:
+        til-26-ae: ./test_competition_server/til-26-ae/
+    image: til_competition_test:latest
+    env_file:
+      - .env
+    environment:
+      - CONFIG=${CONFIG}
+    container_name: til-competition-test
+    restart: unless-stopped
+    ports:
+      - ${COMPETITION_SERVER_PORT}:${COMPETITION_SERVER_PORT}
+    volumes:
+      - ${HOST_DATA_DIR}:/workspace/data
+      - ./artifacts:/workspace/artifacts
+      - ./test_competition_server/configs:/workspace/configs:ro
+    shm_size: 32gb
+    working_dir: /workspace/src
+    # sleep 20 gives stubs + til-finals time to connect before the match starts.
+    # --ws-max-size 268435456 lifts uvicorn's 16 MiB cap for large corpus / mission batches.
+    command: uvicorn server:app --host 0.0.0.0 --port ${COMPETITION_SERVER_PORT} --ws-max-size 268435456
+    healthcheck:
+      test: curl -f http://localhost:${COMPETITION_SERVER_PORT}/health || exit 1
+      interval: 5s
+      timeout: 30s
+      retries: 30
+      start_period: 3s
+
+  til-stubs:
+    # Fills unused team seats with no-op websocket clients. Each stub returns
+    # random valid AE actions, dummy ASR/CV/NLP results, and acks the corpus.
+    build:
+      context: test/
+      dockerfile: Dockerfile.stubs
+    image: til_stubs_test:latest
+    container_name: til-stubs-test
+    env_file:
+      - .env
+    environment:
+      - COMPETITION_SERVER_HOST=til-competition-test
+      - COMPETITION_SERVER_PORT=${COMPETITION_SERVER_PORT}
+      - CONFIG=${CONFIG}
+      - CONFIGS_DIR=/workspace/configs
+      - REAL_TEAM_NAME=${TEAM_NAME}
+    volumes:
+      - ./test_competition_server/configs:/workspace/configs:ro
+    depends_on:
+      til-competition-test:
+        condition: service_healthy
+    restart: on-failure
+
+  til-starter:
+    # One-shot match driver. Waits for til-finals to be healthy (i.e. connected to HQ),
+    # POSTs /start, then polls /match_status until the match ends and exits 0. Run the
+    # stack with `up --abort-on-container-exit` and this exit tears everything down.
+    # Tiny curl image; reaches the HQ over the compose network by service name.
+    image: curlimages/curl:latest
+    container_name: til-starter
+    environment:
+      - COMPETITION_SERVER_PORT=${COMPETITION_SERVER_PORT}
+    depends_on:
+      til-competition-test:
+        condition: service_healthy
+      til-finals:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        HQ="http://til-competition-test:$${COMPETITION_SERVER_PORT}"
+        echo "[starter] til-finals connected — POST $$HQ/start (blocks through corpus/noise/NLP pre-warm)"
+        curl -fsS --max-time 600 -X POST "$$HQ/start"
+        echo "[starter] /start returned; polling /match_status until ended..."
+        for _ in $$(seq 1 450); do
+          s=$$(curl -fsS --max-time 5 "$$HQ/match_status" 2>/dev/null || echo "")
+          if printf '%s' "$$s" | grep -q '"ended": *true'; then
+            echo "[starter] MATCH ENDED:"
+            printf '%s\n' "$$s"
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "[starter] timed out waiting for match end"
+        exit 1
+
+  til-finals:
+    build: finals/
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-${TEAM_NAME}/${TEAM_NAME}-server:finals
+    env_file:
+      - .env
+    container_name: ${TEAM_NAME}-finals
+    restart: unless-stopped
+    network_mode: host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    shm_size: 32gb
+    depends_on:
+      til-competition-test:
+        condition: service_healthy
+      til-asr:
+        condition: service_healthy
+      til-cv:
+        condition: service_healthy
+      til-noise:
+        condition: service_healthy
+      til-nlp:
+        condition: service_healthy
+      til-ae:
+        condition: service_healthy
+    command: ["python", "participant_server.py"]
+    # "healthy" == connected to HQ: /health returns the JSON bool `true` only once the
+    # WebSocket is live. til-starter gates /start on this, so the match never begins
+    # before the participant has actually joined.
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/health').read().strip()==b'true' else 1)"]
+      interval: 5s
+      timeout: 30s
+      retries: 30
+      start_period: 3s
+
+  til-asr:
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-${TEAM_NAME}/${TEAM_NAME}-asr:finals
+    container_name: ${TEAM_NAME}-asr
+    restart: unless-stopped
+    environment:
+      NVIDIA_VISIBLE_DEVICES: 0
+      CUDA_VISIBLE_DEVICES: 0
+    ports:
+      - 5001:5001
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')"]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 3s
+
+  til-cv:
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-${TEAM_NAME}/${TEAM_NAME}-cv:finals
+    container_name: ${TEAM_NAME}-cv
+    restart: unless-stopped
+    environment:
+      NVIDIA_VISIBLE_DEVICES: 0
+      CUDA_VISIBLE_DEVICES: 0
+    ports:
+      - 5002:5002
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5002/health')"]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 3s
+
+  til-noise:
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-${TEAM_NAME}/${TEAM_NAME}-noise:finals
+    container_name: ${TEAM_NAME}-noise
+    restart: unless-stopped
+    environment:
+      NVIDIA_VISIBLE_DEVICES: 0
+      CUDA_VISIBLE_DEVICES: 0
+    ports:
+      - 5003:5003
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5003/health')"]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 3s
+
+  til-nlp:
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-${TEAM_NAME}/${TEAM_NAME}-nlp:finals
+    container_name: ${TEAM_NAME}-nlp
+    restart: unless-stopped
+    environment:
+      NVIDIA_VISIBLE_DEVICES: 0
+      CUDA_VISIBLE_DEVICES: 0
+    ports:
+      - 5004:5004
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5004/health')"]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 3s
+
+  til-ae:
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-${TEAM_NAME}/${TEAM_NAME}-ae:finals
+    container_name: ${TEAM_NAME}-ae
+    restart: unless-stopped
+    environment:
+      NVIDIA_VISIBLE_DEVICES: 0
+      CUDA_VISIBLE_DEVICES: 0
+    ports:
+      - 5005:5005
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5005/health')"]
+      interval: 5s
+      timeout: 30s
+      retries: 5
+      start_period: 3s
