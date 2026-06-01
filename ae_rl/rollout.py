@@ -150,6 +150,69 @@ _OSCILLATION_PERIODS = (2, 3)
 TURN_SPAM_THRESHOLD = 2
 SHAPING_TURN_SPAM_PENALTY = -0.75
 
+# The env's own default own-base penalty (til_environment config.py). Used as the
+# "raw eval reward" value when shaping is fully disabled.
+ENV_DEFAULT_OWN_BASE = -50.0
+
+
+@dataclass
+class ShapingConfig:
+    """Per-run reward-shaping configuration — each component independently
+    toggleable so its effect on the REAL eval can be A/B'd in isolation.
+
+    The field defaults reproduce the historical all-on shaping exactly, so
+    ``ShapingConfig()`` == the old ``shape_rewards=True`` behaviour and
+    ``ShapingConfig.from_master(False)`` == the old ``shape_rewards=False`` (raw
+    env reward) behaviour. Anything that previously threaded a ``shape_rewards``
+    bool still works; the bool is just mapped to one of those two presets.
+
+    Components
+    ----------
+    offensive_multipliers : boost attack_damage / kill / base-destroy at award.
+    env_penalties         : step / stationary / invalid-action cfg penalties.
+    pbrs                  : potential-based shaping (γ·Φ(s')−Φ(s)).
+    anti_oscillation      : the LEFT/RIGHT shake + turn-spam penalties.
+    own_base_destroyed    : value for losing your own base. The eval charges
+                            ``ENV_DEFAULT_OWN_BASE`` (−50); training has used 0.0
+                            deliberately (defending isn't worth the lost offense),
+                            but it's exposed so a small negative can be tried.
+    """
+
+    offensive_multipliers: bool = True
+    env_penalties: bool = True
+    pbrs: bool = True
+    anti_oscillation: bool = True
+    own_base_destroyed: float = 0.0
+    # Tunable magnitudes (defaults = the historical module constants).
+    attack_damage_dealt_mult: float = SHAPING_ATTACK_DAMAGE_DEALT_MULT
+    attack_damage_taken_mult: float = SHAPING_ATTACK_DAMAGE_TAKEN_MULT
+    destroy_enemy_base_mult: float = SHAPING_DESTROY_ENEMY_BASE_MULT
+    attack_kill_mult: float = SHAPING_ATTACK_KILL_MULT
+    step_penalty: float = SHAPING_STEP_PENALTY
+    stationary_penalty: float = SHAPING_STATIONARY_PENALTY
+    invalid_action: float = SHAPING_INVALID_ACTION
+
+    @classmethod
+    def from_master(cls, enabled: bool) -> "ShapingConfig":
+        """Map the legacy ``shape_rewards`` bool to a config. ``True`` = all-on
+        (own_base 0.0); ``False`` = raw eval reward (own_base −50, nothing shaped)."""
+        if enabled:
+            return cls()
+        return cls(
+            offensive_multipliers=False,
+            env_penalties=False,
+            pbrs=False,
+            anti_oscillation=False,
+            own_base_destroyed=ENV_DEFAULT_OWN_BASE,
+        )
+
+    def describe(self) -> str:
+        on = [n for n, v in (("mult", self.offensive_multipliers),
+                             ("envpen", self.env_penalties),
+                             ("pbrs", self.pbrs),
+                             ("antiosc", self.anti_oscillation)) if v]
+        return f"shaping[{'+'.join(on) or 'none'} own_base={self.own_base_destroyed:g}]"
+
 
 def _is_oscillating(history, action: int, pos: tuple[int, int]) -> bool:
     """True if appending (action, pos) would close a 2- or 3-step cycle.
@@ -171,59 +234,71 @@ def _is_oscillating(history, action: int, pos: tuple[int, int]) -> bool:
     return False
 
 
-def _wrap_offensive_rewards(env: Bomberman) -> None:
+def _wrap_offensive_rewards(env: Bomberman, shaping: "ShapingConfig") -> None:
     """Boost offensive reward events at award time (training only).
 
     Positive ``attack_damage`` (dealt) and ``destroy_enemy_base`` / ``attack_kill``
     are amplified to encourage aggression; negative ``attack_damage`` (taken) is
-    amplified by ``SHAPING_ATTACK_DAMAGE_TAKEN_MULT`` to teach damage aversion.
+    amplified by ``shaping.attack_damage_taken_mult`` to teach damage aversion.
     """
     original_award = env.dynamics.rewards.award
 
     def award_boosted(recipient_id: str, event: str, multiplier: float = 1.0) -> float:
         if event == "attack_damage":
             if multiplier > 0:
-                multiplier = multiplier * SHAPING_ATTACK_DAMAGE_DEALT_MULT
+                multiplier = multiplier * shaping.attack_damage_dealt_mult
             elif multiplier < 0:
-                multiplier = multiplier * SHAPING_ATTACK_DAMAGE_TAKEN_MULT
+                multiplier = multiplier * shaping.attack_damage_taken_mult
         elif event == "destroy_enemy_base":
-            multiplier = multiplier * SHAPING_DESTROY_ENEMY_BASE_MULT
+            multiplier = multiplier * shaping.destroy_enemy_base_mult
         elif event == "attack_kill":
-            multiplier = multiplier * SHAPING_ATTACK_KILL_MULT
+            multiplier = multiplier * shaping.attack_kill_mult
         return original_award(recipient_id, event, multiplier)
 
     env.dynamics.rewards.award = award_boosted
 
 
-def make_env(novice: bool = True, shape_rewards: bool = False) -> Bomberman:
-    """Build a Bomberman env. ``shape_rewards=True`` enables training-time
-    reward shaping (env cfg penalties + offensive multipliers). Eval / benchmark
-    / diagnostic callers must leave it False so they see raw env reward."""
+def _resolve_shaping(shape_rewards: bool, shaping: "ShapingConfig | None") -> "ShapingConfig":
+    """A ``shaping`` config takes precedence; otherwise derive one from the
+    legacy ``shape_rewards`` bool so every old call site keeps working."""
+    return shaping if shaping is not None else ShapingConfig.from_master(shape_rewards)
+
+
+def make_env(novice: bool = True, shape_rewards: bool = False,
+             shaping: "ShapingConfig | None" = None) -> Bomberman:
+    """Build a Bomberman env. Pass a ``ShapingConfig`` for per-component control,
+    or the legacy ``shape_rewards`` bool (True = all-on, False = raw eval reward).
+    Eval / benchmark / diagnostic callers leave both defaulted → raw env reward."""
+    sh = _resolve_shaping(shape_rewards, shaping)
     cfg = default_config()
     cfg.env.novice = novice
     cfg.env.render_mode = None
-    if shape_rewards:
-        # Surface A — env-config-level shaping. Only fills in 0-valued slots
-        # so eval semantics are unchanged (eval container builds its own env).
-        cfg.rewards.step_penalty = SHAPING_STEP_PENALTY
-        cfg.rewards.stationary_penalty = SHAPING_STATIONARY_PENALTY
-        cfg.rewards.invalid_action = SHAPING_INVALID_ACTION
-        cfg.rewards.own_base_destroyed = SHAPING_OWN_BASE_DESTROYED
+    # Own-base penalty is always set explicitly: the eval default is −50, training
+    # has used 0.0; either way we want the value the run asked for.
+    cfg.rewards.own_base_destroyed = float(sh.own_base_destroyed)
+    if sh.env_penalties:
+        # Surface A — env-config-level shaping. Fills in otherwise-0 slots so eval
+        # semantics are unchanged (the eval container builds its own env).
+        cfg.rewards.step_penalty = sh.step_penalty
+        cfg.rewards.stationary_penalty = sh.stationary_penalty
+        cfg.rewards.invalid_action = sh.invalid_action
     env = Bomberman(cfg)
-    if shape_rewards:
-        _wrap_offensive_rewards(env)
+    if sh.offensive_multipliers:
+        _wrap_offensive_rewards(env, sh)
     return env
 
 
 def _make_env_pool(novice: bool = True, advanced_prob: float = 0.0,
-                   shape_rewards: bool = True) -> dict[bool, Bomberman]:
+                   shape_rewards: bool = True,
+                   shaping: "ShapingConfig | None" = None) -> dict[bool, Bomberman]:
     """Build the training-side env pool. ``shape_rewards`` defaults True here
     because every caller is a training collector; eval/benchmark constructs its
-    own envs via ``make_env`` directly with default ``shape_rewards=False``."""
+    own envs via ``make_env`` directly with default raw reward."""
+    sh = _resolve_shaping(shape_rewards, shaping)
     if novice and advanced_prob > 0.0:
-        return {True: make_env(True, shape_rewards=shape_rewards),
-                False: make_env(False, shape_rewards=shape_rewards)}
-    return {novice: make_env(novice, shape_rewards=shape_rewards)}
+        return {True: make_env(True, shaping=sh),
+                False: make_env(False, shaping=sh)}
+    return {novice: make_env(novice, shaping=sh)}
 
 
 def _select_env(envs: dict[bool, Bomberman], advanced_prob: float, rng) -> Bomberman:
@@ -329,7 +404,8 @@ def _compute_gae(rewards, values, dones, gamma: float, lam: float,
 def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
                                gamma, lam, n_episodes, rng, advanced_prob=0.0,
                                learner_slots=None, shape_rewards=True,
-                               live_nets=None, collect_global_state=False):
+                               live_nets=None, collect_global_state=False,
+                               shaping=None):
     """Run *n_episodes* self-play games. Returns (trajs, learner_returns, opp_returns).
 
     ``shape_rewards`` controls the trajectory-level shaping (PBRS, oscillation
@@ -341,7 +417,13 @@ def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
     privileged global-state arrays per learner step. The privileged critic is
     NOT run here — workers stay actor-only — so we just dump the raw arrays and
     let the PPO update compute V(global) + GAE in the main process.
+
+    ``shaping`` (a ShapingConfig) controls trajectory-level shaping (PBRS,
+    oscillation/turn-spam). When None it's derived from ``shape_rewards`` for
+    backward compatibility. Env-level shaping (penalties, offensive multipliers,
+    own_base) is baked into the env when it was built — see ``make_env``.
     """
+    sh = _resolve_shaping(shape_rewards, shaping)
     model.eval()
     all_trajs: list[dict] = []
     learner_returns: list[float] = []
@@ -407,17 +489,13 @@ def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
                 # attributed to the action that produced this transition.
                 # All three shaping terms gated by shape_rewards so the polish
                 # phase can train against the raw env reward.
-                phi_curr = _compute_phi(obs, mem) if shape_rewards else 0.0
+                phi_curr = _compute_phi(obs, mem) if sh.pbrs else 0.0
                 if opened[agent]:
-                    if shape_rewards:
-                        shaped = (
-                            reward
-                            + gamma * phi_curr
-                            - prev_phi[agent]
-                            + pending_penalty[agent]
-                        )
-                    else:
-                        shaped = reward
+                    shaped = reward
+                    if sh.pbrs:
+                        shaped += gamma * phi_curr - prev_phi[agent]
+                    # pending_penalty is 0 unless anti_oscillation queued one.
+                    shaped += pending_penalty[agent]
                     traj[agent]["rewards"].append(shaped)
                     traj[agent]["dones"].append(0.0)
                     pending_penalty[agent] = 0.0
@@ -429,7 +507,7 @@ def _collect_selfplay_episodes(envs, model, device, opponent_specs, n_learners,
                 )
                 a_int = int(action.item())
                 loc_tuple = _agent_xy(obs)
-                if shape_rewards:
+                if sh.anti_oscillation:
                     # Anti-oscillation: this action closes a 2- or 3-step
                     # (action, position) cycle → queue penalty against it.
                     if _is_oscillating(action_history[agent], a_int, loc_tuple):
@@ -560,7 +638,7 @@ _TE: dict = {}   # teacher worker globals
 
 def _sp_worker_init(opponent_specs, n_learners, novice, advanced_prob,
                     gamma, lam, learner_slots, shape_rewards,
-                    n_live_slots=0, collect_global_state=False):
+                    n_live_slots=0, collect_global_state=False, shaping=None):
     torch.set_num_threads(1)
     # Match the parent's sharing strategy — see module-level comment.
     try:
@@ -568,6 +646,7 @@ def _sp_worker_init(opponent_specs, n_learners, novice, advanced_prob,
     except (RuntimeError, AttributeError):
         pass
     from model import RecurrentMaskableActorCritic
+    sh = _resolve_shaping(shape_rewards, shaping)
     live_nets = {
         i: RecurrentMaskableActorCritic().to("cpu").eval()
         for i in range(int(n_live_slots))
@@ -576,10 +655,10 @@ def _sp_worker_init(opponent_specs, n_learners, novice, advanced_prob,
         device=torch.device("cpu"),
         model=RecurrentMaskableActorCritic().to("cpu").eval(),
         live_nets=live_nets,
-        envs=_make_env_pool(novice, advanced_prob, shape_rewards=shape_rewards),
+        envs=_make_env_pool(novice, advanced_prob, shaping=sh),
         specs=opponent_specs, n_learners=n_learners, gamma=gamma, lam=lam,
         advanced_prob=advanced_prob, learner_slots=learner_slots,
-        shape_rewards=shape_rewards,
+        shape_rewards=shape_rewards, shaping=sh,
         collect_global_state=bool(collect_global_state),
     )
 
@@ -613,6 +692,7 @@ def _sp_worker_task(args):
         shape_rewards=_SP["shape_rewards"],
         live_nets=_SP["live_nets"],
         collect_global_state=_SP.get("collect_global_state", False),
+        shaping=_SP.get("shaping"),
     )
 
 
@@ -683,6 +763,7 @@ class SelfPlayCollector:
         shape_rewards: bool = True,
         n_live_slots: int = 0,
         collect_global_state: bool = False,
+        shaping: "ShapingConfig | None" = None,
     ):
         self.model = model
         self.device = device
@@ -695,6 +776,8 @@ class SelfPlayCollector:
         self.lam = lam
         self.num_workers = max(1, int(num_workers))
         self.shape_rewards = bool(shape_rewards)
+        # Per-component shaping config (None → derived from shape_rewards).
+        self.shaping = _resolve_shaping(shape_rewards, shaping)
         # Asymmetric/CTDE: record privileged global state for the critic.
         self.collect_global_state = bool(collect_global_state)
         # Evolutionary mode: K live-opponent models pre-allocated per worker.
@@ -706,7 +789,7 @@ class SelfPlayCollector:
         self._serial_live_nets: dict = {}
         self._pool = None
         self.envs = (
-            _make_env_pool(novice, self.advanced_prob, shape_rewards=self.shape_rewards)
+            _make_env_pool(novice, self.advanced_prob, shaping=self.shaping)
             if self.num_workers == 1 else None
         )
 
@@ -725,6 +808,7 @@ class SelfPlayCollector:
                     self.opponent_specs, self.n_learners, self.novice,
                     self.advanced_prob, self.gamma, self.lam, self.learner_slots,
                     self.shape_rewards, self.n_live_slots, self.collect_global_state,
+                    self.shaping,
                 ),
             )
 
@@ -835,6 +919,7 @@ class SelfPlayCollector:
                 shape_rewards=self.shape_rewards,
                 live_nets=live_nets,
                 collect_global_state=self.collect_global_state,
+                shaping=self.shaping,
             )
             trajs.extend(tj); lr.extend(l); opr.extend(o)
         return trajs, lr, opr

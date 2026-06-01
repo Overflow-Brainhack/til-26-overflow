@@ -56,8 +56,9 @@ from controllers import (
     vanilla_heuristic_spec,
 )
 from model import RecurrentMaskableActorCritic, load_checkpoint, load_extras, save_checkpoint
+from pfsp import PFSPSampler
 from ppo import RunningReturnNorm, ppo_update
-from rollout import SelfPlayCollector, default_workers
+from rollout import ShapingConfig, SelfPlayCollector, default_workers
 from validation import validate_model
 
 
@@ -205,6 +206,36 @@ def _build_opponent_specs(args, league_dir=None):
     return specs
 
 
+def _build_pfsp_candidates(args, league_dir):
+    """``(id, spec)`` pairs for the PFSP sampler: a fixed strong/diverse scripted
+    core (always present), the optional opponents the user enabled via --*-prob,
+    and one candidate per frozen league snapshot (the whole archive, so PFSP can
+    keep old play-styles in the mix instead of forgetting them)."""
+    cands: list[tuple[str, dict]] = [
+        ("tactical", tactical_spec()),
+        ("azbasev1", azbasev1_spec()),
+        ("azbasev4", azbasev4_spec()),
+        ("berserker", berserker_spec()),
+    ]
+    optional = [
+        ("heuristic", args.heuristic_prob, heuristic_spec),
+        ("vanilla_heuristic", args.vanilla_heuristic_prob, vanilla_heuristic_spec),
+        ("pure_collector", args.pure_collector_prob, pure_collector_spec),
+        ("random", args.random_prob, random_spec),
+        ("idle", args.idle_prob, idle_spec),
+        ("trap_setter", args.trap_setter_prob, trap_setter_spec),
+        ("patroller", args.patroller_prob, patroller_spec),
+        ("kamikaze", args.kamikaze_prob, kamikaze_spec),
+    ]
+    have = {c[0] for c in cands}
+    for name, prob, builder in optional:
+        if prob > 0 and name not in have:
+            cands.append((name, builder()))
+    for ckpt in league_checkpoints(league_dir):
+        cands.append((f"league/{ckpt.stem}", net_spec(ckpt)))
+    return cands
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--updates", type=int, default=200)
@@ -228,6 +259,39 @@ def main():
                     help="updates over which to linearly anneal from --entropy-coef to "
                          "--entropy-coef-end. 0 (default) = use --updates so the anneal "
                          "covers the whole run. Has no effect if --entropy-coef-end < 0.")
+    # ── anti-plateau exploration controls ────────────────────────────────────
+    ap.add_argument("--entropy-floor", type=float, default=0.0,
+                    help="hard lower bound on the entropy coef after annealing. Stops the "
+                         "policy from collapsing to a deterministic local optimum (the "
+                         "self-play plateau). Try 0.005-0.01.")
+    ap.add_argument("--explore-burst-every", type=int, default=0,
+                    help="every N updates, spike the entropy coef to --explore-burst-coef "
+                         "for --explore-burst-len updates. Periodic exploration kicks knock "
+                         "the policy out of cyclic self-play equilibria. 0 = disabled.")
+    ap.add_argument("--explore-burst-coef", type=float, default=0.05,
+                    help="entropy coef during an exploration burst.")
+    ap.add_argument("--explore-burst-len", type=int, default=3,
+                    help="length (updates) of each exploration burst.")
+    # ── PFSP (prioritized fictitious self-play) ──────────────────────────────
+    ap.add_argument("--pfsp", action="store_true",
+                    help="enable PFSP opponent sampling: periodically estimate the win-rate "
+                         "vs each opponent (scripted + every league snapshot) and concentrate "
+                         "training on the informative matchups. The cure for self-play plateau "
+                         "/ cycling. Overrides the fixed --*-prob mix.")
+    ap.add_argument("--pfsp-mode", choices=("even", "hard"), default="even",
+                    help="'even' = focus ~50%% win-rate opponents (learn what you can just "
+                         "handle; auto-deweights too-strong heuristics and crushed bots). "
+                         "'hard' = focus opponents you currently LOSE to (close a known gap).")
+    ap.add_argument("--pfsp-every", type=int, default=25,
+                    help="updates between PFSP win-rate refreshes + pool rebuilds.")
+    ap.add_argument("--pfsp-eval-episodes", type=int, default=3,
+                    help="games per candidate per refresh to estimate its win-rate (kept low "
+                         "— it's pure overhead). Higher = less noisy weights, slower.")
+    ap.add_argument("--pfsp-q", type=float, default=2.0,
+                    help="sharpness of the 'hard' curriculum (ignored for 'even').")
+    ap.add_argument("--pfsp-floor", type=float, default=0.03,
+                    help="min pool share reserved for every opponent so none is starved "
+                         "(keeps a broad frozen archive in play, not just recent snapshots).")
     ap.add_argument("--clip", type=float, default=0.2)
     # Default opponent mix is "heuristic-free": the EditedHeuristicPolicyV2
     # family (heuristic, stochastic_heuristic, vanilla_heuristic) is zeroed out
@@ -332,6 +396,29 @@ def main():
                          "and train against raw env reward. Use as a polish phase on an "
                          "already-converged checkpoint to remove shaping bias and align "
                          "the gradient with the real eval objective.")
+    # Granular shaping toggles — each component can be ablated independently so
+    # its effect on the REAL eval is measurable in isolation (vs the all-or-
+    # nothing --no-shaping). Ignored when --no-shaping is set.
+    ap.add_argument("--no-offensive-multipliers", action="store_true",
+                    help="drop the attack/kill/base-destroy reward multipliers. Try this "
+                         "first if the agent is over-aggressive and dies / loses its base "
+                         "on the real eval.")
+    ap.add_argument("--no-pbrs", action="store_true",
+                    help="drop potential-based shaping (distance-to-collectible / -enemy-base).")
+    ap.add_argument("--no-env-penalties", action="store_true",
+                    help="drop the step / stationary / invalid-action env penalties.")
+    ap.add_argument("--no-anti-oscillation", action="store_true",
+                    help="drop the LEFT/RIGHT-shake + turn-spam penalties (the LayeredRL "
+                         "deploy guard handles oscillation anyway).")
+    ap.add_argument("--own-base-penalty", type=float, default=0.0,
+                    help="reward for losing your own base during training. Eval charges -50; "
+                         "default 0.0 (defending isn't worth the lost offense). Try -5 to "
+                         "teach only the cheap defensive plays without sacrificing rushes.")
+    ap.add_argument("--destroy-base-mult", type=float, default=2.0,
+                    help="multiplier on destroy_enemy_base reward (default 2.0). Lower toward "
+                         "1.0 to align base-destruction value with the real +50 eval reward.")
+    ap.add_argument("--damage-taken-mult", type=float, default=2.0,
+                    help="multiplier on damage TAKEN (default 2.0 = stronger survival pressure).")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--summary-json", type=str, default="",
                     help="path for the run-summary JSON (default: ae_rl/runs/stage3_league/latest.json). "
@@ -396,18 +483,43 @@ def _run_stage3(args, summary: RunSummary):
 
     def _entropy_coef_for(update: int) -> float:
         if args.entropy_coef_end < 0:
-            return args.entropy_coef
-        anneal_until = args.entropy_anneal_until or args.updates
-        if anneal_until <= 0:
-            return args.entropy_coef_end
-        frac = min(1.0, max(0.0, (update - 1) / anneal_until))
-        return args.entropy_coef + (args.entropy_coef_end - args.entropy_coef) * frac
+            base = args.entropy_coef
+        else:
+            anneal_until = args.entropy_anneal_until or args.updates
+            if anneal_until <= 0:
+                base = args.entropy_coef_end
+            else:
+                frac = min(1.0, max(0.0, (update - 1) / anneal_until))
+                base = args.entropy_coef + (args.entropy_coef_end - args.entropy_coef) * frac
+        # Anti-plateau: hard floor + periodic exploration bursts.
+        base = max(base, args.entropy_floor)
+        if args.explore_burst_every > 0:
+            phase = (update - 1) % args.explore_burst_every
+            if phase < max(1, args.explore_burst_len):
+                base = max(base, args.explore_burst_coef)
+        return base
 
     # Seed the league with the starting policy so there's at least one net opponent.
     if not league_checkpoints(league_dir):
         seed_path = league_dir / "gen_000.pt"
         save_checkpoint(seed_path, model, meta={"stage": "league_seed"})
         print(f"Seeded league with {seed_path}")
+
+    # Per-component shaping config (granular flags override the all-on default;
+    # --no-shaping wins outright → raw eval reward).
+    if not args.shape_rewards:
+        shaping = ShapingConfig.from_master(False)
+    else:
+        shaping = ShapingConfig(
+            offensive_multipliers=not args.no_offensive_multipliers,
+            env_penalties=not args.no_env_penalties,
+            pbrs=not args.no_pbrs,
+            anti_oscillation=not args.no_anti_oscillation,
+            own_base_destroyed=args.own_base_penalty,
+            destroy_enemy_base_mult=args.destroy_base_mult,
+            attack_damage_taken_mult=args.damage_taken_mult,
+        )
+    summary.set("shaping", shaping.describe())
 
     specs = _build_opponent_specs(args, league_dir)
     summary.set("opponent_kinds", sorted({s["kind"] for s in specs}))
@@ -421,10 +533,26 @@ def _run_stage3(args, summary: RunSummary):
         gamma=args.gamma, lam=args.lam,
         num_workers=args.num_workers,
         shape_rewards=args.shape_rewards,
+        shaping=shaping,
     )
-    print(f"Rollout workers: {args.num_workers}  shape_rewards={args.shape_rewards}")
+    print(f"Rollout workers: {args.num_workers}  {shaping.describe()}")
     if args.novice and args.advanced_prob > 0:
         print(f"Arena mix: novice with advanced_prob={args.advanced_prob:.2f}")
+
+    # ── PFSP sampler (optional) ────────────────────────────────────────────────
+    # When enabled, the opponent pool is rebuilt every --pfsp-every updates from
+    # measured win-rates instead of the fixed --*-prob mix, and passed to
+    # collect() via opp_specs_override. The fixed pool above is still used until
+    # the first refresh.
+    sampler = None
+    pfsp_pool = None
+    if args.pfsp:
+        cands = _build_pfsp_candidates(args, league_dir)
+        sampler = PFSPSampler(cands, mode=args.pfsp_mode, q=args.pfsp_q,
+                              floor=args.pfsp_floor)
+        summary.set("pfsp_candidates", sampler.ids())
+        print(f"PFSP: {len(cands)} candidates, mode={args.pfsp_mode}, "
+              f"refresh/{args.pfsp_every}upd x{args.pfsp_eval_episodes} games")
 
     gen = len(league_checkpoints(league_dir))
     summary.set("starting_generation", gen)
@@ -458,7 +586,21 @@ def _run_stage3(args, summary: RunSummary):
     bar = trange(1, args.updates + 1, desc="League", unit="upd")
     for update in bar:
         t0 = time.time()
-        batch, stats = collector.collect(args.episodes_per_update, progress=True)
+        # PFSP: periodically re-estimate per-opponent win-rates and rebuild the
+        # weighted pool. The first refresh happens on update 1 so the very first
+        # collect already trains on the prioritised mix.
+        if sampler is not None and (pfsp_pool is None or (update - 1) % args.pfsp_every == 0):
+            sampler.refresh(collector, args.pfsp_eval_episodes)
+            pfsp_pool = sampler.weighted_pool()
+            summ = sampler.summary()
+            summary.record("pfsp", {"update": update, "per_opponent": summ})
+            top = sorted(summ, key=lambda d: d["weight"], reverse=True)[:5]
+            tqdm.write("  [pfsp] " + "  ".join(
+                f"{d['id']}(p={d['p_win']:.2f},w={d['weight']:.2f})" for d in top))
+        batch, stats = collector.collect(
+            args.episodes_per_update, progress=True,
+            opp_specs_override=pfsp_pool,
+        )
         ent_coef = _entropy_coef_for(update)
         losses = ppo_update(
             model, opt, batch, device,
@@ -586,7 +728,14 @@ def _run_stage3(args, summary: RunSummary):
                     if pruned:
                         tqdm.write(f"  - pruned {len(pruned)} old snapshot(s): {', '.join(pruned)}")
                         summary.record("snapshot_prunes", {"update": update, "pruned": pruned})
-                collector.set_opponent_specs(_build_opponent_specs(args, league_dir))
+                if sampler is not None:
+                    # PFSP owns the opponent pool — register the new snapshot as a
+                    # candidate (seeded at p=0.5 so it gets played) and let the next
+                    # refresh weight it. Don't rebuild the fixed pool / recreate the
+                    # worker pool. It enters the mix on the next pfsp refresh.
+                    sampler.add_candidate(f"league/{snap.stem}", net_spec(snap))
+                else:
+                    collector.set_opponent_specs(_build_opponent_specs(args, league_dir))
 
         if update % args.save_every == 0 or update == args.updates:
             save_checkpoint(ckpt_path, model, meta={"stage": "league", "update": update,
