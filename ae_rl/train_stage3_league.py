@@ -110,7 +110,9 @@ def _build_opponent_specs(args, league_dir=None):
     """
     if league_dir is None:
         league_dir = LEAGUE_DIR
-    pool = league_checkpoints(league_dir)
+    # Frozen-core probe keeps self out of the pool entirely — ignore any league
+    # snapshots on disk so the opponent set stays the pure scripted core.
+    pool = [] if getattr(args, "frozen_core", False) else league_checkpoints(league_dir)
     n_nets = max(1, len(pool))
 
     # Per-type non-net probabilities, clamped to [0, 1].
@@ -231,8 +233,11 @@ def _build_pfsp_candidates(args, league_dir):
     for name, prob, builder in optional:
         if prob > 0 and name not in have:
             cands.append((name, builder()))
-    for ckpt in league_checkpoints(league_dir):
-        cands.append((f"league/{ckpt.stem}", net_spec(ckpt)))
+    # Frozen-core probe excludes every self-snapshot so PFSP can't build the
+    # self-referential mirror-match ladder that corrodes the real-eval score.
+    if not getattr(args, "frozen_core", False):
+        for ckpt in league_checkpoints(league_dir):
+            cands.append((f"league/{ckpt.stem}", net_spec(ckpt)))
     return cands
 
 
@@ -360,6 +365,15 @@ def main():
                          "deleted. 0 (default) = unlimited. Keeps the pool fresh — old "
                          "snapshots represent obsolete play styles that consume sample "
                          "budget without teaching anything new.")
+    ap.add_argument("--frozen-core", action="store_true",
+                    help="FROZEN-CORE PROBE (HANDOFF Phase 1): pin the opponent pool to the "
+                         "scripted core (tactical/azbasev1/azbasev4/berserker + any --*-prob "
+                         "you leave enabled) with NO self-play snapshots — skips the league "
+                         "seed, never snapshots self mid-run, and excludes league checkpoints "
+                         "from the PFSP candidate set. Targets the corrosion mechanism: stops "
+                         "the policy climbing the self-referential mirror-match ladder so "
+                         "hard-mode keeps gaining against a fixed strong target instead of "
+                         "decaying. Pair with --pfsp --pfsp-mode hard + a tiny --lr.")
     ap.add_argument("--save-every", type=int, default=10)
     ap.add_argument("--advanced-prob", type=float, default=0.0,
                     help="when training on --novice, probability a rollout episode uses an advanced random map")
@@ -500,7 +514,11 @@ def _run_stage3(args, summary: RunSummary):
         return base
 
     # Seed the league with the starting policy so there's at least one net opponent.
-    if not league_checkpoints(league_dir):
+    # Frozen-core deliberately keeps self out of the pool, so skip the seed.
+    if args.frozen_core:
+        print("Frozen-core: no league seed, no self-snapshots — opponent pool pinned "
+              "to the scripted core.")
+    elif not league_checkpoints(league_dir):
         seed_path = league_dir / "gen_000.pt"
         save_checkpoint(seed_path, model, meta={"stage": "league_seed"})
         print(f"Seeded league with {seed_path}")
@@ -641,7 +659,8 @@ def _run_stage3(args, summary: RunSummary):
         val = None
         rolled_back = False
         validation_due = args.validate_every > 0 and update % args.validate_every == 0
-        snapshot_due = update % args.snapshot_every == 0
+        # Frozen-core never adds self to the league pool.
+        snapshot_due = (not args.frozen_core) and (update % args.snapshot_every == 0)
         if validation_due or (snapshot_due and args.gated_snapshots):
             val = validate_model(
                 model,
