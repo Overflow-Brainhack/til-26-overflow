@@ -6,6 +6,7 @@
 **/models/
 **/results/
 **/runs/
+**/artifacts/
 *.pt
 *.pth
 *.nemo

@@ -27,8 +27,10 @@ class ModelsManager:
     async def exit(self):
         await self.client.aclose()
 
-    async def async_post(self, endpoint: str, json: dict | None = None):
-        return await self.client.post(endpoint, json=json, timeout=None)
+    async def async_post(
+        self, endpoint: str, json: dict | None = None, timeout: float | None = None
+    ):
+        return await self.client.post(endpoint, json=json, timeout=timeout)
 
     async def send_result(
         self, websocket: websockets.ClientConnection, data: dict[str, Any]
@@ -37,7 +39,9 @@ class ModelsManager:
 
     # ── per-mission-batch endpoints ────────────────────────────────────────
 
-    async def run_asr_batch(self, items: list[dict]) -> list[dict]:
+    async def run_asr_batch(
+        self, items: list[dict], timeout: float | None = None
+    ) -> list[dict]:
         """`items` = [{"task_id": ..., "b64": ...}, ...]
         Returns [{"task_id": ..., "answer": str}, ...].
         """
@@ -45,6 +49,7 @@ class ModelsManager:
         response = await self.async_post(
             f"http://{self.local_ip}:5001/asr",
             json={"instances": [{"b64": it["b64"]} for it in items]},
+            timeout=timeout,
         )
         predictions = response.json().get("predictions", [])
         results = [
@@ -54,7 +59,9 @@ class ModelsManager:
         logger.info(f"ASR batch complete: {len(results)} answers")
         return results
 
-    async def run_cv_batch(self, items: list[dict]) -> list[dict]:
+    async def run_cv_batch(
+        self, items: list[dict], timeout: float | None = None
+    ) -> list[dict]:
         """`items` = [{"task_id": ..., "b64": ...}, ...]
         Returns [{"task_id": ..., "detections": [{bbox, category_id}, ...]}, ...].
         """
@@ -62,6 +69,7 @@ class ModelsManager:
         response = await self.async_post(
             f"http://{self.local_ip}:5002/cv",
             json={"instances": [{"b64": it["b64"]} for it in items]},
+            timeout=timeout,
         )
         predictions = response.json().get("predictions", [])
         out: list[dict] = []
@@ -70,7 +78,9 @@ class ModelsManager:
         logger.info(f"CV batch complete: {len(out)} predictions")
         return out
 
-    async def run_noise_batch(self, items: list[dict]) -> list[dict]:
+    async def run_noise_batch(
+        self, items: list[dict], timeout: float | None = None
+    ) -> list[dict]:
         """`items` = [{"task_id": ..., "b64": ...}, ...]
         Returns [{"task_id": ..., "b64": <noised_b64>}, ...].
         """
@@ -80,6 +90,7 @@ class ModelsManager:
             json={
                 "instances": [{"key": it["task_id"], "b64": it["b64"]} for it in items]
             },
+            timeout=timeout,
         )
         predictions = response.json().get("predictions", [])
         results = [
@@ -92,7 +103,9 @@ class ModelsManager:
         )
         return results
 
-    async def run_nlp_batch(self, items: list[dict]) -> list[dict]:
+    async def run_nlp_batch(
+        self, items: list[dict], timeout: float | None = None
+    ) -> list[dict]:
         """`items` = [{"task_id": ..., "question": str}, ...]
         Returns [{"task_id": ..., "answer": str, "documents": [str, ...]}, ...].
         """
@@ -100,6 +113,7 @@ class ModelsManager:
         response = await self.async_post(
             f"http://{self.local_ip}:5004/nlp",
             json={"instances": [{"question": it["question"]} for it in items]},
+            timeout=timeout,
         )
         predictions = response.json().get("predictions", [])
         out: list[dict] = []

@@ -5,8 +5,8 @@
 services:
   til-finals:
     build: finals/
-    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-TEAM-NAME/TEAM-NAME-server:finals
-    container_name: TEAM-NAME-finals
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-overflow/overflow-server:finals
+    container_name: overflow-finals
     restart: unless-stopped
     network_mode: host
     extra_hosts:
@@ -44,8 +44,8 @@ services:
       start_period: 3s
 
   til-asr:
-    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-TEAM-NAME/TEAM-NAME-asr:finals
-    container_name: TEAM-NAME-asr
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-overflow/overflow-asr:latest
+    container_name: overflow-asr
     restart: unless-stopped
     environment:
       NVIDIA_VISIBLE_DEVICES: 0
@@ -74,8 +74,8 @@ services:
       start_period: 3s
 
   til-cv:
-    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-TEAM-NAME/TEAM-NAME-cv:finals
-    container_name: TEAM-NAME-cv
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-overflow/overflow-cv:latest
+    container_name: overflow-cv
     restart: unless-stopped
     environment:
       NVIDIA_VISIBLE_DEVICES: 0
@@ -104,15 +104,19 @@ services:
       start_period: 3s
 
   til-noise:
-    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-TEAM-NAME/TEAM-NAME-noise:finals
-    container_name: TEAM-NAME-noise
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-overflow/overflow-noise:finals
+    container_name: overflow-noise
     restart: unless-stopped
     environment:
       NVIDIA_VISIBLE_DEVICES: 0
       CUDA_VISIBLE_DEVICES: 0
+      CV_HOST: til-cv
     ports:
       - 5003:5003
     shm_size: 32gb
+    depends_on:
+      til-cv:
+        condition: service_healthy
     deploy:
       resources:
         reservations:
@@ -134,8 +138,8 @@ services:
       start_period: 3s
 
   til-nlp:
-    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-TEAM-NAME/TEAM-NAME-nlp:finals
-    container_name: TEAM-NAME-nlp
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-overflow/overflow-nlp:finals
+    container_name: overflow-nlp
     restart: unless-stopped
     environment:
       NVIDIA_VISIBLE_DEVICES: 0
@@ -164,8 +168,8 @@ services:
       start_period: 3s
 
   til-ae:
-    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-TEAM-NAME/TEAM-NAME-ae:finals
-    container_name: TEAM-NAME-ae
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-overflow/overflow-ae:ppo
+    container_name: overflow-ae
     restart: unless-stopped
     environment:
       NVIDIA_VISIBLE_DEVICES: 0

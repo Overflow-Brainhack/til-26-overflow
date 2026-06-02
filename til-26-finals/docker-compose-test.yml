@@ -177,9 +177,13 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: 0
       CUDA_VISIBLE_DEVICES: 0
+      CV_HOST: til-cv
     ports:
       - 5003:5003
     shm_size: 32gb
+    depends_on:
+      til-cv:
+        condition: service_healthy
     deploy:
       resources:
         reservations:

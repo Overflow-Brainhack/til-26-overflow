@@ -6,6 +6,7 @@ import base64
 import io
 from io import BytesIO
 import json
+import os
 import random
 from pathlib import Path
 
@@ -27,6 +28,21 @@ RMSE_INSIDE_MAX = (
 SSIM_INSIDE_MIN = (
     0.36  # post-JPEG target; extra margin above 0.30 for outside-noise boundary effects
 )
+
+
+# ── CV container access ───────────────────────────────────────────────────────
+# In the finals compose stack the CV model runs in a sibling container; the noise
+# container reaches it over the compose network by its service name. CV_HOST lets
+# the same image work under the test compose, a custom compose, or the real finals
+# stack without a rebuild. Running this module directly (__main__) talks to a
+# CV server on localhost instead.
+_CV_HOST = "localhost" if __name__ == "__main__" else os.environ.get("CV_HOST", "til-cv")
+_CV_BASE_URL = f"http://{_CV_HOST}:5002"
+
+# Short timeouts so a slow / unreachable / wedged CV container falls back to the
+# in-process model quickly instead of stalling the per-image noise budget.
+_CV_HEALTH_TIMEOUT = 1.0
+_CV_NOISE_TIMEOUT = 2.0
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -175,13 +191,9 @@ class NoiseManager:
 
     def _cv_healthy(self) -> bool:
         try:
-            url = (
-                "http://localhost:5002/health"
-                if __name__ == "__main__"
-                else "http://host.docker.internal:5002/health"
-            )
-
-            resp = requests.get(url).json()
+            resp = requests.get(
+                f"{_CV_BASE_URL}/health", timeout=_CV_HEALTH_TIMEOUT
+            ).json()
 
             return resp.get("message", "") == "health ok"
         except Exception as _:
@@ -189,19 +201,19 @@ class NoiseManager:
 
     def _fetch_bboxes(self, image_b64: str) -> list[list[float]]:
         if self._cv_healthy():
-            url = (
-                "http://localhost:5002/noise"
-                if __name__ == "__main__"
-                else "http://host.docker.internal:5002/noise"
-            )
-
-            resp = requests.post(
-                url,
-                data=json.dumps({"b64": image_b64}),
-            )
-            preds = resp.json()["detections"]
-            if preds:
-                return [det["bbox"] for det in preds]
+            try:
+                resp = requests.post(
+                    f"{_CV_BASE_URL}/noise",
+                    data=json.dumps({"b64": image_b64}),
+                    timeout=_CV_NOISE_TIMEOUT,
+                )
+                preds = resp.json()["detections"]
+                if preds:
+                    return [det["bbox"] for det in preds]
+            except Exception as _:
+                # CV reachable-but-slow or a malformed reply — fall through to the
+                # in-process model rather than failing the whole noise op.
+                pass
 
         if self.model is None:
             print("[NoiseManager] CV container unhealthy, loading model")

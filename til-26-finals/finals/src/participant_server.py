@@ -35,6 +35,8 @@ LOCAL_IP = os.environ["LOCAL_IP"]
 SERVER_IP = os.environ["COMPETITION_SERVER_IP"]
 SERVER_PORT = os.environ["COMPETITION_SERVER_PORT"]
 WS_PATH = quote(f"ws://{SERVER_IP}:{SERVER_PORT}/ws/{TEAM_NAME}", safe="/:")
+DEFAULT_BATCH_TIMEOUT_SEC = float(os.environ.get("BATCH_TIMEOUT_SEC", "8.5"))
+BATCH_TIMEOUT_MARGIN_SEC = float(os.environ.get("BATCH_TIMEOUT_MARGIN_SEC", "1.5"))
 
 # configure uvicorn logging to include timestamps
 LOGGING_CONFIG = UVICORN_LOGGING_CONFIG.copy()
@@ -85,18 +87,22 @@ async def handle_mission_batch(websocket, data: dict) -> None:
     batch_id = data.get("batch_id")
     task = data.get("task") or data.get("type")
     items = data.get("items", [])
+    batch_timeout_sec = _batch_timeout_for(data)
     try:
-        if task == "asr":
-            results = await manager.run_asr_batch(items)
-        elif task == "cv":
-            results = await manager.run_cv_batch(items)
-        elif task == "nlp":
-            results = await manager.run_nlp_batch(items)
-        elif task == "noise":
-            results = await manager.run_noise_batch(items)
-        else:
+        async def run_batch() -> list[dict]:
+            if task == "asr":
+                return await manager.run_asr_batch(items, timeout=batch_timeout_sec)
+            if task == "cv":
+                return await manager.run_cv_batch(items, timeout=batch_timeout_sec)
+            if task == "nlp":
+                return await manager.run_nlp_batch(items, timeout=batch_timeout_sec)
+            if task == "noise":
+                return await manager.run_noise_batch(items, timeout=batch_timeout_sec)
+
             logger.warning(f"unknown mission_batch task {task!r}; replying empty")
-            results = []
+            return []
+
+        results = await asyncio.wait_for(run_batch(), timeout=batch_timeout_sec)
         await manager.send_result(
             websocket,
             {
@@ -105,6 +111,22 @@ async def handle_mission_batch(websocket, data: dict) -> None:
                 "results": results,
             },
         )
+    except asyncio.TimeoutError:
+        logger.error(
+            f"mission_batch timed out after {batch_timeout_sec:.1f}s "
+            f"(batch_id={batch_id}, task={task}, n={len(items)})"
+        )
+        try:
+            await manager.send_result(
+                websocket,
+                {
+                    "task": "mission_batch",
+                    "batch_id": batch_id,
+                    "results": [],
+                },
+            )
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"mission_batch error (batch_id={batch_id}): {e}")
         traceback.print_exception(e)
@@ -121,6 +143,18 @@ async def handle_mission_batch(websocket, data: dict) -> None:
             )
         except Exception:
             pass
+
+
+def _batch_timeout_for(data: dict) -> float:
+    """Return before the competition server's own wait_for deadline expires."""
+    deadline = data.get("deadline_sec")
+    if deadline is None:
+        return DEFAULT_BATCH_TIMEOUT_SEC
+    try:
+        return max(0.1, float(deadline) - BATCH_TIMEOUT_MARGIN_SEC)
+    except (TypeError, ValueError):
+        logger.warning(f"invalid batch deadline {deadline!r}; using default timeout")
+        return DEFAULT_BATCH_TIMEOUT_SEC
 
 
 async def handle_corpus(websocket, data: dict) -> None:
