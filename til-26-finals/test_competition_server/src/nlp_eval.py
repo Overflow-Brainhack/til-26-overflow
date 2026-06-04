@@ -80,7 +80,10 @@ class AnswerEquivalenceEvaluator:
     def _format_input(self, question: str, reference: str, candidate: str) -> str:
         _printable = "".join(filter(lambda x: x in printable, candidate))
         tokens = self.tokenizer.tokenize(
-            _printable, max_length=MAX_CANDIDATE_TOKEN_LENGTH, truncation=True
+            _printable,
+            max_length=MAX_CANDIDATE_TOKEN_LENGTH,
+            truncation=True,
+            add_special_tokens=False,
         )
         reconstructed_candidate = self.tokenizer.convert_tokens_to_string(tokens)
         return (
@@ -134,6 +137,7 @@ class AnswerEquivalenceEvaluator:
                 padding="longest",
                 truncation=True,
                 return_tensors="pt",
+                add_special_tokens=False,
             ).to(self.device)
 
             logits = self.model(**encoding).logits
