@@ -1,0 +1,23 @@
+{
+  "stage": "stage1_bc",
+  "status": "interrupted",
+  "started_at": "2026-05-26T09:35:22.748975+00:00",
+  "args": {
+    "episodes": 768,
+    "epochs": 20,
+    "seq_minibatch": 16,
+    "lr": 0.00025,
+    "novice": true,
+    "num_workers": 15,
+    "seed": 2,
+    "summary_json": "ae_rl/summaries/stage1_bc_v2.json"
+  },
+  "updates_completed": 0,
+  "validations": [],
+  "last_written_at": "2026-05-26T09:52:59.985047+00:00",
+  "elapsed_seconds": 1057.24,
+  "device": "cuda",
+  "summary_path": "ae_rl/summaries/stage1_bc_v2.json",
+  "finished_at": "2026-05-26T09:52:59.983030+00:00",
+  "duration_seconds": 1057.24
+}

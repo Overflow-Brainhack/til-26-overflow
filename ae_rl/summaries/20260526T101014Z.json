@@ -1,0 +1,158 @@
+{
+  "stage": "stage1_bc",
+  "status": "completed",
+  "started_at": "2026-05-26T10:10:14.055208+00:00",
+  "args": {
+    "episodes": 384,
+    "epochs": 24,
+    "seq_minibatch": 16,
+    "lr": 0.00025,
+    "novice": true,
+    "num_workers": 8,
+    "seed": 2,
+    "summary_json": "ae_rl/summaries/stage1_bc_v2.json"
+  },
+  "updates_completed": 24,
+  "validations": [],
+  "last_written_at": "2026-05-26T10:15:43.241052+00:00",
+  "elapsed_seconds": 329.19,
+  "device": "cuda",
+  "summary_path": "ae_rl/summaries/stage1_bc_v2.json",
+  "teacher_collection_seconds": 208.68,
+  "teacher_sequences": 2304,
+  "teacher_seq_len": 200,
+  "teacher_action_counts": {
+    "0": 222720,
+    "1": 64512,
+    "2": 65280,
+    "3": 48768,
+    "4": 33024,
+    "5": 26496
+  },
+  "epochs": [
+    {
+      "epoch": 1,
+      "bc_loss": 1.273031817542182,
+      "action_acc": 0.5428233386741744
+    },
+    {
+      "epoch": 2,
+      "bc_loss": 0.435118589291556,
+      "action_acc": 0.8726996357242266
+    },
+    {
+      "epoch": 3,
+      "bc_loss": 0.0487724722091419,
+      "action_acc": 0.9860264584422112
+    },
+    {
+      "epoch": 4,
+      "bc_loss": 0.006153409636074987,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 5,
+      "bc_loss": 0.005321099741397322,
+      "action_acc": 0.9991883643799357
+    },
+    {
+      "epoch": 6,
+      "bc_loss": 0.0014664265917316596,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 7,
+      "bc_loss": 0.0009382718231386712,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 8,
+      "bc_loss": 0.0006258684762643599,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 9,
+      "bc_loss": 0.00046396489738577255,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 10,
+      "bc_loss": 0.000359901962535029,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 11,
+      "bc_loss": 0.0002885479890311318,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 12,
+      "bc_loss": 0.0002370065697808362,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 13,
+      "bc_loss": 0.00019862409852875216,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 14,
+      "bc_loss": 0.0001680180889201842,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 15,
+      "bc_loss": 0.00014407301078891679,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 16,
+      "bc_loss": 0.00012365646549975887,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 17,
+      "bc_loss": 0.00010727522668376978,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 18,
+      "bc_loss": 9.402871450624338e-05,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 19,
+      "bc_loss": 8.289061621427309e-05,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 20,
+      "bc_loss": 7.355118325196802e-05,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 21,
+      "bc_loss": 6.55865076674268e-05,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 22,
+      "bc_loss": 5.867277761555872e-05,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 23,
+      "bc_loss": 5.255943758836818e-05,
+      "action_acc": 1.0
+    },
+    {
+      "epoch": 24,
+      "bc_loss": 4.7335870906156037e-05,
+      "action_acc": 1.0
+    }
+  ],
+  "latest_checkpoint": "/home/dev/til-26-overflow/ae_rl/checkpoints/stage1_bc.pt",
+  "final_action_acc": 1.0,
+  "finished_at": "2026-05-26T10:15:43.241042+00:00",
+  "duration_seconds": 329.19
+}

@@ -13,6 +13,7 @@ Optional env vars:
   WATCH_CHALLENGES    — comma-separated list of challenges to act on (default: all five)
   SUBMIT_FLAGS        — space-separated flags prepended to submit.sh (e.g. "--build --dry-run")
   RL_AUTORUN_CHECKPOINT — "best" (default), "current", or an explicit .pt path
+  RL_AUTORUN_STAGE — what stage of RL model to run (default: 2)
   RL_AUTORUN_TARGET     — target model path (default: ae/models/stage2_ppo.pt)
 
 Run:
@@ -58,6 +59,8 @@ STAGE2_CURRENT_CKPT = REPO_ROOT / "ae_rl" / "checkpoints" / "stage2_ppo.pt"
 STAGE2_BEST_CKPT = REPO_ROOT / "ae_rl" / "checkpoints" / "stage2_ppo_best.pt"
 STAGE3_CURRENT_CKPT = REPO_ROOT / "ae_rl" / "checkpoints" / "stage3_league.pt"
 STAGE3_BEST_CKPT = REPO_ROOT / "ae_rl" / "checkpoints" / "stage3_league_best.pt"
+STAGE4_CURRENT_CKPT = REPO_ROOT / "ae_rl" / "checkpoints" / "stage4_evolution.pt"
+STAGE4_BEST_CKPT = REPO_ROOT / "ae_rl" / "checkpoints" / "stage4_evolution_best.pt"
 DEFAULT_AE_MODEL_TARGET = REPO_ROOT / "ae" / "models" / "ppo.pt"
 
 
@@ -329,15 +332,15 @@ def _resolve_rl_checkpoint(logger: logging.Logger) -> Path | None:
     raw_key = os.environ.get("RL_AUTORUN_CHECKPOINT", "best").strip()
     key = raw_key.lower()
 
-    raw_stage_no = os.environ.get("RL_AUTORUN_STAGE", "2").strip()
-    stage_no = raw_stage_no.lower()
+    stage_no = os.environ.get("RL_AUTORUN_STAGE", "2").strip()
 
     if stage_no == "2":
         if key == "best":
             if STAGE2_BEST_CKPT.exists():
                 return STAGE2_BEST_CKPT
             logger.warning(
-                "Best checkpoint missing: %s; falling back to current", STAGE2_BEST_CKPT
+                "Best checkpoint missing: %s; falling back to current",
+                STAGE2_CURRENT_CKPT,
             )
             return STAGE2_CURRENT_CKPT if STAGE2_CURRENT_CKPT.exists() else None
 
@@ -348,12 +351,25 @@ def _resolve_rl_checkpoint(logger: logging.Logger) -> Path | None:
             if STAGE3_BEST_CKPT.exists():
                 return STAGE3_BEST_CKPT
             logger.warning(
-                "Best checkpoint missing: %s; falling back to current", STAGE3_BEST_CKPT
+                "Best checkpoint missing: %s; falling back to current",
+                STAGE3_CURRENT_CKPT,
             )
             return STAGE3_CURRENT_CKPT if STAGE3_CURRENT_CKPT.exists() else None
 
         if key == "current":
             return STAGE3_CURRENT_CKPT if STAGE3_CURRENT_CKPT.exists() else None
+    elif stage_no == "4":
+        if key == "best":
+            if STAGE4_BEST_CKPT.exists():
+                return STAGE4_BEST_CKPT
+            logger.warning(
+                "Best checkpoint missing: %s; falling back to current",
+                STAGE4_CURRENT_CKPT,
+            )
+            return STAGE4_CURRENT_CKPT if STAGE4_CURRENT_CKPT.exists() else None
+
+        if key == "current":
+            return STAGE4_CURRENT_CKPT if STAGE4_CURRENT_CKPT.exists() else None
 
     # Fall-through: treat raw_key as an explicit path (absolute or repo-relative).
     path = Path(raw_key).expanduser()
@@ -775,7 +791,11 @@ def main() -> None:
                 sys.exit(2)
         logger.info(
             "Awaiting eval for %s:%s (timeout=%.0fs, since=%s, log=%s)",
-            challenge, tag, timeout_s, since.isoformat(), EVAL_LOG_PATH,
+            challenge,
+            tag,
+            timeout_s,
+            since.isoformat(),
+            EVAL_LOG_PATH,
         )
         result = await_eval(
             challenge, tag, since=since, timeout_s=timeout_s, logger=logger

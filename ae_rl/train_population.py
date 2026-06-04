@@ -60,8 +60,14 @@ VARIANTS: list[dict] = [
     {
         "name": "even-nomult",
         "desc": "PFSP-even, drop offensive multipliers, tiny base defense (-5).",
-        "args": ["--pfsp", "--pfsp-mode", "even",
-                 "--no-offensive-multipliers", "--own-base-penalty", "-5"],
+        "args": [
+            "--pfsp",
+            "--pfsp-mode",
+            "even",
+            "--no-offensive-multipliers",
+            "--own-base-penalty",
+            "-5",
+        ],
     },
     {
         "name": "even-allon",
@@ -82,8 +88,10 @@ def _select_variants(args) -> list[dict]:
         chosen = [v for v in VARIANTS if v["name"] in names]
         unknown = names - {v["name"] for v in VARIANTS}
         if unknown:
-            sys.exit(f"unknown variant(s): {', '.join(sorted(unknown))}; "
-                     f"available: {', '.join(v['name'] for v in VARIANTS)}")
+            sys.exit(
+                f"unknown variant(s): {', '.join(sorted(unknown))}; "
+                f"available: {', '.join(v['name'] for v in VARIANTS)}"
+            )
         return chosen
     return VARIANTS[: args.variants]
 
@@ -92,7 +100,7 @@ def _variant_paths(name: str) -> dict:
     base = POP_DIR / name
     return {
         "league_dir": base / "league",
-        "milestones": base / "milestones",   # = output-ckpt.parent / "milestones"
+        "milestones": base / "milestones",  # = output-ckpt.parent / "milestones"
         "output_ckpt": base / "stage3.pt",
         "output_best": base / "best.pt",
         "summary": RUNS_DIR / f"pop_{name}" / "latest.json",
@@ -102,23 +110,42 @@ def _variant_paths(name: str) -> dict:
 def _build_train_cmd(variant: dict, args, jworkers: int, seed: int) -> list[str]:
     p = _variant_paths(variant["name"])
     cmd = [
-        "uv", "run", "python", "ae_rl/train_stage3_league.py",
-        "--ckpt", str(args.init_ckpt),
-        "--updates", str(args.updates),
-        "--episodes-per-update", str(args.episodes_per_update),
-        "--milestone-every", str(args.milestone_every),
-        "--snapshot-every", str(args.snapshot_every),
-        "--league-max-size", "0",            # keep the whole archive for PFSP
-        "--entropy-floor", str(args.entropy_floor),
-        "--explore-burst-every", str(args.explore_burst_every),
-        "--explore-burst-len", str(args.explore_burst_len),
-        "--pfsp-every", str(args.pfsp_every),
-        "-j", str(jworkers),
-        "--seed", str(seed),
-        "--league-dir", str(p["league_dir"]),
-        "--output-ckpt", str(p["output_ckpt"]),
-        "--output-best", str(p["output_best"]),
-        "--summary-json", str(p["summary"]),
+        "uv",
+        "run",
+        "python",
+        "ae_rl/train_stage3_league.py",
+        "--ckpt",
+        str(args.init_ckpt),
+        "--updates",
+        str(args.updates),
+        "--episodes-per-update",
+        str(args.episodes_per_update),
+        "--milestone-every",
+        str(args.milestone_every),
+        "--snapshot-every",
+        str(args.snapshot_every),
+        "--league-max-size",
+        "0",  # keep the whole archive for PFSP
+        "--entropy-floor",
+        str(args.entropy_floor),
+        "--explore-burst-every",
+        str(args.explore_burst_every),
+        "--explore-burst-len",
+        str(args.explore_burst_len),
+        "--pfsp-every",
+        str(args.pfsp_every),
+        "-j",
+        str(jworkers),
+        "--seed",
+        str(seed),
+        "--league-dir",
+        str(p["league_dir"]),
+        "--output-ckpt",
+        str(p["output_ckpt"]),
+        "--output-best",
+        str(p["output_best"]),
+        "--summary-json",
+        str(p["summary"]),
     ]
     if args.advanced:
         cmd.append("--advanced")
@@ -127,10 +154,17 @@ def _build_train_cmd(variant: dict, args, jworkers: int, seed: int) -> list[str]
 
 
 def _build_selector_cmd(variants: list[dict], args) -> list[str]:
-    cmd = ["uv", "run", "ae_rl/eval_selector.py",
-           "--promote-to", str(args.promote_to),
-           "--tag-prefix", args.tag_prefix,
-           "--timeout", str(int(args.eval_timeout))]
+    cmd = [
+        "uv",
+        "run",
+        "ae_rl/eval_selector.py",
+        "--promote-to",
+        str(args.promote_to),
+        "--tag-prefix",
+        args.tag_prefix,
+        "--timeout",
+        str(int(args.eval_timeout)),
+    ]
     for v in variants:
         cmd += ["--watch-dir", str(_variant_paths(v["name"])["milestones"])]
     if args.launch_watcher:
@@ -142,57 +176,116 @@ def _build_selector_cmd(variants: list[dict], args) -> list[str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--init-ckpt", type=str,
-                    default="ae_rl/checkpoints/stage3_league_best.pt",
-                    help="shared warm-start checkpoint for every variant. Default is the best "
-                         "LEAGUE checkpoint (~0.65), NOT the BC seed — raw BC evals ~0.2, so "
-                         "the self-play phase is the value-add and each variant should push "
-                         "PAST the league result, not re-climb to it. Swap for whichever of "
-                         "your league checkpoints scored highest on the real eval.")
-    ap.add_argument("--variants", type=int, default=len(VARIANTS),
-                    help=f"how many of the default variants to run (max {len(VARIANTS)}).")
-    ap.add_argument("--only", type=str, default="",
-                    help="comma-separated variant names to run instead "
-                         f"(available: {', '.join(v['name'] for v in VARIANTS)}).")
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--init-ckpt",
+        type=str,
+        default="ae_rl/checkpoints/stage3_league_best.pt",
+        help="shared warm-start checkpoint for every variant. Default is the best "
+        "LEAGUE checkpoint (~0.65), NOT the BC seed — raw BC evals ~0.2, so "
+        "the self-play phase is the value-add and each variant should push "
+        "PAST the league result, not re-climb to it. Swap for whichever of "
+        "your league checkpoints scored highest on the real eval.",
+    )
+    ap.add_argument(
+        "--variants",
+        type=int,
+        default=len(VARIANTS),
+        help=f"how many of the default variants to run (max {len(VARIANTS)}).",
+    )
+    ap.add_argument(
+        "--only",
+        type=str,
+        default="",
+        help="comma-separated variant names to run instead "
+        f"(available: {', '.join(v['name'] for v in VARIANTS)}).",
+    )
     ap.add_argument("--updates", type=int, default=4000)
     ap.add_argument("--episodes-per-update", type=int, default=8)
-    ap.add_argument("--milestone-every", type=int, default=150,
-                    help="emit a milestone checkpoint every N updates (the selector's "
-                         "candidate cadence). Match it roughly to eval throughput.")
+    ap.add_argument(
+        "--milestone-every",
+        type=int,
+        default=150,
+        help="emit a milestone checkpoint every N updates (the selector's "
+        "candidate cadence). Match it roughly to eval throughput.",
+    )
     ap.add_argument("--snapshot-every", type=int, default=25)
     ap.add_argument("--pfsp-every", type=int, default=25)
     ap.add_argument("--entropy-floor", type=float, default=0.008)
     ap.add_argument("--explore-burst-every", type=int, default=300)
     ap.add_argument("--explore-burst-len", type=int, default=5)
-    ap.add_argument("--seed-base", type=int, default=100,
-                    help="variant i gets seed = seed-base + i.")
-    ap.add_argument("--advanced", action="store_true",
-                    help="train on randomised advanced maps instead of novice.")
-    ap.add_argument("--workers-total", type=int, default=0,
-                    help="total rollout workers across all variants (default: cpus-2, "
-                         "split evenly, leaving headroom for the selector + docker build).")
-    ap.add_argument("--launch-selector", dest="launch_selector", action="store_true", default=True,
-                    help="also launch the eval_selector over all milestone dirs (default).")
-    ap.add_argument("--no-launch-selector", dest="launch_selector", action="store_false",
-                    help="training only; run eval_selector yourself.")
-    ap.add_argument("--launch-watcher", dest="launch_watcher", action="store_true", default=True,
-                    help="let the selector spawn an ingest-only Discord watcher "
-                         "(`rl_autorun.py --watch-only`) so the whole pipeline is self-contained "
-                         "and nothing auto-submits behind your back (default on).")
-    ap.add_argument("--no-launch-watcher", dest="launch_watcher", action="store_false",
-                    help="don't spawn a watcher — you're already running `rl_autorun.py --watch-only`.")
-    ap.add_argument("--promote-to", type=str, default="ae_rl/checkpoints/eval_best.pt",
-                    help="selector copies the global real-eval best here (deploy candidate).")
+    ap.add_argument(
+        "--seed-base",
+        type=int,
+        default=100,
+        help="variant i gets seed = seed-base + i.",
+    )
+    ap.add_argument(
+        "--advanced",
+        action="store_true",
+        help="train on randomised advanced maps instead of novice.",
+    )
+    ap.add_argument(
+        "--workers-total",
+        type=int,
+        default=0,
+        help="total rollout workers across all variants (default: cpus-2, "
+        "split evenly, leaving headroom for the selector + docker build).",
+    )
+    ap.add_argument(
+        "--launch-selector",
+        dest="launch_selector",
+        action="store_true",
+        default=True,
+        help="also launch the eval_selector over all milestone dirs (default).",
+    )
+    ap.add_argument(
+        "--no-launch-selector",
+        dest="launch_selector",
+        action="store_false",
+        help="training only; run eval_selector yourself.",
+    )
+    ap.add_argument(
+        "--launch-watcher",
+        dest="launch_watcher",
+        action="store_true",
+        default=True,
+        help="let the selector spawn an ingest-only Discord watcher "
+        "(`rl_autorun.py --watch-only`) so the whole pipeline is self-contained "
+        "and nothing auto-submits behind your back (default on).",
+    )
+    ap.add_argument(
+        "--no-launch-watcher",
+        dest="launch_watcher",
+        action="store_false",
+        help="don't spawn a watcher — you're already running `rl_autorun.py --watch-only`.",
+    )
+    ap.add_argument(
+        "--promote-to",
+        type=str,
+        default="ae_rl/checkpoints/eval_best.pt",
+        help="selector copies the global real-eval best here (deploy candidate).",
+    )
     ap.add_argument("--tag-prefix", type=str, default="pop")
     ap.add_argument("--eval-timeout", type=float, default=1800.0)
-    ap.add_argument("--no-require-watcher", action="store_true",
-                    help="pass through to the selector: submit even if the Discord watcher "
-                         "freshness check fails.")
-    ap.add_argument("--poll-interval", type=float, default=120.0,
-                    help="seconds between status-table prints.")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="print the commands that would launch and exit.")
+    ap.add_argument(
+        "--no-require-watcher",
+        action="store_true",
+        help="pass through to the selector: submit even if the Discord watcher "
+        "freshness check fails.",
+    )
+    ap.add_argument(
+        "--poll-interval",
+        type=float,
+        default=120.0,
+        help="seconds between status-table prints.",
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the commands that would launch and exit.",
+    )
     args = ap.parse_args()
 
     variants = _select_variants(args)
@@ -216,8 +309,10 @@ def main() -> None:
     ]
     selector_cmd = _build_selector_cmd(variants, args) if args.launch_selector else None
 
-    print(f"Population: {len(variants)} variant(s), {jper} workers each "
-          f"({total_workers} total of {cpus} cpus). init={init.name}")
+    print(
+        f"Population: {len(variants)} variant(s), {jper} workers each "
+        f"({total_workers} total of {cpus} cpus). init={init.name}"
+    )
     for cmd, v in train_cmds:
         print(f"\n[{v['name']}] {v['desc']}")
         print("   " + " ".join(cmd))
@@ -239,8 +334,9 @@ def main() -> None:
         paths["summary"].parent.mkdir(parents=True, exist_ok=True)
         log_path = POP_DIR / v["name"] / "train.log"
         log = open(log_path, "w", encoding="utf-8")
-        proc = subprocess.Popen(cmd, cwd=str(REPO), stdout=log,
-                                stderr=subprocess.STDOUT, env=child_env)
+        proc = subprocess.Popen(
+            cmd, cwd=str(REPO), stdout=log, stderr=subprocess.STDOUT, env=child_env
+        )
         procs.append((v["name"], proc, log_path))
         print(f"  launched {v['name']} pid={proc.pid} → {log_path}")
         time.sleep(2)  # stagger spawns so the env imports don't thundering-herd
@@ -249,8 +345,12 @@ def main() -> None:
     if selector_cmd:
         sel_log = POP_DIR / "selector.log"
         selector_proc = subprocess.Popen(
-            selector_cmd, cwd=str(REPO), env=child_env,
-            stdout=open(sel_log, "w", encoding="utf-8"), stderr=subprocess.STDOUT)
+            selector_cmd,
+            cwd=str(REPO),
+            env=child_env,
+            stdout=open(sel_log, "w", encoding="utf-8"),
+            stderr=subprocess.STDOUT,
+        )
         print(f"  launched selector pid={selector_proc.pid} → {sel_log}")
 
     leaderboard = HERE / "tuning" / "eval_leaderboard.json"
@@ -299,12 +399,18 @@ def main() -> None:
                         best = f"{b['score']:.4f} ({b['tag']})"
                 except (OSError, json.JSONDecodeError):
                     pass
-            print(f"\n[{time.strftime('%H:%M:%S')}] population status  "
-                  f"| real-eval best: {best}")
+            print(
+                f"\n[{time.strftime('%H:%M:%S')}] population status  "
+                f"| real-eval best: {best}"
+            )
             print("\n".join(rows))
             if all(proc.poll() is not None for _, proc, _l in procs):
-                print("\nAll trainers finished. Selector left running "
-                      "(Ctrl-C to stop it)." if selector_proc else "\nAll trainers finished.")
+                print(
+                    "\nAll trainers finished. Selector left running "
+                    "(Ctrl-C to stop it)."
+                    if selector_proc
+                    else "\nAll trainers finished."
+                )
                 if selector_proc:
                     selector_proc.wait()
                 return

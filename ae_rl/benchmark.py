@@ -52,6 +52,8 @@ def _opponent_factory(name: str):
     except KeyError as e:
         valid = ", ".join(sorted(_OPPONENT_FACTORIES))
         raise ValueError(f"unknown baseline opponent {name!r}; valid: {valid}") from e
+
+
 from model import load_checkpoint
 from rollout import make_env
 
@@ -100,7 +102,9 @@ def benchmark(
     agents = list(env.possible_agents)
 
     if model is None:
-        model = load_checkpoint(ckpt_path, device, eval_mode=True) if ckpt_path else None
+        model = (
+            load_checkpoint(ckpt_path, device, eval_mode=True) if ckpt_path else None
+        )
         restore_train = False
     else:
         restore_train = model.training
@@ -114,8 +118,11 @@ def benchmark(
             if a in learner_ids and model is not None:
                 if layered:
                     ctrl[a] = LayeredNetController(
-                        model, device, name="rl_layered",
-                        deterministic=deterministic, novice=novice,
+                        model,
+                        device,
+                        name="rl_layered",
+                        deterministic=deterministic,
+                        novice=novice,
                         dodge_override=dodge_override,
                         oscillation_break=oscillation_break,
                         heuristic_fallback=heuristic_fallback,
@@ -123,29 +130,38 @@ def benchmark(
                         entropy_threshold_frac=entropy_threshold_frac,
                     )
                 else:
-                    ctrl[a] = NetController(model, device, name="rl",
-                                            deterministic=deterministic, novice=novice)
+                    ctrl[a] = NetController(
+                        model,
+                        device,
+                        name="rl",
+                        deterministic=deterministic,
+                        novice=novice,
+                    )
             else:
                 ctrl[a] = opp_factory(novice)
         return ctrl
 
     rl_scores: list[float] = []
     heur_scores: list[float] = []
-    base_scores: list[float] = []   # 6×heuristic reference
+    base_scores: list[float] = []  # 6×heuristic reference
 
     if not quiet:
         opp_label = baseline
         print(
-            f"\nBenchmark: {'RL='+str(n_learners)+' vs '+opp_label+'='+str(len(agents)-n_learners) if model else opp_label+' only'}"
+            f"\nBenchmark: {'RL=' + str(n_learners) + ' vs ' + opp_label + '=' + str(len(agents) - n_learners) if model else opp_label + ' only'}"
             f"  | {rounds} rounds | novice={novice}\n"
         )
-    iterator = range(rounds) if quiet else trange(rounds, desc="benchmark", unit="round")
+    iterator = (
+        range(rounds) if quiet else trange(rounds, desc="benchmark", unit="round")
+    )
     for r in iterator:
         s = random.randint(0, 2_000_000_000)
         if model is not None:
             if rotate_slots:
                 start = r % len(agents)
-                learner_ids = {agents[(start + i) % len(agents)] for i in range(n_learners)}
+                learner_ids = {
+                    agents[(start + i) % len(agents)] for i in range(n_learners)
+                }
             else:
                 learner_ids = set(agents[:n_learners])
         else:
@@ -164,13 +180,13 @@ def benchmark(
 
         if model is not None and not quiet:
             tqdm.write(
-                f"  round {r+1:3d}  rl={','.join(sorted(learner_ids)):>15s}"
+                f"  round {r + 1:3d}  rl={','.join(sorted(learner_ids)):>15s}"
                 f"  rl_mean={mean(res[a] for a in learner_ids):7.1f}"
                 f"  heur_mean={mean(res[a] for a in agents if a not in learner_ids):7.1f}"
                 f"  ref_heur={mean(ref.values()):7.1f}"
             )
         elif not quiet:
-            tqdm.write(f"  round {r+1:3d}  heur_mean={mean(ref.values()):7.1f}")
+            tqdm.write(f"  round {r + 1:3d}  heur_mean={mean(ref.values()):7.1f}")
 
     def _fmt(xs):
         if not xs:
@@ -210,45 +226,109 @@ def _newest_ckpt():
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ckpt", type=str, default=None, help="checkpoint path (default: newest stage)")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--ckpt", type=str, default=None, help="checkpoint path (default: newest stage)"
+    )
     ap.add_argument("--rounds", type=int, default=30)
-    ap.add_argument("--learners", type=int, default=1, help="number of RL-controlled agents (1-6)")
-    ap.add_argument("--novice", dest="novice", action="store_true", default=True,
-                    help="fixed novice map (default)")
-    ap.add_argument("--advanced", dest="novice", action="store_false",
-                    help="randomised advanced maps")
-    ap.add_argument("--deterministic", dest="deterministic", action="store_true", default=True,
-                    help="use argmax actions for RL policy evaluation (default)")
-    ap.add_argument("--sample-actions", dest="deterministic", action="store_false",
-                    help="sample from the RL policy distribution")
-    ap.add_argument("--rotate-slots", dest="rotate_slots", action="store_true", default=True,
-                    help="rotate which agent slots are controlled by RL each round (default)")
-    ap.add_argument("--fixed-slots", dest="rotate_slots", action="store_false",
-                    help="always use the first N agent slots for RL")
-    ap.add_argument("--layered", dest="layered", action="store_true", default=False,
-                    help="wrap RL controllers with dodge override + loop break "
-                         "(deploy-side LayeredRLPolicy equivalent)")
-    ap.add_argument("--no-dodge", dest="dodge_override", action="store_false", default=True,
-                    help="when --layered is set, disable the dodge override guard")
-    ap.add_argument("--no-loop-break", dest="oscillation_break", action="store_false", default=True,
-                    help="when --layered is set, disable the loop-break guard")
-    ap.add_argument("--heuristic-fallback", action="store_true", default=False,
-                    help="enable EditedHeuristicPolicyV2 fallback when the RL "
-                         "value is below --value-threshold OR its action entropy "
-                         "exceeds --entropy-threshold-frac of max")
-    ap.add_argument("--value-threshold", type=float, default=None,
-                    help="fall back to heuristic when RL value < this. "
-                         "Values are normalised (training used RunningReturnNorm); "
-                         "try -0.5 as a starting point")
-    ap.add_argument("--entropy-threshold-frac", type=float, default=None,
-                    help="fall back to heuristic when RL action entropy "
-                         "exceeds this fraction of max-given-mask. Try 0.85")
-    ap.add_argument("--baseline", type=str, default="strong",
-                    choices=sorted(_OPPONENT_FACTORIES.keys()),
-                    help="opponent policy used both in-game and as the 6x reference. "
-                         "'strong' (default) = EditedHeuristicPolicyV2 (what you trained against). "
-                         "'vanilla' / 'berserker' / 'azbasev1' = held-out baselines that measure generalisation.")
+    ap.add_argument(
+        "--learners", type=int, default=1, help="number of RL-controlled agents (1-6)"
+    )
+    ap.add_argument(
+        "--novice",
+        dest="novice",
+        action="store_true",
+        default=True,
+        help="fixed novice map (default)",
+    )
+    ap.add_argument(
+        "--advanced",
+        dest="novice",
+        action="store_false",
+        help="randomised advanced maps",
+    )
+    ap.add_argument(
+        "--deterministic",
+        dest="deterministic",
+        action="store_true",
+        default=True,
+        help="use argmax actions for RL policy evaluation (default)",
+    )
+    ap.add_argument(
+        "--sample-actions",
+        dest="deterministic",
+        action="store_false",
+        help="sample from the RL policy distribution",
+    )
+    ap.add_argument(
+        "--rotate-slots",
+        dest="rotate_slots",
+        action="store_true",
+        default=True,
+        help="rotate which agent slots are controlled by RL each round (default)",
+    )
+    ap.add_argument(
+        "--fixed-slots",
+        dest="rotate_slots",
+        action="store_false",
+        help="always use the first N agent slots for RL",
+    )
+    ap.add_argument(
+        "--layered",
+        dest="layered",
+        action="store_true",
+        default=False,
+        help="wrap RL controllers with dodge override + loop break "
+        "(deploy-side LayeredRLPolicy equivalent)",
+    )
+    ap.add_argument(
+        "--no-dodge",
+        dest="dodge_override",
+        action="store_false",
+        default=True,
+        help="when --layered is set, disable the dodge override guard",
+    )
+    ap.add_argument(
+        "--no-loop-break",
+        dest="oscillation_break",
+        action="store_false",
+        default=True,
+        help="when --layered is set, disable the loop-break guard",
+    )
+    ap.add_argument(
+        "--heuristic-fallback",
+        action="store_true",
+        default=False,
+        help="enable EditedHeuristicPolicyV2 fallback when the RL "
+        "value is below --value-threshold OR its action entropy "
+        "exceeds --entropy-threshold-frac of max",
+    )
+    ap.add_argument(
+        "--value-threshold",
+        type=float,
+        default=None,
+        help="fall back to heuristic when RL value < this. "
+        "Values are normalised (training used RunningReturnNorm); "
+        "try -0.5 as a starting point",
+    )
+    ap.add_argument(
+        "--entropy-threshold-frac",
+        type=float,
+        default=None,
+        help="fall back to heuristic when RL action entropy "
+        "exceeds this fraction of max-given-mask. Try 0.85",
+    )
+    ap.add_argument(
+        "--baseline",
+        type=str,
+        default="strong",
+        choices=sorted(_OPPONENT_FACTORIES.keys()),
+        help="opponent policy used both in-game and as the 6x reference. "
+        "'strong' (default) = EditedHeuristicPolicyV2 (what you trained against). "
+        "'vanilla' / 'berserker' / 'azbasev1' = held-out baselines that measure generalisation.",
+    )
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 

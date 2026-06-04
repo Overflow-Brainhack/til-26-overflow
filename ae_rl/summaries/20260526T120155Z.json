@@ -1,0 +1,19 @@
+{
+  "stage": "stage1_bc",
+  "status": "running",
+  "started_at": "2026-05-26T12:01:55.511271+00:00",
+  "args": {
+    "episodes": 384,
+    "epochs": 8,
+    "seq_minibatch": 16,
+    "lr": 0.00025,
+    "novice": true,
+    "num_workers": 8,
+    "seed": 2,
+    "summary_json": "ae_rl/summaries/stage1_bc_padded.json"
+  },
+  "updates_completed": 0,
+  "validations": [],
+  "last_written_at": "2026-05-26T12:01:55.511281+00:00",
+  "elapsed_seconds": 0.0
+}

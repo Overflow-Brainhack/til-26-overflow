@@ -1,0 +1,78 @@
+{
+  "stage": "stage1_bc",
+  "status": "completed",
+  "started_at": "2026-05-26T14:19:20.212829+00:00",
+  "args": {
+    "episodes": 250,
+    "epochs": 8,
+    "seq_minibatch": 16,
+    "lr": 0.00025,
+    "novice": true,
+    "num_workers": 8,
+    "seed": 2,
+    "summary_json": "ae_rl/summaries/stage1_bc.json"
+  },
+  "updates_completed": 8,
+  "validations": [],
+  "last_written_at": "2026-05-26T14:23:06.238578+00:00",
+  "elapsed_seconds": 226.03,
+  "device": "cuda",
+  "summary_path": "ae_rl/summaries/stage1_bc.json",
+  "teacher_collection_seconds": 175.72,
+  "teacher_sequences": 1500,
+  "teacher_seq_len": 200,
+  "teacher_action_counts": {
+    "0": 145000,
+    "1": 42000,
+    "2": 42500,
+    "3": 31750,
+    "4": 21500,
+    "5": 17250
+  },
+  "epochs": [
+    {
+      "epoch": 1,
+      "bc_loss": 1.339646873321939,
+      "action_acc": 0.5175587190909589
+    },
+    {
+      "epoch": 2,
+      "bc_loss": 0.8296861677093709,
+      "action_acc": 0.7111258703343412
+    },
+    {
+      "epoch": 3,
+      "bc_loss": 0.25136910006403923,
+      "action_acc": 0.9491123449295125
+    },
+    {
+      "epoch": 4,
+      "bc_loss": 0.09078086024903237,
+      "action_acc": 0.9764760402922935
+    },
+    {
+      "epoch": 5,
+      "bc_loss": 0.049201284891905936,
+      "action_acc": 0.9895799844822986
+    },
+    {
+      "epoch": 6,
+      "bc_loss": 0.025032890118420758,
+      "action_acc": 0.9953002891641982
+    },
+    {
+      "epoch": 7,
+      "bc_loss": 0.01695895887554643,
+      "action_acc": 0.9957668216938668
+    },
+    {
+      "epoch": 8,
+      "bc_loss": 0.009409945146081613,
+      "action_acc": 0.9976983450828715
+    }
+  ],
+  "latest_checkpoint": "/home/dev/til-26-overflow/ae_rl/checkpoints/stage1_bc.pt",
+  "final_action_acc": 0.9976983450828715,
+  "finished_at": "2026-05-26T14:23:06.238565+00:00",
+  "duration_seconds": 226.03
+}
