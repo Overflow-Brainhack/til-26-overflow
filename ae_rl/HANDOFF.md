@@ -6,6 +6,12 @@ finals.
 
 ## TL;DR
 
+- **UPDATE 2026-06-02 — FROZEN-CORE BROKE THE CEILING: 0.755 → 0.788 on the real
+  eval, the first path to exceed it.** Via `train_stage3_league.py --frozen-core` +
+  `ae_rl/phase1_frozen_core.sh` (hard-mode PFSP, LR 2e-5, 200 updates, pool pinned to
+  the scripted core, no self-snapshots). 0.788 is the new finals model — bank it
+  (`eval_best.pt` → `ae/models/ppo.pt`). Treat the "0.755 ceiling" framing below as
+  superseded background; it documents the pre-breakthrough state.
 - **Best model = 0.755 on the real eval — it beats the heuristic family (0.6–0.72)
   and azbase's top end.** That is the finals model. Two distinct checkpoints reach
   it (see below); they are interchangeable on this eval.
