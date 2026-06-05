@@ -50,6 +50,8 @@ ENTROPY_FLOOR="${ENTROPY_FLOOR:-0.008}"    # NEW: stop collapse into the determi
 BURST_EVERY="${BURST_EVERY:-40}"           # NEW: periodic exploration kicks
 BURST_LEN="${BURST_LEN:-3}"
 BURST_COEF="${BURST_COEF:-0.04}"           # modest — don't blow up a 0.788 policy
+SUBMIT_COOLDOWN="${SUBMIT_COOLDOWN:-300}"  # extra seconds between eval submissions so the
+                                           # organiser server isn't flooded (0 = back-to-back)
 NUM_WORKERS="${NUM_WORKERS:-}"             # blank = train default (cpus-1); see concurrency note
 
 RUN_TRAINER="${RUN_TRAINER:-1}"; RUN_SELECTOR="${RUN_SELECTOR:-1}"
@@ -113,6 +115,7 @@ if [[ "$RUN_SELECTOR" == "1" ]]; then
     --timeout 1800 \
     --min-delta 0.0 \
     --no-confirm-best \
+    --submit-cooldown "$SUBMIT_COOLDOWN" \
     --launch-watcher \
     2>&1 | tee "logs/${RUN}_selector.log"
 else

@@ -314,6 +314,14 @@ def run_selector(args) -> int:
             ckpt, tag, stage=args.stage, timeout_s=args.timeout,
             dry_run=args.dry_run, logger=log,
         )
+
+        # Throttle: space out submissions so the organiser eval server can drain.
+        # Applied after every primary submission (success OR failure) before the
+        # next one is fired. Skipped in --once drain mode.
+        if args.submit_cooldown > 0 and not args.once:
+            log(f"  …submit cooldown {args.submit_cooldown:.0f}s before next candidate")
+            time.sleep(args.submit_cooldown)
+
         if entry is None:
             # Record the failure against the sha so we don't spin on a broken
             # candidate; --reeval or deleting the leaderboard clears it.
@@ -392,6 +400,11 @@ def main() -> None:
                     help="drain the current candidate set and exit (no polling).")
     ap.add_argument("--poll-interval", type=float, default=60.0,
                     help="seconds between rescans when waiting for new candidates.")
+    ap.add_argument("--submit-cooldown", type=float, default=0.0,
+                    help="seconds to wait after each eval round-trip before submitting the "
+                         "next candidate. Spaces out submissions so the organiser eval server "
+                         "isn't flooded when milestones are dense and `--await-eval` returns "
+                         "before the server has fully drained. 0 (default) = no extra wait.")
     ap.add_argument("--launch-watcher", action="store_true",
                     help="spawn an ingest-only watcher (`rl_autorun.py --watch-only`) for the "
                          "selector's lifetime, so you don't have to run one separately. Does "
