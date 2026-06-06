@@ -93,11 +93,14 @@ def benchmark(
     value_threshold: float | None = None,
     entropy_threshold_frac: float | None = None,
     baseline: str = "strong",
+    device=None,
 ):
     import random
 
     random.seed(seed)
-    device = get_device()
+    # Respect a caller-supplied device so a model loaded on CPU isn't fed CUDA
+    # inputs (and vice-versa); default to the usual auto-select.
+    device = device if device is not None else get_device()
     env = make_env(novice)
     agents = list(env.possible_agents)
 
