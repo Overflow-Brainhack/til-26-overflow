@@ -31,35 +31,37 @@
 set -euo pipefail
 cd "$(dirname "$0")/.." # repo root
 
-INIT_CKPT="${INIT_CKPT:-ae_rl/checkpoints/best-0788.pt}"   # was hard-nomult-0755.pt
-ANCHOR="${ANCHOR:-ae_rl/checkpoints/best-0788.pt}"         # selector bar to beat
+INIT_CKPT="${INIT_CKPT:-ae_rl/checkpoints/best-0788.pt}" # was hard-nomult-0755.pt
+ANCHOR="${ANCHOR:-ae_rl/checkpoints/best-0788.pt}"       # selector bar to beat
 
 RUN="phase1b_frozen_core_extend"
 OUT="ae_rl/checkpoints/$RUN"
 mkdir -p "$OUT" "ae_rl/runs/$RUN" logs
 
 # --- drift-control + anti-plateau hyperparameters (override via env) ---
-SEEDS="${SEEDS:-1}"                         # single seed for now; "1 2 3" to fan out the lottery
-UPDATES="${UPDATES:-300}"                  # was 200: give exploration room to find a new basin
-LR="${LR:-2e-5}"                           # unchanged: stay near the 0.788 peak
-MILESTONE_EVERY="${MILESTONE_EVERY:-10}"   # unchanged: dense harvest
+SEEDS="${SEEDS:-1}"                      # single seed for now; "1 2 3" to fan out the lottery
+UPDATES="${UPDATES:-500}"                # was 200: give exploration room to find a new basin
+LR="${LR:-2e-5}"                         # unchanged: stay near the 0.788 peak
+MILESTONE_EVERY="${MILESTONE_EVERY:-50}" # unchanged: dense harvest
 PFSP_EVERY="${PFSP_EVERY:-25}"
-PFSP_FLOOR="${PFSP_FLOOR:-0.05}"           # 0788 used 0.03; mild bump so the longer run can't
-                                           # collapse onto one of the 4. Set 0.03 to match exactly.
-ENTROPY_FLOOR="${ENTROPY_FLOOR:-0.008}"    # NEW: stop collapse into the deterministic plateau
-BURST_EVERY="${BURST_EVERY:-40}"           # NEW: periodic exploration kicks
+PFSP_FLOOR="${PFSP_FLOOR:-0.05}" # 0788 used 0.03; mild bump so the longer run can't
+# collapse onto one of the 4. Set 0.03 to match exactly.
+ENTROPY_FLOOR="${ENTROPY_FLOOR:-0.008}" # NEW: stop collapse into the deterministic plateau
+BURST_EVERY="${BURST_EVERY:-40}"        # NEW: periodic exploration kicks
 BURST_LEN="${BURST_LEN:-3}"
-BURST_COEF="${BURST_COEF:-0.04}"           # modest — don't blow up a 0.788 policy
-SUBMIT_COOLDOWN="${SUBMIT_COOLDOWN:-300}"  # extra seconds between eval submissions so the
-                                           # organiser server isn't flooded (0 = back-to-back)
-NUM_WORKERS="${NUM_WORKERS:-}"             # blank = train default (cpus-1); see concurrency note
+BURST_COEF="${BURST_COEF:-0.04}"          # modest — don't blow up a 0.788 policy
+SUBMIT_COOLDOWN="${SUBMIT_COOLDOWN:-300}" # extra seconds between eval submissions so the
+# organiser server isn't flooded (0 = back-to-back)
+NUM_WORKERS="${NUM_WORKERS:-}" # blank = train default (cpus-1); see concurrency note
 
-RUN_TRAINER="${RUN_TRAINER:-1}"; RUN_SELECTOR="${RUN_SELECTOR:-1}"
+RUN_TRAINER="${RUN_TRAINER:-1}"
+RUN_SELECTOR="${RUN_SELECTOR:-1}"
 [[ "${TRAIN_ONLY:-0}" == "1" ]] && RUN_SELECTOR=0
 [[ "${SELECT_ONLY:-0}" == "1" ]] && RUN_TRAINER=0
 
 if [[ "$RUN_TRAINER" == "1" && ! -f "$INIT_CKPT" ]]; then
-  echo "!! init checkpoint not found: $INIT_CKPT (set INIT_CKPT=)" >&2; exit 1
+  echo "!! init checkpoint not found: $INIT_CKPT (set INIT_CKPT=)" >&2
+  exit 1
 fi
 
 # One shared selector watches EVERY seed's milestones dir.

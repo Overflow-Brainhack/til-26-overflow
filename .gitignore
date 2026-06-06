@@ -189,4 +189,5 @@ logs/eval_results.jsonl
 
 nlp_cheese/nlp_eval_512
 
-!ae_cpp/**/models
+ae_rl/summaries
+ae_rl/tuning
