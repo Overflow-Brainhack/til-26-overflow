@@ -6,7 +6,7 @@
 
 import base64
 
-from asr_manager import ASRManager
+from asr_manager_tdt import ASRManager
 from fastapi import FastAPI, Request
 
 app = FastAPI()
