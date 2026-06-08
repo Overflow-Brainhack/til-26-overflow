@@ -28,8 +28,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copies your source files.
 # COPY DEIMv2/ DEIMv2/
-COPY EdgeCrafter/ EdgeCrafter/
-COPY models/ models/
+# COPY EdgeCrafter/ EdgeCrafter/
+# COPY models/ models/
 COPY src .
 
 # Starts your model server.

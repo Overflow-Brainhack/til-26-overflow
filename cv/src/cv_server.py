@@ -6,13 +6,11 @@
 import base64
 from typing import Any
 
-from ultralytics_manager import UltralyticsManager
 from rfdetr_manager import RFDETRManager
-from ec_manager import ECDetManager
 from fastapi import FastAPI, Request
 
 app = FastAPI()
-manager = ECDetManager()
+manager = RFDETRManager()
 
 
 @app.post("/cv")
