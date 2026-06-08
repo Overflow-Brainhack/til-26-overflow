@@ -23,11 +23,10 @@ from ultralytics import RTDETR
 # ── Budget constants (match eval_thresholds_v2.yaml) ──────────────────────────
 RMSE_GLOBAL_MAX = 67.0  # evaluator's global threshold
 RMSE_INSIDE_MAX = (
-    44.0  # 6-unit margin: JPEG can amplify pixelation block edges, pushing RMSE up
+    40.0  # gate is 50; 10-unit margin since JPEG block-edge ringing can amplify
+    # inside RMSE by ~7 on SSIM-comfortable images that ride the full budget
 )
-SSIM_INSIDE_MIN = (
-    0.36  # post-JPEG target; extra margin above 0.30 for outside-noise boundary effects
-)
+SSIM_INSIDE_MIN = 0.36
 
 
 # ── CV container access ───────────────────────────────────────────────────────
@@ -36,7 +35,9 @@ SSIM_INSIDE_MIN = (
 # the same image work under the test compose, a custom compose, or the real finals
 # stack without a rebuild. Running this module directly (__main__) talks to a
 # CV server on localhost instead.
-_CV_HOST = "localhost" if __name__ == "__main__" else os.environ.get("CV_HOST", "til-cv")
+_CV_HOST = (
+    "localhost" if __name__ == "__main__" else os.environ.get("CV_HOST", "til-cv")
+)
 _CV_BASE_URL = f"http://{_CV_HOST}:5002"
 
 # Short timeouts so a slow / unreachable / wedged CV container falls back to the
@@ -57,10 +58,6 @@ def _make_mask(H: int, W: int, boxes: list[list[float]]) -> np.ndarray:
         if x2 > x1 and y2 > y1:
             mask[y1:y2, x1:x2] = True
     return mask
-
-
-def _rmse_global(delta: np.ndarray) -> float:
-    return float(np.sqrt(np.mean((delta**2).mean(axis=-1))))
 
 
 def _rmse_inside(delta: np.ndarray, mask: np.ndarray) -> float:
@@ -162,8 +159,8 @@ class NoiseManager:
         self._bank_cache = self._load_bank_cache()
 
     def _load_bank_cache(self) -> dict[str, list[np.ndarray]]:
-        """Pre-load all object-bank PNGs as uint8 (60×60 RGBA) at startup."""
-        TILE = 60
+        """Pre-load all object-bank PNGs as uint8 (100×100 RGBA) at startup."""
+        TILE = 100
         cache: dict[str, list[np.ndarray]] = {}
         if not self._BANK_PATH.exists():
             print(
@@ -219,10 +216,11 @@ class NoiseManager:
             print("[NoiseManager] CV container unhealthy, loading model")
             self.model = RTDETR("models/rtdetr-l-70.pt")
 
+            if self._t_cuda:
+                self.model.to("cuda")
+
         im = Image.open(BytesIO(base64.b64decode(image_b64)))
-        results = self.model.predict(
-            im, verbose=False, imgsz=1280, rect=True, half=True
-        )
+        results = self.model(im, imgsz=1280, rect=True, half=True)
         preds = []
         for box in results[0].boxes:
             x1, y1, x2, y2 = box.xyxy[0]
@@ -340,12 +338,14 @@ class NoiseManager:
         full_delta: np.ndarray,
         H: int,
         W: int,
+        boxes: list[list[float]],
     ) -> None:
         """Fill the outside-bbox RMSE budget by compositing object-bank PNGs onto a grid.
 
-        Grid tiles are 60×60, sorted by a center-weighted opacity (1 at image center,
-        0 at corners). Tiles overlapping any bbox are skipped. Objects are pasted
-        from center outward until global RMSE reaches 66.
+        Grid tiles are 100×100, sorted by a bbox-proximity opacity (1 adjacent to a
+        bbox, 0 far away). Tiles overlapping any bbox are skipped. Objects are pasted
+        from nearest-to-bbox outward until global RMSE reaches 66. With no bboxes the
+        opacity falls back to center-weighted (1 at image center, 0 at corners).
         """
         if not self._bank_cache:
             print(
@@ -354,12 +354,25 @@ class NoiseManager:
             return
         cat_names = list(self._bank_cache.keys())
 
-        TILE = 60
+        TILE = 100
         RMSE_TARGET = 66.0
-        img_cy, img_cx = H / 2.0, W / 2.0
-        max_dist = np.sqrt(img_cy**2 + img_cx**2)
+        max_dist = np.sqrt(H**2 + W**2)
 
-        # Build grid: one 60×60 tile per non-overlapping position
+        def _opacity(tile_cy: float, tile_cx: float) -> float:
+            if boxes:
+                # Distance from the tile center to the nearest bbox edge; tiles hugging
+                # a bbox get opacity ~1, distant tiles fade toward 0.
+                best = max_dist
+                for x, y, bw, bh in boxes:
+                    dx = max(x - tile_cx, 0.0, tile_cx - (x + bw))
+                    dy = max(y - tile_cy, 0.0, tile_cy - (y + bh))
+                    best = min(best, np.sqrt(dx**2 + dy**2))
+                return max(0.0, 1.0 - best / max_dist)
+            # No bboxes: fall back to the original center-weighted scheme.
+            dist = np.sqrt((tile_cy - H / 2.0) ** 2 + (tile_cx - W / 2.0) ** 2)
+            return max(0.0, 1.0 - dist / max_dist)
+
+        # Build grid: one 100×100 tile per non-overlapping position
         tiles: list[tuple[float, int, int]] = []
         for py in range(0, H - TILE + 1, TILE):
             for px in range(0, W - TILE + 1, TILE):
@@ -367,14 +380,12 @@ class NoiseManager:
                     continue
                 tile_cy = py + TILE / 2.0
                 tile_cx = px + TILE / 2.0
-                dist = np.sqrt((tile_cy - img_cy) ** 2 + (tile_cx - img_cx) ** 2)
-                opacity = max(0.0, 1.0 - dist / max_dist)
-                tiles.append((opacity, py, px))
+                tiles.append((_opacity(tile_cy, tile_cx), py, px))
 
         if not tiles:
             return
 
-        # Center-first order
+        # Highest-opacity first (nearest to a bbox, or center if no bboxes)
         tiles.sort(key=lambda t: t[0], reverse=True)
 
         # Track cumulative squared error incrementally to avoid full-image recompute
@@ -432,7 +443,7 @@ class NoiseManager:
             inside_delta = self._enforce_ssim(orig, inside_delta, mask)
 
         full_delta = inside_delta.copy()
-        self._outside_bank_attack(orig, mask, full_delta, H, W)
+        self._outside_bank_attack(orig, mask, full_delta, H, W, boxes)
 
         adv = np.clip(orig.astype(np.float32) + full_delta, 0, 255).astype(np.uint8)
 
@@ -445,8 +456,10 @@ if __name__ == "__main__":
     import random
 
     attacker = NoiseManager()
+    img = random.randint(1, 1000)
+    print(f"Testing image {img}")
     with open(
-        f"/home/shadowmachete/dev/til-26-overflow/data/cv/images/{random.randint(1, 1000)}.jpg",
+        f"/home/shadowmachete/dev/til-26-overflow/data/cv/images/{img}.jpg",
         "rb",
     ) as f:
         img_data = f.read()

@@ -189,7 +189,10 @@ def main() -> None:
     cat_ids = sorted(set(a["category_id"] for a in annotations["annotations"]))
     idx_to_cat_id = dict(enumerate(cat_ids))
 
-    sample = annotations["images"][:]
+    # Organisers confirmed the test set contains no "background" (box-less) images,
+    # so exclude them here too — otherwise they'd fold the outside budget into the
+    # inside RMSE and spuriously fail the fairness check.
+    sample = [img for img in annotations["images"] if id_to_boxes.get(img["id"])]
     random.shuffle(sample)
     sample = sample[: args.n]
 

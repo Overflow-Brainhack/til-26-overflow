@@ -29,6 +29,7 @@ dependencies = [
   "opencv-python>=4.13.0.92",
   "discord.py-self>=2.1.0",
   "google-auth>=2.0.0",
+  "cupy-cuda13x>=14.1.1",
 ]
 
 [[tool.uv.index]]

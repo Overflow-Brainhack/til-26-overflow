@@ -44,7 +44,7 @@ services:
       start_period: 3s
 
   til-asr:
-    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-overflow/overflow-asr:latest
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-overflow/overflow-asr:finals
     container_name: overflow-asr
     restart: unless-stopped
     environment:
@@ -74,7 +74,7 @@ services:
       start_period: 3s
 
   til-cv:
-    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-overflow/overflow-cv:latest
+    image: asia-southeast1-docker.pkg.dev/til-ai-2026/repo-til-26-overflow/overflow-cv:finals
     container_name: overflow-cv
     restart: unless-stopped
     environment:
