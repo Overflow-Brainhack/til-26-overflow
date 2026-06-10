@@ -24,7 +24,7 @@
 #     The token fallback takes precedence if the variable is set.
 #
 # Usage:
-#   ./submit.sh CHALLENGE [TAG]                 # CHALLENGE in {asr,cv,nlp,ae,noise}; TAG defaults to "latest"
+#   ./submit.sh CHALLENGE [TAG]                 # CHALLENGE in {asr,cv,nlp,ae,noise,surprise}; TAG defaults to "latest"
 #   ./submit.sh ae
 #   ./submit.sh nlp best-rag
 #   ./submit.sh --dry-run cv                    # print commands without running them
@@ -50,6 +50,9 @@ case $OS in
 'WindowsNT')
   OS='Windows'
   ;;
+'MINGW'* | 'MSYS'* | 'CYGWIN'*)
+  OS='Windows'
+  ;;
 'Darwin')
   OS='Mac'
   ;;
@@ -68,10 +71,15 @@ challenge_port() {
   noise) echo 5003 ;;
   nlp) echo 5004 ;;
   ae) echo 5005 ;;
+  surprise) echo 6700 ;;
   *) return 1 ;;
   esac
 }
 challenge_route() {
+  if [[ "$1" == "surprise" ]]; then
+    echo "/observe"
+    return
+  fi
   # All challenges' predict route is /<challenge>.
   if [[ "$OS" = "Windows" ]]; then
     echo "//$1"
@@ -79,7 +87,7 @@ challenge_route() {
     echo "/$1"
   fi
 }
-VALID_CHALLENGES="asr cv noise nlp ae"
+VALID_CHALLENGES="asr cv noise nlp ae surprise"
 
 # ─── arg parsing ───────────────────────────────────────────────────────────
 DRY_RUN=0
@@ -127,7 +135,7 @@ if ! PORT=$(challenge_port "$CHALLENGE"); then
 fi
 ROUTE=$(challenge_route "$CHALLENGE")
 if [[ "$OS" = "Windows" ]]; then
-  HEALTH="//health"
+  HEALTH="/health"
 else
   HEALTH="/health"
 fi
@@ -165,6 +173,23 @@ REPO="${REGISTRY}/${PROJECT}/repo-til-26-${TEAM_ID}"
 IMAGE_NAME="${TEAM_ID}-${CHALLENGE}"
 LOCAL_REF="${IMAGE_NAME}:${TAG}"
 REMOTE_REF="${REPO}/${IMAGE_NAME}:${TAG}"
+BUILD_CONTEXT="$CHALLENGE"
+BUILD_ARGS=()
+CONTAINER_ENV_ARGS=()
+
+if [[ "$CHALLENGE" == "surprise" ]]; then
+  BUILD_CONTEXT="surprise_chal/participant"
+  AGENT="${AGENT:-algo}"
+  BUILD_ARGS+=(--build-arg "AGENT=$AGENT")
+  BUILD_ARGS+=(--build-arg "OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}")
+  CONTAINER_ENV_ARGS+=(--container-env-vars "AGENT=$AGENT")
+  if [[ "$AGENT" == "llm" ]]; then
+    : "${OPENROUTER_API_KEY:?AGENT=llm requires OPENROUTER_API_KEY}"
+    CONTAINER_ENV_ARGS=(
+      --container-env-vars "AGENT=$AGENT,OPENROUTER_API_KEY=$OPENROUTER_API_KEY${OPENROUTER_MODEL:+,OPENROUTER_MODEL=$OPENROUTER_MODEL}"
+    )
+  fi
+fi
 
 # ─── tool checks ───────────────────────────────────────────────────────────
 need() {
@@ -190,7 +215,7 @@ run() {
 
 # ─── build (if requested) ──────────────────────────────────────────────────
 if ((BUILD)); then
-  run docker build --platform linux/amd64 -t "$LOCAL_REF" "$CHALLENGE"
+  run docker build --platform linux/amd64 "${BUILD_ARGS[@]}" -t "$LOCAL_REF" "$BUILD_CONTEXT"
 fi
 
 # ─── verify the local image exists ─────────────────────────────────────────
@@ -199,7 +224,7 @@ if ((!DRY_RUN && !BUILD)); then
     cat >&2 <<EOF
 error: local image '$LOCAL_REF' not found.
   Build it first:
-    cd $CHALLENGE && docker build --platform linux/amd64 -t '$LOCAL_REF' .
+    docker build --platform linux/amd64 -t '$LOCAL_REF' '$BUILD_CONTEXT'
   Or pass --build to have this script do it automatically.
 EOF
     exit 1
@@ -216,6 +241,7 @@ Submitting:
   port:        $PORT
   predict:     $ROUTE
   health:      /health
+  context:     $BUILD_CONTEXT
   auth:        $AUTH_MODE${AUTH_MODE:+ ($([[ $AUTH_MODE == impersonate ]] && echo "$SERVICE_ACCOUNT" || echo "GCLOUD_ACCESS_TOKEN"))}
   dry-run:     $((DRY_RUN ? 1 : 0))
 EOF
@@ -239,6 +265,11 @@ run docker tag "$LOCAL_REF" "$REMOTE_REF"
 run docker push "$REMOTE_REF"
 
 # ─── upload to Vertex AI ───────────────────────────────────────────────────
+if [[ "$(uname)" == MINGW* || "$(uname)" == MSYS* || "$(uname)" == CYGWIN* ]]; then
+  # Git Bash rewrites /observe-style args into Windows paths unless excluded.
+  export MSYS2_ARG_CONV_EXCL="--container-health-route=;--container-predict-route="
+fi
+
 run gcloud ai models upload \
   --project="$PROJECT" \
   --region="$REGION" \
@@ -247,6 +278,7 @@ run gcloud ai models upload \
   --container-health-route="$HEALTH" \
   --container-predict-route="$ROUTE" \
   --container-ports="$PORT" \
+  "${CONTAINER_ENV_ARGS[@]}" \
   --version-aliases="default"
 
 echo

@@ -1,0 +1,163 @@
+# Surprise Challenge — Strategy & Implementation Plan
+
+A 20-player free-for-all hex-grid economic wargame. We implement
+`decide(observation) -> ActionPayload` in `participant/src/{algo_agent,llm_agent}.py`.
+Server is `participant/src/server.py` (port 6700, `POST /observe`, **~10s hard turn
+deadline** → miss = no-op). The engine under `participant/src/engine/` is READ-ONLY
+truth. Build/run via `docker compose up --build`.
+
+---
+
+## The insight that changes everything: scoring is binary survival
+
+The win condition is **not** domination. From `game_runner.py` and `RULES.md`: you win
+by **either** destroying all enemy Bases **or** simply being alive at the turn limit —
+and **every survivor co-wins equally, with no tiebreaker** on gold, kills, units, or
+buildings. The local harness prints exactly `PASS — you SURVIVED` / `FAIL — you were
+eliminated`.
+
+So **kills are worthless** except to remove a direct threat to our own Bases. In a
+20-player FFA the other 19 grind each other down; the optimal play is a **defensive
+turtle that refuses to die**. This drives both agents.
+
+### Survival levers (priority order)
+
+1. **Base redundancy.** Eliminated only when you have **zero _complete_ Bases** (a Base
+   that finishes construction *after* you die does **not** revive you). Holding 2–3
+   complete Bases spread far apart means no single army can eliminate you. A 2nd Base
+   (300g, 5 turns, foundable on any tile you can see) is the first major purchase after
+   the opening economy.
+2. **Universal peace.** An active peace treaty blocks all direct attacks (only artillery
+   **splash** leaks through — it ignores ownership/treaty). Accept every incoming
+   proposal; propose to every player met. For a turtle this is pure upside. A treaty
+   **break** triggers a 5-turn ACTIVE countdown (`breaking_in_turns`) — a free
+   early-warning siren to reinforce before war resumes.
+3. **Defensive garrison + anti-air.** Tanks (200hp/60atk) as durable defenders,
+   Artillery (range 3 + splash) to punish clustered attackers, Fighters for anti-air.
+   **Bombers are the base-killers** (×4 vs buildings: two delete a 300hp Base in one
+   turn), so denying air matters.
+4. **Economy** to fund the above — Mines, especially on rich-resource tiles (50g/turn).
+5. **Stay hidden.** Fog is strict with no memory; "met by sight" is one-directional.
+   Don't over-extend and paint a target on yourself.
+
+### Engine caveat: treaty cutoff at turn 200
+
+`TREATY_CUTOFF_TURN = 200` voids **all** treaties and forbids new ones — forced open war
+for the rest of the game. Only bites if the real game runs >200 turns (local = 300,
+Discord eval = 50, real length undisclosed), so the defensive army must be real, not
+just diplomatic.
+
+### Stage map (what we're actually graded on)
+
+| Stage | Opponents | Turns / map | Notes |
+|---|---|---|---|
+| 1. Local self-test | 19 `RandomAgent` (weak) | 300, seed 67 (stand-in) | PASS = Base alive at end. Don't overfit to seed 67. |
+| 2. Discord eval | 19 stronger algo bots | 50, hidden seed | Treaty cutoff never hits; survive-early is the whole game. |
+| 3. Real competition | other teams' agents | undisclosed map/length | The real test — genuine defense + diplomacy needed. |
+
+---
+
+## Architecture: algo is the engine, LLM is a thin overlay
+
+The **LLM agent contains the algo agent** rather than being an alternative to it:
+
+- **Every turn the algo runs first** (synchronous, ~ms) and produces a complete, valid
+  `ActionPayload`: all unit moves, attacks, builds, production, and a sensible *default*
+  diplomacy (accept-all / propose-to-met). This is the safe baseline **and** the fallback.
+- **The LLM is consulted only for the soft layer** it's good at — chat, treaty
+  decisions, and maybe a single defensive/expand mode toggle — with a tight timeout. We
+  **never** ask it to do hex-range math (LLMs are bad at it; the template warns so), and
+  we only accept `send_chat` / treaty action types back from it.
+- **Graceful merge or fallback:** LLM replies in time → splice its diplomacy/chat over
+  the algo defaults. LLM times out or errors → ship the algo payload untouched.
+
+**Why this beats letting the LLM drive:** the 10s deadline is hard and CPU is capped;
+LLMs are unreliable at the grid math that keeps you alive; tokens cost money over
+hundreds of turns; the **uncapped** chat history is a deliberate context-bomb vector.
+Putting survival on deterministic rails and using the LLM for negotiation captures the
+upside (smart diplomacy, reading opponents) with none of the downside (a timeout/garbage
+turn losing the game). It also makes model latency **non-critical** — a slow turn just
+falls back — which de-risks the ≤7s requirement.
+
+---
+
+## Implementation phases
+
+### Phase 1 — the strong algo turtle (can PASS on its own)
+
+- Compact obs parser: own units/buildings, enemies, threats, occupied tiles, treaties +
+  incoming breaks. Torus-correct via the engine's `HexGrid`.
+- Economy/build planner: opening Barracks + Mine → ramp Mines (prefer rich tiles) →
+  found a **2nd Base early** for redundancy → Factory for Tanks/Artillery, scaling Base
+  count with the clock. Never box in a producing building (lost unit + gold).
+- Defensive combat: garrison units near the nearest own Base; focus-fire threats in
+  range (prioritise Bombers/Artillery); artillery splash with friendly-fire avoidance;
+  retreat fragile units (Scout/Artillery/Medic); medic healing.
+- Default diplomacy: accept all peace, propose to all met, reinforce on incoming
+  treaty-breaks.
+- Stay within 1 CPU / 1 GiB and well under the deadline (bounded per-turn compute, no
+  whole-map pathfinding every turn).
+
+### Phase 2 — the LLM overlay
+
+- Hybrid wrapper around the algo (compute-then-consult-then-merge/fallback).
+- Bounded prompt builder: hard-truncate the uncapped global/private chat and obs to a
+  fixed token budget (defuses context-bombs, controls latency/cost).
+- Strict-JSON soft-layer parser; accept only chat + treaty actions from the model.
+- Live latency benchmark of 2–3 OpenRouter models (Fable 5 + a fast flash-class model)
+  using the provided key, to confirm the ≤7s budget empirically. Key lives in a
+  gitignored `.env`; baked into the image at submit time.
+
+### Phase 3 — test & iterate
+
+- `docker compose up --build` for both agents; verify survival on seed 67.
+- Harden against the *stronger* dynamics expected in stages 2–3 (not overfitting to the
+  random opponents).
+
+### Deferred — opponent-LLM exploitation
+
+The "exploit opponents' LLMs via prompt-injection / feints / chat manipulation" layer is
+**parked for Opus 4.8**, to be done after the core agents are solid. It slots cleanly
+into the chat layer Phase 2 already builds.
+
+---
+
+## Build order
+
+Start with **Phase 1 (the algo turtle)** — it's the robust floor everything builds on and
+the fallback for the LLM agent. Optionally run the model-latency benchmark first if we
+want the LLM model choice settled before coding.
+
+
+
+additional notes:
+The big one: units can teleport
+
+  turn_processor validates a move by exactly three things — path[0] is your current tile, the number of listed waypoints minus 1 ≤ movement_range, and the sum of the listed tiles' own terrain entry-costs ≤
+  movement_range. It never checks that consecutive waypoints are adjacent. So a one-element hop [(0,0) → (15,7)] is a legal "1-step move" for an Infantry, and it lands anywhere.
+
+  What this means concretely:
+  - Every unit (move ≥ 1) can relocate to almost any free tile on the map in a single turn. A single hop to any cost-1 tile (normal/elevated/concealment/rich) always passes. Only landing on a Difficult tile
+  (cost 2) needs move ≥ 2, so Infantry/Medic/Artillery can't end on Difficult — but they ignore it as a path obstacle entirely.
+  - The hop-count budget is still enforced (Test C2: a 2-hop path failed for a move-1 unit), and the destination must be unoccupied — but you teleport over walls, water, and enemy units freely.
+  - Attacks still fire from the pre-move tile, so you can't teleport-then-snipe in one turn. Teleport is pure repositioning.
+
+  This massively amplifies a turtle: a single mobile reserve can defend every base (teleport to whichever is threatened), fragile units (Artillery) dodge out of danger instantly, scouts flash-reveal any tile to
+  found a hidden remote Base, and you can wall your base with 6 infantry in one turn. The flip side: assume strong opponents in stage 3 do it too — a Bomber can appear next to your base from nowhere, which is
+  another argument for redundant/hidden bases and a teleport-capable anti-air reserve.
+
+  One caveat I want to flag honestly: teleport is plainly an unintended bug. But the README is emphatic — "the engine code is the source of truth… treat any discrepancy as a documentation bug to be fixed 
+  against the code, never the other way round" — so it's very unlikely they'll patch the code. I'll still design so we benefit from teleport without our survival depending on it, in case it's ever closed.
+
+  The treaty break confirmed
+
+  break_treaty flips status to BREAKING, and is_peace only returns True for ACTIVE — so protection ends the instant you break. The countdown even ticks the same turn (you set 5, it shows 4 next turn), and the
+  system DM to the victim literally says "5 turns until war" while the real number is 0. Defensive lesson: treat any incoming break as war this turn. Offensive option (for later): break, then strike next turn,
+  beating any rules-faithful opponent.
+
+  Two more worth noting
+
+  - No same-turn follow/swap moves (Test D): collision is checked against current occupancy before any move executes, so you can't slide a unit into a tile a teammate is vacating that same turn, nor swap two
+  units. Affects column-shuffling defensive micro — teleport sidesteps it anyway.
+  - Artillery splash bypasses peace entirely (documented, but nasty): the treaty check is only on the primary tile. Firing at an empty tile next to a peace partner's Base splashes it for int(60×0.5)=30 with no
+  treaty violation. So peace does not fully protect our buildings from an artillery-splasher — keep that in mind defensively, and it's an offensive lever we have without breaking peace. 
