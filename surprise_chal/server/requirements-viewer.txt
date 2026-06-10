@@ -1,0 +1,8 @@
+# Extra dependencies for watch_replay.py only (the interactive replay viewer).
+# NOT needed to build or submit your agent — only to watch games locally.
+# arcade is a graphical (OpenGL) library; on Linux you may also need system GL libs.
+# numpy + coloraide back the sprite recolouring the renderer does.
+arcade>=3.0
+pillow>=11.0
+numpy>=1.26
+coloraide>=4.0

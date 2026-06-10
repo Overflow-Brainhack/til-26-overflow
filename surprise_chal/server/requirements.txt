@@ -1,0 +1,4 @@
+# The harness is a script, not a web server: it drives the engine in-process and
+# HTTP-calls the participant. The engine is pure-Python stdlib; httpx (the HTTP
+# client used to reach the participant) is the only third-party dep.
+httpx>=0.28

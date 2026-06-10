@@ -1,0 +1,67 @@
+# Local test wired to match the OFFICIAL competition conditions. The participant
+# container runs under the same isolation the organizer applies in
+# tools/run_local_competition.ps1: a 1 GiB / 1 CPU cap and internet egress
+# locked to openrouter.ai:443 only (via the squid allowlist proxy). So a local
+# PASS reflects the real run — your agent can't quietly depend on more resources
+# or on reaching any other host.
+#
+#   docker compose up --build          # algo agent (no key, no internet needed)
+#   AGENT=llm OPENROUTER_API_KEY=sk-... docker compose up --build   # LLM agent
+#
+# Two networks enforce the egress model:
+#   arena  (internal: true)  — engine (harness) + participant + proxy; NO internet.
+#   egress (bridge)          — the proxy's only route out to the internet.
+networks:
+  arena: { internal: true }
+  egress: {}
+
+services:
+  # Allowlisting forward proxy: the participant's ONLY path to the internet.
+  # Permits CONNECT openrouter.ai:443 and drops everything else (see egress/squid.conf).
+  egress-proxy:
+    image: ubuntu/squid:latest
+    volumes:
+      - ./egress/squid.conf:/etc/squid/squid.conf:ro
+    networks: [arena, egress]
+    mem_limit: 256m
+
+  # YOUR submission: the HTTP player server (built from participant/Dockerfile —
+  # the same image you ship). Pick which of your agents runs with AGENT.
+  # Capped + egress-restricted to match the competition; httpx (llm.py) honors
+  # HTTPS_PROXY automatically, so the LLM agent routes through the proxy with no
+  # code change. NO_PROXY keeps the local health check and intra-arena traffic direct.
+  participant:
+    image: til26-participant:local
+    build: { context: ./participant, dockerfile: Dockerfile }
+    environment:
+      PLAYER_ID: "player-0"
+      AGENT: "${AGENT:-algo}"            # algo (no key) | llm (needs key) | your own
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      OPENROUTER_MODEL: "${OPENROUTER_MODEL:-deepseek/deepseek-v4-flash}"
+      HTTP_PROXY: "http://egress-proxy:3128"
+      HTTPS_PROXY: "http://egress-proxy:3128"
+      NO_PROXY: "participant,harness,localhost,127.0.0.1"
+    mem_limit: 1g                        # same cap as the competition (-MemLimit)
+    cpus: 1                              # same cap as the competition (-Cpus)
+    networks: [arena]
+    depends_on: [egress-proxy]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:6700/health').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # The eval (built from server/Dockerfile): game engine + 19 in-process random
+  # opponents; calls `participant` over HTTP. Scenario is FIXED — no knobs. It
+  # needs no internet (opponents are in-process) so it sits on the arena network only.
+  harness:
+    image: til26-harness:local
+    build: { context: ./server, dockerfile: Dockerfile }
+    environment:
+      PARTICIPANT_URL: "http://participant:6700"
+    volumes:
+      - ./replays:/app/src/replays
+    networks: [arena]
+    depends_on:
+      participant:
+        condition: service_healthy

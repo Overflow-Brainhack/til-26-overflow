@@ -1,0 +1,5 @@
+# Everything a player server needs. The game engine (src/engine) is pure-Python
+# stdlib — no extra deps. These three are just the web server + LLM HTTP client.
+fastapi>=0.115
+uvicorn[standard]>=0.34
+httpx>=0.28
