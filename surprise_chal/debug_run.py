@@ -92,7 +92,7 @@ async def amain() -> None:
         actors["player-1"] = load_agent("shadow")
         start = 2
     for i in range(start, args.players):
-        actors[f"player-{i}"] = make_opponent(i, args.opponents)
+        actors[f"player-{i}"] = make_opponent(i, args.opponents, args.seed)
 
     runner = TraceRunner(
         registrations,

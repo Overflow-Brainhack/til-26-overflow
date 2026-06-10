@@ -64,6 +64,12 @@ HARD_PERSONALITIES = (
     "base_hunter",
     "fast_expand",
     "treaty_ambush",
+    # second wave: sharper archetypes that exploit the same engine quirks a
+    # strong human-built agent would (teleport hops, treaty-bypassing splash)
+    "swarm_grinder",
+    "tele_striker",
+    "splash_siege",
+    "econ_titan",
 )
 
 
@@ -147,6 +153,10 @@ class HardOpponent:
         actions: list[Any] = []
         treaties = observation.get("treaties", [])
         ambush = self.personality == "treaty_ambush"
+        # econ_titan booms behind universal peace, then relies on the turn-200
+        # treaty void for its late-war army; splash_siege accepts peace because
+        # its artillery splash bypasses treaties anyway
+        peaceful = self.personality in ("econ_titan", "splash_siege")
 
         for proposal in observation.get("incoming_treaty_proposals", []):
             proposer = proposal.get("proposer_id")
@@ -156,11 +166,11 @@ class HardOpponent:
                 RespondTreatyAction(
                     proposing_player_id=proposer,
                     treaty_type=proposal.get("treaty_type", "peace"),
-                    accept=ambush,
+                    accept=ambush or peaceful,
                 )
             )
 
-        if not ambush:
+        if not ambush and not peaceful:
             return actions
 
         known = observation.get("known_players", [])
@@ -173,6 +183,8 @@ class HardOpponent:
             actions.append(ProposeTreatyAction(target_player_id=player_id))
             self.last_proposed[player_id] = turn
 
+        if not ambush:
+            return actions
         army_ready = len(flat.own_units) >= 10 or turn >= 70
         for treaty in treaties:
             partner = treaty.get("partner_id")
@@ -227,6 +239,14 @@ class HardOpponent:
             order += ["Factory", "Airbase", "Mine", "Base", "Factory", "Mine"]
         elif self.personality == "fast_expand":
             order += ["Mine", "Base", "Mine", "Mine", "Barracks", "Factory", "Airbase"]
+        elif self.personality == "swarm_grinder":
+            order += ["Barracks", "Mine", "Barracks", "Base", "Mine", "Barracks"]
+        elif self.personality == "tele_striker":
+            order += ["Mine", "Airbase", "Mine", "Airbase", "Base", "Airbase"]
+        elif self.personality == "splash_siege":
+            order += ["Mine", "Factory", "Factory", "Base", "Factory", "Mine"]
+        elif self.personality == "econ_titan":
+            order += ["Mine", "Mine", "Base", "Mine", "Barracks", "Factory", "Base", "Mine", "Airbase", "Factory"]
         else:
             order += ["Mine", "Factory", "Base", "Airbase", "Factory", "Mine"]
 
@@ -273,6 +293,34 @@ class HardOpponent:
                 "Airbase": 2,
                 "Base": 3,
             },
+            "swarm_grinder": {
+                "Mine": 4,
+                "Barracks": 4,
+                "Factory": 1,
+                "Airbase": 0,
+                "Base": 2,
+            },
+            "tele_striker": {
+                "Mine": 4,
+                "Barracks": 1,
+                "Factory": 1,
+                "Airbase": 3,
+                "Base": 2,
+            },
+            "splash_siege": {
+                "Mine": 4,
+                "Barracks": 1,
+                "Factory": 4,
+                "Airbase": 1,
+                "Base": 2,
+            },
+            "econ_titan": {
+                "Mine": 10,
+                "Barracks": 2,
+                "Factory": 3,
+                "Airbase": 2,
+                "Base": 5,
+            },
         }[self.personality]
         target = targets.get(kind, 0)
         if gold >= 2000 and kind in ("Factory", "Airbase", "Base"):
@@ -282,9 +330,13 @@ class HardOpponent:
         return target
 
     def _build_reserve(self, kind: str) -> int:
-        if self.personality in ("bomber_rush", "base_hunter") and kind == "Airbase":
+        if self.personality in ("bomber_rush", "base_hunter", "tele_striker") and kind == "Airbase":
             return 0
-        if self.personality == "fast_expand" and kind in ("Mine", "Base"):
+        if self.personality in ("fast_expand", "econ_titan") and kind in ("Mine", "Base"):
+            return 0
+        if self.personality == "swarm_grinder" and kind == "Barracks":
+            return 0
+        if self.personality == "splash_siege" and kind == "Factory":
             return 0
         return 50
 
@@ -326,6 +378,11 @@ class HardOpponent:
         self, building_type: str, counts: dict[str, int], turn: int, gold: int
     ) -> list[str]:
         if building_type == "Barracks":
+            if self.personality == "swarm_grinder":
+                # the grind blob: infantry walls healed by a thick medic train
+                if counts.get("Medic", 0) * 3 < counts.get("Infantry", 0):
+                    return ["Medic", "Infantry"]
+                return ["Infantry", "Infantry"]
             if counts.get("Scout", 0) < 3:
                 return ["Scout", "Infantry"]
             if counts.get("Medic", 0) * 4 < counts.get("Infantry", 0) + counts.get("Tank", 0):
@@ -333,14 +390,14 @@ class HardOpponent:
             return ["Infantry", "Scout"]
 
         if building_type == "Factory":
-            if self.personality == "artillery_siege":
+            if self.personality in ("artillery_siege", "splash_siege"):
                 return ["Artillery", "Tank"]
             if counts.get("Tank", 0) < 4:
                 return ["Tank", "Artillery"]
             return ["Artillery", "Tank"]
 
         if building_type == "Airbase":
-            if self.personality in ("bomber_rush", "base_hunter"):
+            if self.personality in ("bomber_rush", "base_hunter", "tele_striker"):
                 if counts.get("Fighter", 0) < max(1, counts.get("Bomber", 0) // 2):
                     return ["Fighter", "Bomber"]
                 return ["Bomber", "Fighter"]
@@ -360,11 +417,37 @@ class HardOpponent:
     ) -> None:
         reserved = set(flat.occupied)
         anchors = [b for b in complete if b["type"] == "Base"] or complete
+        # hunting stance: dedicated aggressors raid from the start; boom-style
+        # personalities turtle until their army or the treaty cutoff is ready
+        hunting = (
+            self.personality
+            in ("bomber_rush", "base_hunter", "swarm_grinder", "tele_striker", "splash_siege", "artillery_siege")
+            or turn >= 110
+            or len(flat.own_units) >= 14
+        )
         for unit in sorted(flat.own_units, key=lambda u: self._unit_priority(u["type"])):
             here = coord(unit)
-            target = self._best_attack_target(grid, unit, flat.enemies)
-            if target is not None:
-                actions.append(AttackAction(unit_id=unit["id"], target=coord(target)))
+            shell = None
+            if unit["type"] == "Artillery" and self.personality in ("splash_siege", "treaty_ambush"):
+                # a shell next to the Base out-values plinking a ring body: the
+                # splash reaches the Base through both the ring and any treaty
+                shell = self._splash_shot(grid, unit, flat)
+            if shell is not None:
+                actions.append(AttackAction(unit_id=unit["id"], target=shell))
+            else:
+                target = self._best_attack_target(grid, unit, flat.enemies)
+                if target is not None:
+                    actions.append(AttackAction(unit_id=unit["id"], target=coord(target)))
+
+            # the teleport quirk the engine permits: a 1-hop move to any visible
+            # free tile. Strong stage-3 opponents will use it; so do these bots.
+            if hunting:
+                dest = self._teleport_raid(grid, unit, flat, reserved)
+                if dest is not None:
+                    actions.append(MoveAction(unit_id=unit["id"], path=[here, dest]))
+                    reserved.discard((here.q, here.r))
+                    reserved.add((dest.q, dest.r))
+                    continue
 
             destination = self._movement_destination(grid, turn, unit, flat, anchors)
             if destination is None:
@@ -381,6 +464,72 @@ class HardOpponent:
                 actions.append(MoveAction(unit_id=unit["id"], path=path))
                 reserved.discard((here.q, here.r))
                 reserved.add((path[-1].q, path[-1].r))
+
+    def _teleport_raid(
+        self,
+        grid: HexGrid,
+        unit: dict[str, Any],
+        flat: FlatObservation,
+        reserved: set[tuple[int, int]],
+    ) -> HexCoord | None:
+        """One-hop teleport toward the current enemy goal, landing only on tiles
+        we can SEE are free (occupancy outside vision is unknowable). Returns a
+        destination strictly closer to the goal than where the unit stands."""
+        utype = unit["type"]
+        move = unit.get("movement_range", 0)
+        if move < 1 or utype in ("Medic", "Scout"):
+            return None
+        here = coord(unit)
+        goal = self._enemy_goal(grid, here, flat.enemies)
+        if goal is None:
+            return None
+        desired = {"Fighter": 2, "Artillery": 3}.get(utype, 1)
+        current = grid.distance(here, goal)
+        if current <= desired:
+            return None
+        best: tuple[tuple[int, int], HexCoord] | None = None
+        for radius in (desired, desired + 1, desired + 2):
+            for c in grid.ring(goal, radius):
+                terrain = flat.terrain.get((c.q, c.r))
+                if terrain is None:  # outside vision — cannot verify it is free
+                    continue
+                cost = 2 if terrain == "difficult" else 1
+                if cost > move or (c.q, c.r) in reserved:
+                    continue
+                key = (abs(grid.distance(c, goal) - desired), grid.distance(c, here))
+                if best is None or key < best[0]:
+                    best = (key, c)
+            if best is not None:
+                break
+        if best is None or grid.distance(best[1], goal) >= current:
+            return None
+        return best[1]
+
+    def _splash_shot(
+        self, grid: HexGrid, unit: dict[str, Any], flat: FlatObservation
+    ) -> HexCoord | None:
+        """Artillery shell on an EMPTY tile adjacent to an enemy Base: splash
+        ignores ownership and treaties, so this grinds ringed or peace-protected
+        bases without ever breaking peace."""
+        here = coord(unit)
+        rng = unit.get("attack_range", 0)
+        own = {(e["q"], e["r"]) for e in flat.own_units + flat.own_buildings}
+        bases = [e for e in flat.enemies if e["type"] == "Base"]
+        for base in bases:
+            bc = coord(base)
+            if grid.distance(here, bc) > rng + 1:
+                continue
+            for cell in grid.neighbors(bc):
+                pos = (cell.q, cell.r)
+                if pos in flat.occupied or pos not in flat.terrain:
+                    continue
+                if grid.distance(here, cell) > rng:
+                    continue
+                # no own assets inside the splash ring
+                if any((s.q, s.r) in own for s in [cell, *grid.ring(cell, 1)]):
+                    continue
+                return cell
+        return None
 
     def _best_attack_target(
         self, grid: HexGrid, unit: dict[str, Any], enemies: list[dict[str, Any]]
@@ -756,18 +905,20 @@ def load_agent(kind: str):
     return module.AlgoAgent()
 
 
-def opponent_label(slot: int, mode: str) -> str:
+def opponent_label(slot: int, mode: str, seed: int = 0) -> str:
     if mode == "random":
         return "random"
     if mode == "mixed" and slot % 3 == 0:
         return "random"
-    return HARD_PERSONALITIES[(slot - 1) % len(HARD_PERSONALITIES)]
+    # rotate the personality wheel with the seed so each map faces a different
+    # mix and neighbour layout — an anti-overfitting measure
+    return HARD_PERSONALITIES[(slot - 1 + seed * 3) % len(HARD_PERSONALITIES)]
 
 
-def make_opponent(slot: int, mode: str):
+def make_opponent(slot: int, mode: str, seed: int = 0):
     from baseline_random import RandomAgent
 
-    label = opponent_label(slot, mode)
+    label = opponent_label(slot, mode, seed)
     if label == "random":
         return RandomAgent()
     return HardOpponent(label, slot)
@@ -836,8 +987,8 @@ async def run_one(seed: int, args: argparse.Namespace) -> dict[str, Any]:
         pid = f"player-{i}"
         if pid in tracked_ids:
             continue
-        label = opponent_label(i, args.opponents)
-        actors[pid] = make_opponent(i, args.opponents)
+        label = opponent_label(i, args.opponents, seed)
+        actors[pid] = make_opponent(i, args.opponents, seed)
         if args.benchmark_opponents and label in HARD_PERSONALITIES:
             labels_by_pid[pid] = label
             stats[pid] = EvalStats(pid)

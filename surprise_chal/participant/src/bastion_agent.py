@@ -446,7 +446,7 @@ class _Turn:
             # threat redundancy is a consumable — stock more of it
             want += 1
         # surplus gold converts to redundancy — never die rich
-        return min(9, want + self.budget // 2000)
+        return min(12, want + self.budget // 1500)
 
     def _found_bases(self) -> None:
         # A complete base under sustained fire is already half-lost: count only
@@ -601,22 +601,24 @@ class _Turn:
         if count("Mine") < 2 and self.turn >= 8:
             queue.append("Mine")
 
-        mine_target = min(12, min(8, 2 + self.turn // 12) + self.budget // 1500)
+        mine_target = min(16, min(8, 2 + self.turn // 12) + self.budget // 1000)
         factory_target = 1
         if self.turn >= 60 or self.budget >= 1200:
             factory_target = 2
-        factory_target = min(4, factory_target + self.budget // 3000)
+        factory_target = min(6, factory_target + self.budget // 2000)
 
         airbase_target = 0
         if self.turn >= 25 or self._air_threat() or self.budget >= 900:
             airbase_target = 1
         if self.turn >= 80 or self.budget >= 1800:
             airbase_target = 2
-        airbase_target = min(4, airbase_target + self.budget // 4000)
+        airbase_target = min(6, airbase_target + self.budget // 2500)
 
         barracks_target = 2 if (self.turn >= 25 or self.budget >= 600) else 1
         if self.budget >= 1500:
             barracks_target = 3
+        if self.budget >= 4000:
+            barracks_target = 5
 
         for kind, target in (
             ("Airbase", airbase_target if self._air_threat() else 0),
@@ -639,8 +641,9 @@ class _Turn:
         # IS survival — shadow died hoarding 3500 gold behind a reserve like this
         reserve = _BASE_COST if len(self.complete_bases) < 2 else 0
         built = 0
+        build_limit = 6 if self.budget > 2000 else 4
         for kind in self._build_targets():
-            if built >= 4:
+            if built >= build_limit:
                 break
             cost = BUILDING_STATS[kind].gold_cost
             # the first Barracks/Mine must never be starved by the base reserve —
@@ -767,24 +770,25 @@ class _Turn:
         # 16k gold — banked income must become standing defense instead
         rich = self.budget
         # a standing-army floor independent of ring gaps: the seed-68 death sat
-        # at 4-9 infantry all game because demand only tracked open ring tiles
-        floor = min(8 + self.turn // 6, 26) - self._unit_count("Infantry")
+        # at 4-9 infantry all game because demand only tracked open ring tiles.
+        # Banked gold raises the floor — an unspent treasury defends nothing.
+        floor = min(8 + self.turn // 6 + rich // 1500, 40) - self._unit_count("Infantry")
         want = {
             "Infantry": max(
                 0,
                 len(easy) + 2 - infantry_pool - self._pending("Infantry"),
                 floor,
             ),
-            "Tank": min(8, max(len(hard), nb) + rich // 3000),
+            "Tank": min(12, max(len(hard), nb) + rich // 2000),
             "Fighter": min(
-                14,
+                18,
                 max(2, nb)
                 + min(5, self._known_bombers())  # interceptors per known bomber
                 + (2 if self._air_threat() else 0)
-                + rich // 2000,
+                + rich // 1200,
             ),
-            "Artillery": min(10, min(nb + 1, 4) + (1 if self._enemy_artillery_near() else 0) + rich // 2500),
-            "Medic": min(nb, 4),
+            "Artillery": min(14, min(nb + 1, 4) + (1 if self._enemy_artillery_near() else 0) + rich // 1500),
+            "Medic": min(nb, 6),
             "Scout": 2 + (1 if self.turn >= 80 else 0),
         }
         # war-prep: treaties void at the cutoff — harden before open war resumes
