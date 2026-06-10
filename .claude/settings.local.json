@@ -6,7 +6,14 @@
       "Bash(cd /c/Users/zedon/Documents/GitHub/til-26-overflow/til-26-ae && find . -type f -name \"*.py\" | head -20)",
       "Read(//c/c/Users/zedon/Documents/GitHub/til-26-overflow/**)",
       "Bash(python -c ' *)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "PowerShell(python --version)",
+      "PowerShell(python -c \"import sys; print\\(sys.executable\\)\")",
+      "PowerShell(python surprise_chal/evaluate_agent.py --seeds 67 --turns 150)",
+      "PowerShell(python surprise_chal/evaluate_agent.py --agent bastion --seeds 67 --turns 150)",
+      "PowerShell(python surprise_chal/debug_run.py --agent bastion --seed 67 --turns 150 > surprise_chal/trace_bastion_67.txt; Get-Content surprise_chal/trace_bastion_67.txt -Tail 40)",
+      "PowerShell(python surprise_chal/debug_run.py --agent bastion --seed 67 --turns 150 > surprise_chal/trace_bastion_67.txt; Get-Content surprise_chal/trace_bastion_67.txt -Tail 25)",
+      "PowerShell(python surprise_chal/evaluate_agent.py --agent bastion --seeds 67,68,69,70,71 > surprise_chal/eval_bastion_300.txt)"
     ]
   }
 }

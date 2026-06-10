@@ -742,17 +742,18 @@ class EvaluatorRunner(GameRunner):
 
 
 def load_agent(kind: str):
-    if kind == "shadow":
-        return importlib.import_module("shadow_agent").AlgoAgent()
     if kind == "llm":
         from llm_agent import LLMAgent
 
         return LLMAgent()
-    if kind != "algo":
-        raise SystemExit(f"unknown agent {kind!r}; expected algo or llm")
-    from algo_agent import AlgoAgent
-
-    return AlgoAgent()
+    # any other name loads <kind>_agent.py and instantiates its AlgoAgent class
+    # (algo → algo_agent, shadow → shadow_agent, bastion → bastion_agent, ...)
+    module_name = kind if kind.endswith("_agent") else f"{kind}_agent"
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise SystemExit(f"unknown agent {kind!r}: {exc}") from exc
+    return module.AlgoAgent()
 
 
 def opponent_label(slot: int, mode: str) -> str:
@@ -776,6 +777,49 @@ def resource_gold(player) -> int:
     return player.resources.get(ResourceType.GOLD)
 
 
+def unique_label(kind: str, used: set[str]) -> str:
+    label = kind
+    if label not in used:
+        used.add(label)
+        return label
+    suffix = 2
+    while f"{label}_{suffix}" in used:
+        suffix += 1
+    label = f"{label}_{suffix}"
+    used.add(label)
+    return label
+
+
+def parse_agent_kinds(args: argparse.Namespace) -> list[str]:
+    if args.agents:
+        kinds = [part.strip() for part in args.agents.split(",") if part.strip()]
+        if not kinds:
+            raise SystemExit("--agents must include at least one agent name")
+        return kinds
+
+    kinds = []
+    for kind in ("bastion", args.agent):
+        if kind not in kinds:
+            kinds.append(kind)
+    if args.include_shadow and "shadow" not in kinds:
+        kinds.append("shadow")
+    return kinds
+
+
+def tracked_agents(args: argparse.Namespace) -> list[tuple[str, str, str]]:
+    kinds = parse_agent_kinds(args)
+    if len(kinds) > args.players:
+        raise SystemExit(
+            f"--agents lists {len(kinds)} agent(s), but --players is only {args.players}"
+        )
+
+    used_labels: set[str] = set()
+    tracked: list[tuple[str, str, str]] = []
+    for slot, kind in enumerate(kinds):
+        tracked.append((f"player-{slot}", unique_label(kind, used_labels), kind))
+    return tracked
+
+
 async def run_one(seed: int, args: argparse.Namespace) -> dict[str, Any]:
     registrations = [PlayerRegistration(PLAYER_ID, PLAYER_ID, "local://agent")]
     registrations += [
@@ -783,13 +827,7 @@ async def run_one(seed: int, args: argparse.Namespace) -> dict[str, Any]:
         for i in range(1, args.players)
     ]
 
-    tracked = [(PLAYER_ID, args.agent, args.agent)]
-    if args.include_shadow:
-        if args.players < 2:
-            raise SystemExit("--include-shadow needs --players at least 2")
-        shadow_label = "shadow" if args.agent != "shadow" else "shadow_p1"
-        tracked.append(("player-1", shadow_label, "shadow"))
-
+    tracked = tracked_agents(args)
     labels_by_pid = {pid: label for pid, label, _ in tracked}
     stats = {pid: EvalStats(pid) for pid, _, _ in tracked}
     actors = {pid: load_agent(kind) for pid, _, kind in tracked}
@@ -1007,12 +1045,23 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate a Surprise agent across multiple engine seeds."
     )
-    parser.add_argument("--agent", default="algo", choices=("algo", "llm", "shadow"))
+    parser.add_argument(
+        "--agent",
+        default="algo",
+        help="primary agent to evaluate with bastion/shadow when --agents is not set",
+    )
+    parser.add_argument(
+        "--agents",
+        help=(
+            "comma-separated participant agents to evaluate in the same game "
+            "(for example: bastion,algo,shadow)"
+        ),
+    )
     parser.add_argument(
         "--no-shadow",
         dest="include_shadow",
         action="store_false",
-        help="disable player-1=shadow_agent and evaluate only --agent",
+        help="disable shadow_agent in the default roster when using --agent",
     )
     parser.set_defaults(include_shadow=True)
     parser.add_argument("--seeds", default="67,68,69,70,71")
@@ -1039,9 +1088,7 @@ def parse_args() -> argparse.Namespace:
 async def amain() -> None:
     args = parse_args()
     seeds = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
-    tracked = [args.agent]
-    if args.include_shadow:
-        tracked.append("shadow" if args.agent != "shadow" else "shadow_p1")
+    tracked = [label for _, label, _ in tracked_agents(args)]
     if args.benchmark_opponents and args.opponents != "random":
         tracked.extend(p for p in HARD_PERSONALITIES if p not in tracked)
     print(
