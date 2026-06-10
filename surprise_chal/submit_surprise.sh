@@ -41,7 +41,7 @@ echo "==> Submitting ${AGENT} agent for team ${TEAM_NAME}"
 echo "    image: ${IMAGE}"
 
 # 1. build participant/
-docker build --build-arg AGENT="$AGENT" --build-arg OPENROUTER_API_KEY="$OPENROUTER_API_KEY" -t "$IMAGE" "${SCRIPT_DIR}/participant"
+docker build --build-arg AGENT="$AGENT" --build-arg OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}" -t "$IMAGE" "${SCRIPT_DIR}/participant"
 
 # 2. push to your Artifact Registry repo
 gcloud auth configure-docker "$GAR_HOST" --quiet
