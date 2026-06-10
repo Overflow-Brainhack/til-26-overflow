@@ -59,7 +59,10 @@ from map_memory import MapMemory  # noqa: E402
 from observation import ParsedObs  # noqa: E402
 from policies.policy import Policy  # noqa: E402
 from policies.rl_policy import RLPolicy  # noqa: E402
-from policies.layered_rl_policy import LayeredRLPolicy  # noqa: E402
+from policies.layered_rl_policy import (  # noqa: E402
+    PRODUCTION_GUARD_KWARGS,
+    LayeredRLPolicy,
+)
 
 
 AGENT_TYPES = (
@@ -68,6 +71,12 @@ AGENT_TYPES = (
     "random",
     "rl",
 )
+
+# Set from --rl-guards in main(). Default off so existing benchmarks keep
+# measuring the bare RL policy; pass --rl-guards to A/B the production
+# (ae_manager) configuration: dodge override + oscillation break + stagnation
+# takeover.
+_RL_GUARDS_ENABLED = False
 
 
 class RandomPolicy(Policy):
@@ -91,7 +100,14 @@ def _make_policy(
         policy = RandomPolicy()
     elif agent_type == "rl":
         # policy = RLPolicy(checkpoint_path=rl_checkpoint)
-        policy = LayeredRLPolicy(checkpoint_path=rl_checkpoint)
+        if _RL_GUARDS_ENABLED:
+            policy = LayeredRLPolicy(
+                checkpoint_path=rl_checkpoint,
+                heuristic_kwargs=policy_kwargs,
+                **PRODUCTION_GUARD_KWARGS,
+            )
+        else:
+            policy = LayeredRLPolicy(checkpoint_path=rl_checkpoint)
     else:
         raise ValueError(f"unknown agent type: {agent_type}")
 
@@ -644,6 +660,16 @@ def main() -> None:
         default=None,
         help="Checkpoint for --agent-type rl (default: ae/models/ae_rl.pt)",
     )
+    parser.add_argument(
+        "--rl-guards",
+        action="store_true",
+        default=False,
+        help=(
+            "Run rl agents with the production safety guards "
+            "(dodge override + oscillation break + stagnation takeover), "
+            "matching what ae_manager ships."
+        ),
+    )
     # ── heuristic (normal) policy toggles ────────────────────────────────────
     parser.add_argument(
         "--predictive-bomb",
@@ -809,6 +835,9 @@ def main() -> None:
     parser.add_argument("--grid-offset-y", type=int, default=0)
 
     args = parser.parse_args()
+
+    global _RL_GUARDS_ENABLED
+    _RL_GUARDS_ENABLED = args.rl_guards
 
     # Build kwargs for normal (HeuristicPolicy) agents.
     policy_kwargs = dict(

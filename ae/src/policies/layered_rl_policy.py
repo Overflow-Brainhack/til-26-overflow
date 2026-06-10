@@ -24,7 +24,23 @@ Wraps ``RLPolicy`` with three guards that the learned policy struggles with:
      state. Replacing the worst RL decisions with heuristic decisions caps
      downside risk without changing peak behaviour.
 
-All three guards are toggleable so you can A/B exactly how much lift each one
+  4. **Stagnation takeover.** The oscillation break only catches short
+     period-2/3 cycles; a deterministic argmax policy can also wander a
+     handful of cells for dozens of ticks (the "stuck in a corner" failure).
+     Track position history per round and, when the agent has covered too few
+     unique cells over a window — or is loitering in a *closed-off pocket*
+     (every recent cell has a small passable neighbourhood, measured by a
+     depth-limited flood fill over the current wall state) — hand control to
+     ``EditedHeuristicPolicyV2`` for ``takeover_ticks`` ticks. The heuristic's
+     goal-directed routing (collect, proactive base routing, exploration)
+     pulls the agent back into productive play; a cooldown then keeps the RL
+     in charge so the takeover can never dominate a round. Camping near the
+     own base is exempt — that is deliberate defence, not stagnation. The
+     openness test is what stands in for "hardcoding bad map locations": with
+     the novice map cache loaded the closed-off pockets are known from tick 0,
+     and on unknown maps the same test generalises from observed walls.
+
+All guards are toggleable so you can A/B exactly how much lift each one
 gives. GRU hidden state is *not* rewound when a guard fires — the network
 still sees the next observation and updates its recurrent state normally.
 
@@ -53,6 +69,16 @@ from threat import (
 
 _LOOP_PERIODS = (2, 3)
 _LOOP_WINDOW_DEFAULT = 6
+
+_NEIGHBOURS = ((1, 0), (-1, 0), (0, 1), (0, -1))
+
+# What ae_manager ships. Kept here (next to the toggles they enable) so the
+# auto_play harness can A/B the exact production configuration via --rl-guards.
+PRODUCTION_GUARD_KWARGS: dict = dict(
+    dodge_override=True,
+    oscillation_break=True,
+    stagnation_takeover=True,
+)
 
 
 def _edge_cost_no_walls(memory: MapMemory):
@@ -87,6 +113,17 @@ class LayeredRLPolicy(RLPolicy):
         heuristic_fallback: bool = False,
         value_threshold: float | None = -0.5,
         entropy_threshold_frac: float | None = None,
+        stagnation_takeover: bool = False,
+        stagnation_window: int = 20,
+        stagnation_unique_cells: int = 4,
+        confined_window: int = 12,
+        confined_unique_cells: int = 4,
+        openness_depth: int = 3,
+        openness_threshold: int = 12,
+        takeover_ticks: int = 20,
+        takeover_cooldown: int = 30,
+        base_exempt_radius: int = 3,
+        heuristic_kwargs: Optional[dict] = None,
     ):
         """Construct the layered policy.
 
@@ -107,6 +144,23 @@ class LayeredRLPolicy(RLPolicy):
                 the entropy trigger. Useful range [0.5, 0.95]. Start with
                 ``0.85`` (policy is using >85% of its entropy budget — i.e.
                 near-uniform → not confident in any action).
+            stagnation_takeover: master switch for guard 4. Triggers when
+                the last ``stagnation_window`` positions span at most
+                ``stagnation_unique_cells`` unique cells, or — the faster,
+                confined variant — when the last ``confined_window``
+                positions span at most ``confined_unique_cells`` cells *and*
+                every one of those cells has openness (cells reachable within
+                ``openness_depth`` moves; max ``2d²+2d+1`` = 25 at depth 3)
+                of at most ``openness_threshold``. On trigger the heuristic
+                drives for ``takeover_ticks`` ticks, then the trigger is
+                suppressed for ``takeover_cooldown`` further ticks. Positions
+                within ``base_exempt_radius`` (Manhattan) of the own base
+                never trigger — sitting there is defence.
+            heuristic_kwargs: constructor kwargs for the
+                ``EditedHeuristicPolicyV2`` used by the fallback/takeover
+                guards. Pass the production heuristic config
+                (``ae_manager.DEFAULT_POLICY_KWARGS``) so guard behaviour
+                matches the battle-tested heuristic, not its bare defaults.
         """
         super().__init__(
             checkpoint_path=checkpoint_path,
@@ -118,23 +172,41 @@ class LayeredRLPolicy(RLPolicy):
         self.heuristic_fallback = heuristic_fallback
         self.value_threshold = value_threshold
         self.entropy_threshold_frac = entropy_threshold_frac
+        self.stagnation_takeover = stagnation_takeover
+        self.stagnation_window = stagnation_window
+        self.stagnation_unique_cells = stagnation_unique_cells
+        self.confined_window = confined_window
+        self.confined_unique_cells = confined_unique_cells
+        self.openness_depth = openness_depth
+        self.openness_threshold = openness_threshold
+        self.takeover_ticks = takeover_ticks
+        self.takeover_cooldown = takeover_cooldown
+        self.base_exempt_radius = base_exempt_radius
         self._action_history: deque[tuple[int, tuple[int, int]]] = deque(
             maxlen=loop_window
         )
+        self._pos_history: deque[tuple[int, int]] = deque(
+            maxlen=max(stagnation_window, confined_window)
+        )
+        self._takeover_until: int = -1
+        self._no_trigger_until: int = 0
 
         # Build the heuristic lazily — it pulls in pathfinding, threat, etc.
-        # which are non-trivial imports. Skipped when fallback is disabled.
+        # which are non-trivial imports. Skipped when no guard needs it.
         self._heuristic = None
-        if self.heuristic_fallback:
-            # Import here so disabling the fallback completely avoids the
+        if self.heuristic_fallback or self.stagnation_takeover:
+            # Import here so disabling both guards completely avoids the
             # dependency chain on edited_policy_v2.
             from .edited_policy_v2 import EditedHeuristicPolicyV2
 
-            self._heuristic = EditedHeuristicPolicyV2()
+            self._heuristic = EditedHeuristicPolicyV2(**(heuristic_kwargs or {}))
 
     def reset(self) -> None:
         super().reset()
         self._action_history.clear()
+        self._pos_history.clear()
+        self._takeover_until = -1
+        self._no_trigger_until = 0
 
     # ── public API ──────────────────────────────────────────────────────────
     def choose(self, obs: ParsedObs, memory: MapMemory) -> int:
@@ -145,6 +217,23 @@ class LayeredRLPolicy(RLPolicy):
             self._debug_mode = "frozen"
             self._debug_pos = obs.location
             return int(Action.STAY)
+
+        # ── guard 4 bookkeeping: stagnation takeover ───────────────────────
+        # Recorded before the dodge guard so evacuation ticks still extend the
+        # history; the takeover itself is applied after the RL forward pass so
+        # the GRU hidden state stays in sync with the trajectory.
+        takeover_active = False
+        if self.stagnation_takeover:
+            self._pos_history.append(obs.location)
+            if obs.step < self._takeover_until:
+                takeover_active = True
+            elif obs.step >= self._no_trigger_until and self._is_stagnant(
+                obs, memory
+            ):
+                self._takeover_until = obs.step + self.takeover_ticks
+                self._no_trigger_until = self._takeover_until + self.takeover_cooldown
+                self._pos_history.clear()
+                takeover_active = True
 
         # ── guard 1: dodge override ────────────────────────────────────────
         if self.dodge_override and memory is not None:
@@ -166,6 +255,17 @@ class LayeredRLPolicy(RLPolicy):
 
         # ── normal RL choice (also populates _last_value / _last_entropy) ──
         action = super().choose(obs, memory)
+
+        # ── guard 4: stagnation takeover ───────────────────────────────────
+        # The RL has been circling a few cells (or loitering in a closed-off
+        # pocket) — let the heuristic's goal-directed routing drive for a
+        # stretch. The dodge guard's early return above still pre-empts this,
+        # and the heuristic's own choose() dodges first anyway.
+        if takeover_active and self._heuristic is not None:
+            heur_action = self._heuristic.choose(obs, memory)
+            if self._is_legal(heur_action, obs):
+                self._debug_mode = "stagnation"
+                return self._record(int(heur_action), obs.location)
 
         # ── guard 2: heuristic fallback ────────────────────────────────────
         # Fires when the value head says "this state is bad" OR when the
@@ -202,6 +302,57 @@ class LayeredRLPolicy(RLPolicy):
                 if frac > self.entropy_threshold_frac:
                     return True
         return False
+
+    # ── stagnation detection (guard 4) ──────────────────────────────────────
+    def _is_stagnant(self, obs: ParsedObs, memory: MapMemory) -> bool:
+        bx, by = obs.base_location
+        x, y = obs.location
+        if abs(x - bx) + abs(y - by) <= self.base_exempt_radius:
+            return False
+
+        hist = list(self._pos_history)
+        n = len(hist)
+
+        # Plain stagnation: too few unique cells over the long window.
+        if n >= self.stagnation_window:
+            recent = hist[-self.stagnation_window :]
+            if len(set(recent)) <= self.stagnation_unique_cells:
+                return True
+
+        # Confined stagnation: a shorter dwell is already bad when the cells
+        # involved are closed-off (dead-end, walled corner, narrow pocket).
+        # Mean rather than max: the pocket's mouth cell legitimately sees out
+        # into the open field and would defeat a per-cell test.
+        if memory is not None and n >= self.confined_window:
+            pocket = set(hist[-self.confined_window :])
+            if len(pocket) <= self.confined_unique_cells:
+                mean_openness = sum(
+                    self._openness(memory, cell) for cell in pocket
+                ) / len(pocket)
+                if mean_openness <= self.openness_threshold:
+                    return True
+        return False
+
+    def _openness(self, memory: MapMemory, cell: tuple[int, int]) -> int:
+        """Cells reachable from `cell` within `openness_depth` moves, using the
+        current wall knowledge (destructible walls count as blocking — escape
+        has no time to bomb through). 25 on an open field at depth 3; corners,
+        corridors and dead-ends score far lower."""
+        seen = {cell}
+        frontier = [cell]
+        for _ in range(self.openness_depth):
+            nxt: list[tuple[int, int]] = []
+            for p in frontier:
+                for dx, dy in _NEIGHBOURS:
+                    q = (p[0] + dx, p[1] + dy)
+                    if q in seen or not memory.in_bounds(q):
+                        continue
+                    if not memory.passable(p, q):
+                        continue
+                    seen.add(q)
+                    nxt.append(q)
+            frontier = nxt
+        return len(seen)
 
     # ── internals ───────────────────────────────────────────────────────────
     def _dodge(
