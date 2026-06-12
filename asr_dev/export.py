@@ -1,5 +1,5 @@
-#from nemo.export import TensorRTLLM  # For LLMs/Transducers
-#from nemo.export.onnx_to_tensorrt import ONNXtoTensorRT
+# from nemo.export import TensorRTLLM  # For LLMs/Transducers
+# from nemo.export.onnx_to_tensorrt import ONNXtoTensorRT
 
 from nemo.collections.asr.models import ASRModel
 import os
@@ -17,8 +17,8 @@ os.makedirs(export_dir, exist_ok=True)
 print("Exporting to ONNX...")
 model.export(
     output=os.path.join(export_dir, "parakeet_v2.onnx"),
-    onnx_opset_version=17, # Safe for 5070 Ti
-    verbose=False
+    onnx_opset_version=17,  # Safe for 5070 Ti
+    verbose=False,
 )
 
 # 3. Step 2: Convert to TensorRT using 'trtexec'
@@ -32,3 +32,4 @@ trtexec --onnx=/workspace/export_output/parakeet_v2_encoder.onnx \
         --optShapes=audio_signal:16x80x1000 \
         --maxShapes=audio_signal:32x80x3000
 """
+

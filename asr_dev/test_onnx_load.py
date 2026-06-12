@@ -1,4 +1,4 @@
-# Check 
+# Check
 import onnx_asr
 # import json
 # data = {
@@ -13,6 +13,7 @@ import onnx_asr
 
 # This handles the loading of the multiple ONNX sub-files automatically
 model_path = "/workspace/finetuned-nemo-parakeet-tdt-0.6b-v2"
-model = onnx_asr.load_model(model='nemo-parakeet-tdt-0.6b-v2', path=model_path)
+model = onnx_asr.load_model(model="nemo-parakeet-tdt-0.6b-v2", path=model_path)
 transcription = model.recognize("asr/sample_0.wav")
 print(transcription)
+

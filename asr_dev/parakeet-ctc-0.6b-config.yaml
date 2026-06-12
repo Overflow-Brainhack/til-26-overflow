@@ -5,30 +5,30 @@ model:
   compute_eval_loss: true # Essential for monitoring CTC loss divergence
 
   train_ds:
-    manifest_filepath: 'asr/train_manifest_cleaned.json'
+    manifest_filepath: "asr/train_manifest_cleaned.json"
     sample_rate: ${model.sample_rate}
     text_field: "text"
     shard_manifests: true
-    
+
     # --- BLACKWELL VRAM OPTIMIZATION ---
     # With 96GB, we can push physical batch size and duration much higher
-    batch_size: 32        
-    max_duration: 47.0       # Standardizing duration helps memory predictability
+    batch_size: 32
+    max_duration: 47.0 # Standardizing duration helps memory predictability
     min_duration: 0.1
     shuffle: true
-    num_workers: 16          # Optimal for high-core count environments
+    num_workers: 16 # Optimal for high-core count environments
     pin_memory: true
-    
+
     # Bucketing prevents wasteful padding in CTC calculations
     use_bucketing: true
     bucketing_strategy: "fully_randomized"
     bucketing_batch_size: 32
     num_buckets: 8
-    batch_duration: 1200     # Aggressive duration packing for high throughput
+    batch_duration: 1200 # Aggressive duration packing for high throughput
     defer_setup: true
 
   validation_ds:
-    manifest_filepath: 'asr/val_manifest_cleaned.json'
+    manifest_filepath: "asr/val_manifest_cleaned.json"
     sample_rate: ${model.sample_rate}
     batch_size: 32
     shuffle: false
@@ -37,41 +37,41 @@ model:
     text_field: "text"
 
   tokenizer:
-    update_tokenizer: false  # Assumes keeping Nvidia's default BPE
-    type: bpe  
+    update_tokenizer: false # Assumes keeping Nvidia's default BPE
+    type: bpe
 
   spec_augment:
     _target_: nemo.collections.asr.modules.SpectrogramAugmentation
-    freq_masks: 2 
-    time_masks: 10 
+    freq_masks: 2
+    time_masks: 10
     freq_width: 27
     time_width: 0.05
 
 optim:
   name: adamw
-  lr: 1e-4                  # Slightly more conservative for CTC stability
+  lr: 1e-4 # Slightly more conservative for CTC stability
   betas: [0.9, 0.98]
-  weight_decay: 1e-3 
+  weight_decay: 1e-3
 
   sched:
     name: CosineAnnealing
-    warmup_steps: 1000       # Longer warmup to stabilize the CTC head
-    min_lr: 1e-7 
+    warmup_steps: 1000 # Longer warmup to stabilize the CTC head
+    min_lr: 1e-7
 
 trainer:
-  devices: 1 
+  devices: 1
   accelerator: gpu
   strategy: auto
   max_epochs: 20
   accumulate_grad_batches: 1 # Physical batch size is sufficient
-  gradient_clip_val: 1.0     # Standard for CTC to prevent gradient explosion
-  precision: "bf16-mixed"    # Native support for Blackwell Tensor Cores
-  
-  val_check_interval: 1.0    # Check at end of epoch
+  gradient_clip_val: 1.0 # Standard for CTC to prevent gradient explosion
+  precision: "bf16-mixed" # Native support for Blackwell Tensor Cores
+
+  val_check_interval: 1.0 # Check at end of epoch
   log_every_n_steps: 58
   enable_checkpointing: false
-  logger: false  
-  benchmark: true            # Enabled to let cuDNN find optimal kernels for your GPU
+  logger: false
+  benchmark: true # Enabled to let cuDNN find optimal kernels for your GPU
 
 exp_manager:
   exp_dir: "/workspace/runs"
@@ -81,6 +81,7 @@ exp_manager:
     monitor: "val_wer"
     mode: "min"
     save_top_k: 1
-    save_best_model: false   
-    always_save_nemo: true   
-    save_weights_only: true  # Drastically reduces .ckpt size by removing optim states
+    save_best_model: false
+    always_save_nemo: true
+    save_weights_only: true # Drastically reduces .ckpt size by removing optim states
+

@@ -6,82 +6,82 @@ model:
   train_ds:
     text_field: "text"
     shard_manifests: true
-    manifest_filepath: 'asr/train_manifest.json'
+    manifest_filepath: "asr/train_manifest.json"
     sample_rate: ${model.sample_rate}
-    
+
     # --- MEMORY & THROUGHPUT OPTIMIZATION ---
-    batch_size: 16           # Scaled up from 1 to leverage 96GB GDDR7 VRAM
+    batch_size: 16 # Scaled up from 1 to leverage 96GB GDDR7 VRAM
     shuffle: true
-    num_workers: 15          # CRITICAL: Do not use 0 on Linux/RunPod; unlocks ~10x I/O speed
+    num_workers: 15
     pin_memory: true
     max_duration: 47
     min_duration: 0.4
-    
+
     is_tarred: false
-    
+
     use_bucketing: true
     bucketing_strategy: "fully_randomized"
     bucketing_batch_size: 32 # Increased to match larger base batch size
     num_buckets: 4
-    batch_duration: 400      # Increased dynamically to allow more audio per bucket batch
+    batch_duration: 400 # Increased dynamically to allow more audio per bucket batch
     defer_setup: true
 
   validation_ds:
-    manifest_filepath: 'asr/val_manifest.json'
+    manifest_filepath: "asr/val_manifest.json"
     sample_rate: ${model.sample_rate}
-    batch_size: 16           # Faster validation passes
+    batch_size: 16 # Faster validation passes
     shuffle: false
     use_start_end_token: false
-    num_workers: 8           # Keeps data pipeline fed during validation checks
+    num_workers: 8 # Keeps data pipeline fed during validation checks
     pin_memory: true
     text_field: "text"
 
   tokenizer:
     update_tokenizer: false
-    dir: null  
-    type: bpe  
+    dir: null
+    type: bpe
 
   spec_augment:
     _target_: nemo.collections.asr.modules.SpectrogramAugmentation
-    freq_masks: 2 
-    time_masks: 10 
+    freq_masks: 2
+    time_masks: 10
     freq_width: 27
     time_width: 0.05
 
 optim:
   name: adamw
-  lr: 2e-4                  # Scaled up via Linear Scaling Rule due to larger effective batch size
+  lr: 2e-4 # Scaled up via Linear Scaling Rule due to larger effective batch size
   betas: [0.9, 0.98]
-  weight_decay: 1e-3 
+  weight_decay: 1e-3
 
   sched:
     name: CosineAnnealing
-    warmup_steps: 200 
+    warmup_steps: 200
     warmup_ratio: null
-    min_lr: 1e-7 
+    min_lr: 1e-7
 
 trainer:
-  devices: 1 
+  devices: 1
   num_nodes: 1
-  max_epochs: 10            # Increased from 1; let early stopping handle the exact exit point
-  max_steps: -1 
-  val_check_interval: 0.5   # Check twice per epoch to prevent overfitting on small data
+  max_epochs: 10 # Increased from 1; let early stopping handle the exact exit point
+  max_steps: -1
+  val_check_interval: 0.5 # Check twice per epoch to prevent overfitting on small data
   accelerator: auto
   accumulate_grad_batches: 1 # Dropped to 1 since physical batch size is now large enough
   gradient_clip_val: 0.5
-  
+
   # --- BLACKWELL COMPUTE OPTIMIZATION ---
   precision: "bf16-mixed"
- #precision: "16-mixed"     # CRITICAL: FP32 completely ignores Blackwell's 5th-Gen Tensor Cores.
-  
-  log_every_n_steps: 116  # Lowered from 300 because larger batches mean fewer total steps
+  #precision: "16-mixed"     # CRITICAL: FP32 completely ignores Blackwell's 5th-Gen Tensor Cores.
+
+  log_every_n_steps: 116 # Lowered from 300 because larger batches mean fewer total steps
   enable_progress_bar: true
-  num_sanity_val_steps: 2   # Highly recommended to catch path/OOM bugs before training starts
-  check_val_every_n_epoch: 1 
+  num_sanity_val_steps: 2 # Highly recommended to catch path/OOM bugs before training starts
+  check_val_every_n_epoch: 1
   sync_batchnorm: true
   enable_checkpointing: false
-  logger: false  
-  benchmark: false 
+  logger: false
+  benchmark: false
 
 exp_manager:
   exp_dir: "/workspace/runs"
@@ -92,11 +92,11 @@ exp_manager:
     mode: "min"
     save_top_k: 1
     # THESE TWO ARE THE KEYS:
-    save_best_model: false   # Stops .ckpt files from staying on disk
-    always_save_nemo: true   # Saves the much smaller .nemo file instead
+    save_best_model: false # Stops .ckpt files from staying on disk
+    always_save_nemo: true # Saves the much smaller .nemo file instead
 
-
-# TO PREVENT VERY LARGE CKPT FILES WITH OPTIMISER STATES
+    # TO PREVENT VERY LARGE CKPT FILES WITH OPTIMISER STATES
     # # ADD THESE TWO LINES:
-    save_last: false             # Stops 'last.ckpt' from being created
-    save_weights_only: true      # Removes optimizer states (makes .ckpt 3x smaller)
+    save_last: false # Stops 'last.ckpt' from being created
+    save_weights_only: true # Removes optimizer states (makes .ckpt 3x smaller)
+
