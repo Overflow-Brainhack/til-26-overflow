@@ -13,7 +13,12 @@
       "PowerShell(python surprise_chal/evaluate_agent.py --agent bastion --seeds 67 --turns 150)",
       "PowerShell(python surprise_chal/debug_run.py --agent bastion --seed 67 --turns 150 > surprise_chal/trace_bastion_67.txt; Get-Content surprise_chal/trace_bastion_67.txt -Tail 40)",
       "PowerShell(python surprise_chal/debug_run.py --agent bastion --seed 67 --turns 150 > surprise_chal/trace_bastion_67.txt; Get-Content surprise_chal/trace_bastion_67.txt -Tail 25)",
-      "PowerShell(python surprise_chal/evaluate_agent.py --agent bastion --seeds 67,68,69,70,71 > surprise_chal/eval_bastion_300.txt)"
+      "PowerShell(python surprise_chal/evaluate_agent.py --agent bastion --seeds 67,68,69,70,71 > surprise_chal/eval_bastion_300.txt)",
+      "Bash(rm -rf policies/__pycache__)",
+      "Bash(cp azbase_preserved/edited_policy.py policies/azbase_edited_policy.py)",
+      "Bash(cp azbase_preserved/edited_policy_v2.py policies/azbase_edited_policy_v2.py)",
+      "Bash(cp azbase_preserved/berserker_base_azbase_policy.py policies/azbase_berserker_base_policy.py)",
+      "Bash(cp berserker_base_policy.py policies/azbasev3_policy.py)"
     ]
   }
 }

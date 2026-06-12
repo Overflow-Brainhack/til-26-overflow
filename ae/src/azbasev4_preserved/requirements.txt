@@ -1,5 +1,0 @@
-# Dependencies for AE.
-
-fastapi
-uvicorn[standard]
-numpy

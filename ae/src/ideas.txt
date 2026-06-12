@@ -1,9 +1,0 @@
-When wall breaking instead of collecting points while waiting for wall to break, wall break preemptively instead  (break wall when its within bomb range not when agent is next to it waiting)So like instead of being 1 tile from the wall when breaking it, we are 2 tiles away
-
-calcualtes the best case for an enemy to run out of the blast try to predict where they will run to and move to place a bomb there (calculates all possible locations and uses it to determine if it's worth it rather than predict the best possible route the enemy can take)
-
-Calculate if there is a possible location to place bombs that covers as many safe exit tiles as possible
-
-So lets say hypothetically speaking if there's 4 possible locations for an enemy to run to and there's a bomb can that cover 3 of those, it would be a safe bet to try to bomb them again
-
-dont approach enemy very closely before we bomb Because we dont want to be bombed either

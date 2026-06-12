@@ -30,7 +30,7 @@ from til_environment.bomberman_env import Bomberman  # noqa: E402
 from til_environment.config import default_config  # noqa: E402
 
 from ae_manager import DEFAULT_CACHE_PATH, DEFAULT_POLICY_KWARGS, AEManager  # noqa: E402
-from berserker_policy import BerserkerPolicy  # noqa: E402
+from policies.berserker_policy import BerserkerPolicy  # noqa: E402
 from constants import Action  # noqa: E402
 from diagnostic_policies import PROFILES, make_diagnostic_policy  # noqa: E402
 from edited_policy_conservative import EditedHeuristicPolicy as HeuristicPolicy  # noqa: E402

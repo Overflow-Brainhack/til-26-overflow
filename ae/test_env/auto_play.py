@@ -3,8 +3,6 @@
 Agent types
 -----------
   normal              — HeuristicPolicy (balanced: dodge, attack, defend, collect, explore)
-  ppo                 — full learned 6-action policy from exported PPO/BC model
-  rl_attack           — HeuristicPolicy + optional learned attack module
   berserker           — BerserkerPolicy (rush enemy bases, ignore self-preservation)
   berserker_base      — BerserkerBasePolicy (heuristic base, berserker-style aggression)
   random              — RandomPolicy (uniform sample over legal actions)
@@ -12,7 +10,6 @@ Agent types
 Visual mode (default):
     python ae/test_env/auto_play.py
     python ae/test_env/auto_play.py --agent-type berserker
-    python ae/test_env/auto_play.py --agent-type ppo --attack-model ae/models/promoted_ppo_u1100.pt
     python ae/test_env/auto_play.py --agent-types berserker normal normal normal normal normal
     python ae/test_env/auto_play.py --rounds 3 --seed 42 --fps 4
     python ae/test_env/auto_play.py --action-log ae/test_env/action_logs/normal.txt
@@ -54,42 +51,37 @@ from til_environment.bomberman_env import Bomberman  # noqa: E402
 from til_environment.config import default_config, load_config  # noqa: E402
 
 from ae_manager import DEFAULT_CACHE_PATH, DEFAULT_POLICY_KWARGS, AEManager  # noqa: E402
-from azbase_preserved.berserker_base_azbase_policy import (  # noqa: E402
+from policies.azbase_berserker_base_policy import (  # noqa: E402
     BerserkerBasePolicy as BerserkerBaseAzbasePolicy,
 )
-from berserker_base_policy import BerserkerBasePolicy  # noqa: E402
-from berserker_base_submit_policy import BerserkerBaseSubmitPolicy  # noqa: E402
-from berserker_policy import BerserkerPolicy  # noqa: E402
+from policies.azbasev3_policy import BerserkerBasePolicy  # noqa: E402
+from policies.berserker_base_submit_policy import BerserkerBaseSubmitPolicy  # noqa: E402
+from policies.azbasev4_policy import BerserkerBaseV4Policy  # noqa: E402
+from policies.berserker_policy import BerserkerPolicy  # noqa: E402
 from constants import Action, GRID_SIZE  # noqa: E402
-from edited_policy import EditedHeuristicPolicy as HeuristicPolicy  # noqa: E402
+from policies.edited_policy import EditedHeuristicPolicy as HeuristicPolicy  # noqa: E402
 
 # Comment the line below to benchmark the plain edited_policy instead of the
 # experimental clone (mirrors the toggle in ae_manager.py).
-from edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy  # noqa: E402
+from policies.edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy  # noqa: E402
 from map_memory import MapMemory  # noqa: E402
 from observation import ParsedObs  # noqa: E402
 from policy import Policy  # noqa: E402
-from rl_attack import load_attack_module  # noqa: E402
-from rl_policy import LearnedPolicy  # noqa: E402
-from scoremax_policy import ScoreMaxPolicy  # noqa: E402
+from policies.scoremax_policy import ScoreMaxPolicy  # noqa: E402
 
 
 AGENT_TYPES = (
     "normal",
-    "ppo",
-    "learned",
-    "rl_attack",
     "berserker",
     "berserker_base",
+    "berserker_base_v4",
     "berserker_base_azbase",
     "berserker_base_submit",
     "scoremax",
     "random",
 )
 
-DEFAULT_BENCHMARK_TYPES = tuple(
-    t for t in AGENT_TYPES if t not in ("ppo", "learned", "rl_attack")
-)
+DEFAULT_BENCHMARK_TYPES = AGENT_TYPES
 DEFAULT_ACTION_LOG = HERE / "action_logs" / "auto_play_actions.txt"
 
 
@@ -104,42 +96,15 @@ class RandomPolicy(Policy):
 def _make_policy(
     agent_type: str,
     policy_kwargs: dict,
-    attack_model_path: Optional[Path],
-    attack_bomb_margin: float,
-    attack_module_mode: str,
 ) -> Policy:
     if agent_type == "normal":
         policy: Policy = HeuristicPolicy(**policy_kwargs)
-    elif agent_type in {"ppo", "learned"}:
-        if attack_model_path is None:
-            raise ValueError(
-                f"--agent-type {agent_type} requires --attack-model pointing "
-                "to an exported full-policy .pt or .npz model"
-            )
-        fallback = HeuristicPolicy(**policy_kwargs)
-        policy = LearnedPolicy(model_path=attack_model_path, fallback=fallback)
-        if not policy.available:
-            raise ValueError(f"learned policy could not load model: {attack_model_path}")
-    elif agent_type == "rl_attack":
-        attack_module = load_attack_module(
-            str(attack_model_path) if attack_model_path is not None else None,
-            bomb_margin=attack_bomb_margin,
-        )
-        if attack_module is None:
-            raise ValueError(
-                "--agent-type rl_attack requires --attack-model pointing to a "
-                "loadable .pt or .json attack model"
-            )
-        kwargs = dict(policy_kwargs)
-        kwargs["attack_module"] = attack_module
-        kwargs["attack_module_mode"] = attack_module_mode
-        # Avoid mixing the heuristic online threshold tuner with fixed RL comparisons.
-        kwargs["auto_tune_bomb"] = False
-        policy = HeuristicPolicy(**kwargs)
     elif agent_type == "berserker":
         policy = BerserkerPolicy()
     elif agent_type == "berserker_base":
         policy = BerserkerBasePolicy(**policy_kwargs)
+    elif agent_type == "berserker_base_v4":
+        policy = BerserkerBaseV4Policy(**policy_kwargs)
     elif agent_type == "berserker_base_azbase":
         policy = BerserkerBaseAzbasePolicy(**policy_kwargs)
     elif agent_type == "berserker_base_submit":
@@ -158,21 +123,12 @@ def _make_factories(
     agents: list[str],
     types: list[str],
     policy_kwargs: dict,
-    attack_model_path: Optional[Path],
-    attack_bomb_margin: float,
-    attack_module_mode: str,
 ) -> dict[str, callable]:
     """Return a per-agent-id dict of zero-arg callables that produce a Policy."""
     out: dict[str, callable] = {}
     for agent, t in zip(agents, types):
         t_ = t  # capture loop variable
-        out[agent] = lambda t=t_: _make_policy(
-            t,
-            policy_kwargs,
-            attack_model_path,
-            attack_bomb_margin,
-            attack_module_mode,
-        )
+        out[agent] = lambda t=t_: _make_policy(t, policy_kwargs)
     return out
 
 
@@ -286,8 +242,6 @@ class ActionLogger:
         novice: bool,
         rounds: int,
         selected_types: tuple[str, ...],
-        attack_model_path: Optional[Path],
-        attack_module_mode: str,
     ) -> None:
         if self.path is None:
             return
@@ -299,8 +253,6 @@ class ActionLogger:
         self._fh.write(f"# novice={novice}\n")
         self._fh.write(f"# rounds={rounds}\n")
         self._fh.write(f"# selected_types={','.join(selected_types)}\n")
-        self._fh.write(f"# attack_model={attack_model_path or ''}\n")
-        self._fh.write(f"# attack_module_mode={attack_module_mode}\n")
         self._fh.write(
             "round\tseed\tstep\tagent\ttype\taction\taction_name\t"
             "location\tdirection\thealth\tfrozen\tbase_health\tresources\t"
@@ -472,9 +424,6 @@ def _run_benchmark(
     novice: bool,
     policy_kwargs: dict,
     cache_path: Optional[Path],
-    attack_model_path: Optional[Path],
-    attack_bomb_margin: float,
-    attack_module_mode: str,
     action_logger: ActionLogger,
     agent_types: tuple[str, ...] = DEFAULT_BENCHMARK_TYPES,
 ) -> None:
@@ -507,9 +456,6 @@ def _run_benchmark(
             env.possible_agents,
             [agent_type] * n_agents,
             policy_kwargs,
-            attack_model_path,
-            attack_bomb_margin,
-            attack_module_mode,
         )
         managers, cache_tmpl = _build_managers(env, factories, cache_path)
         agent_type_map = {agent: agent_type for agent in env.possible_agents}
@@ -604,9 +550,6 @@ def _run_matchup_benchmark(
     novice: bool,
     policy_kwargs: dict,
     cache_path: Optional[Path],
-    attack_model_path: Optional[Path],
-    attack_bomb_margin: float,
-    attack_module_mode: str,
     action_logger: ActionLogger,
     agent_types: tuple[str, ...] = DEFAULT_BENCHMARK_TYPES,
 ) -> None:
@@ -656,9 +599,6 @@ def _run_matchup_benchmark(
                 env.possible_agents,
                 type_list,
                 policy_kwargs,
-                attack_model_path,
-                attack_bomb_margin,
-                attack_module_mode,
             )
             managers, cache_tmpl = _build_managers(env, factories, cache_path)
             agent_type_map = dict(zip(env.possible_agents, type_list))
@@ -783,11 +723,9 @@ _MODE_COLORS: dict[str, tuple[int, int, int]] = {
 
 _TYPE_COLORS: dict[str, tuple[int, int, int]] = {
     "normal": (100, 200, 255),
-    "ppo": (120, 255, 220),
-    "learned": (120, 255, 220),
-    "rl_attack": (120, 255, 220),
     "berserker": (255, 80, 80),
     "berserker_base": (255, 150, 120),
+    "berserker_base_v4": (255, 190, 150),
     "berserker_base_azbase": (255, 120, 80),
     "berserker_base_submit": (255, 175, 120),
     "scoremax": (255, 215, 90),
@@ -978,23 +916,6 @@ def main() -> None:
             f"Choices: {AGENT_TYPES}"
         ),
     )
-    parser.add_argument(
-        "--attack-model",
-        type=Path,
-        default=None,
-        help=(
-            "Learned model path. Use a full-policy PPO/BC .pt/.npz with "
-            "--agent-type ppo, or a bomb-only .pt/.json with --agent-type rl_attack."
-        ),
-    )
-    parser.add_argument("--attack-bomb-margin", type=float, default=0.0)
-    parser.add_argument(
-        "--attack-module-mode",
-        choices=("hybrid", "replace"),
-        default="hybrid",
-        help="hybrid keeps scripted high-confidence bombs; replace lets RL own attack decisions.",
-    )
-
     # ── benchmark mode ───────────────────────────────────────────────────────
     parser.add_argument(
         "--benchmark",
@@ -1230,8 +1151,8 @@ def main() -> None:
     )
 
     # ── benchmark mode (headless) ─────────────────────────────────────────────
-    benchmark_types = tuple(args.benchmark_types) if args.benchmark_types else (
-        AGENT_TYPES if args.attack_model is not None else DEFAULT_BENCHMARK_TYPES
+    benchmark_types = (
+        tuple(args.benchmark_types) if args.benchmark_types else DEFAULT_BENCHMARK_TYPES
     )
     run_mode = (
         "benchmark-matchup"
@@ -1249,8 +1170,6 @@ def main() -> None:
         novice=args.novice,
         rounds=args.rounds,
         selected_types=selected_types,
-        attack_model_path=args.attack_model,
-        attack_module_mode=args.attack_module_mode,
     )
 
     if args.benchmark:
@@ -1259,9 +1178,6 @@ def main() -> None:
             args.novice,
             policy_kwargs,
             args.cache_path,
-            args.attack_model,
-            args.attack_bomb_margin,
-            args.attack_module_mode,
             action_logger,
             benchmark_types,
         )
@@ -1274,9 +1190,6 @@ def main() -> None:
             args.novice,
             policy_kwargs,
             args.cache_path,
-            args.attack_model,
-            args.attack_bomb_margin,
-            args.attack_module_mode,
             action_logger,
             benchmark_types,
         )
@@ -1307,9 +1220,6 @@ def main() -> None:
         env.possible_agents,
         agent_types_list,
         policy_kwargs,
-        args.attack_model,
-        args.attack_bomb_margin,
-        args.attack_module_mode,
     )
     managers, cached_template = _build_managers(env, factories, args.cache_path)
     reward_tracker = RewardBreakdownTracker(env)

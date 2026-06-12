@@ -1,16 +1,17 @@
 # .gitignore tells Git not to track these files.
 .vscode
 
-
 # Large files like model weights, training data, and results should be ignored.
 **/models/
 **/results/
 **/runs/
-**/artifacts/
+**/logs/
+**/action_logs/
 *.pt
 *.pth
 *.nemo
 cv-training/
+surprise_chal/trace_*.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -38,7 +39,6 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-uv.lock
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -186,6 +186,3 @@ cv_dev/object_bank
 cv_dev/backgrounds
 
 til-26.wiki
-logs/eval_results.jsonl
-
-nlp_cheese/nlp_eval_512

@@ -1,4 +1,4 @@
-from ultralytics import YOLO, RTDETR
+from ultralytics import RTDETR
 import random
 import json
 import base64
@@ -6,7 +6,6 @@ import requests
 import io
 from PIL import Image
 
-# model = YOLO("noise_dev/yolo11x-finetuned.pt")
 model = RTDETR("noise/models/rtdetr-l-70.pt")
 
 img = random.randint(1, 1000)

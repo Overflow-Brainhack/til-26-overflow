@@ -46,6 +46,7 @@ No surrogate models, no GPU, no gradient computation. Pure image processing.
 ### Why we switched from PGD
 
 PGD with `yolo11m` as surrogate barely affected `yolo11x-finetuned`:
+
 - White-box FGSM (attacker knows the model): mAP 0.95 → 0.50 (47% drop)
 - Black-box PGD transfer (yolo11m → yolo11x-finetuned): negligible effect
 
@@ -136,7 +137,7 @@ Use FGSM (not PGD) for training: 1 gradient step adds ~25% overhead per affected
 
 ## Evaluation tooling
 
-- **`noise_dev/eval_attack.py`** — batch evaluation against yolo11x-finetuned. Reports detection drop rate, confidence shift, RMSE/SSIM metrics, and fairness pass rate. Run with `python -m noise_dev.eval_attack --n 100`.
+- **`noise_dev/eval_attack.py`** — batch evaluation against finetuned models. Reports detection drop rate, confidence shift, RMSE/SSIM metrics, and fairness pass rate. Run with `python -m noise_dev.eval_attack --n 100`.
 - **`cv_dev/adv_test.py`** — white-box FGSM upper-bound evaluation directly against the CV model. Gives the best-case attack effectiveness (attacker knows exact model weights).
 
 ---

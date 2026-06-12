@@ -1,4 +1,4 @@
-"""Batch evaluation of noise-server attack effectiveness against yolo11x-finetuned.
+"""Batch evaluation of noise-server attack effectiveness against finetuned model.
 
 Usage (noise server must be running on :5003):
     python -m noise_dev.eval_attack
@@ -26,7 +26,7 @@ import requests
 from PIL import Image
 from skimage.metrics import structural_similarity
 from tqdm import tqdm
-from ultralytics import YOLO, RTDETR
+from ultralytics import RTDETR
 
 try:
     from faster_coco_eval import COCO as CocoAPI
@@ -39,7 +39,6 @@ except ImportError:
         CocoAPI = None
         COCOeval = None
 
-# TARGET_MODEL = "noise_dev/yolo11x-finetuned.pt"
 TARGET_MODEL = "cv/models/rtdetr-l-70.pt"
 NOISE_SERVER = "http://localhost:5003/noise"
 DATA_DIR = Path("data/cv")
@@ -80,7 +79,7 @@ def compute_map(coco_gt: "CocoAPI", preds: list[dict]) -> float:
     return float(ev.stats[0])
 
 
-def yolo_detect(model: YOLO | RTDETR, img: Image.Image) -> list[dict]:
+def ultralytics_detect(model: RTDETR, img: Image.Image) -> list[dict]:
     results = model(img, imgsz=1280, rect=True, conf=CONF_THRESH, verbose=False)
     boxes = results[0].boxes
     if boxes is None or len(boxes) == 0:
@@ -175,7 +174,6 @@ def main() -> None:
     random.seed(args.seed)
 
     print(f"Loading target model: {TARGET_MODEL}")
-    # model = YOLO(TARGET_MODEL)
     model = RTDETR(TARGET_MODEL)
 
     with open(DATA_DIR / "annotations.json") as f:
@@ -211,7 +209,7 @@ def main() -> None:
         orig_np = np.array(orig_pil)
         gt_boxes = id_to_boxes.get(img_id, [])
 
-        dets_before = yolo_detect(model, orig_pil)
+        dets_before = ultralytics_detect(model, orig_pil)
 
         noised_bytes = request_noise(img_bytes)
         if noised_bytes is None:
@@ -227,7 +225,7 @@ def main() -> None:
         )
 
         noised_np = np.array(noised_pil)
-        dets_after = yolo_detect(model, noised_pil)
+        dets_after = ultralytics_detect(model, noised_pil)
 
         metrics = pixel_metrics(orig_np, noised_np, gt_boxes)
 

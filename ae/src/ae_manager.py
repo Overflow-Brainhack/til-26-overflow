@@ -19,17 +19,14 @@ from constants import Action
 from map_memory import MapMemory, get_shared_memory
 from observation import parse_observation
 from policy import Policy
-# from edited_policy import EditedHeuristicPolicy as HeuristicPolicy
-# from edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy
-# from berserker_policy import BerserkerPolicy
-from berserker_base_policy import BerserkerBasePolicy as HeuristicPolicy
-# from scoremax_policy import ScoreMaxPolicy as HeuristicPolicy
-# from azbase_preserved.berserker_base_azbase_policy import (
+# from policies.edited_policy import EditedHeuristicPolicy as HeuristicPolicy
+# from policies.edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy
+# from policies.berserker_policy import BerserkerPolicy
+from policies.azbasev3_policy import BerserkerBasePolicy as HeuristicPolicy
+# from policies.scoremax_policy import ScoreMaxPolicy as HeuristicPolicy
+# from policies.azbase_berserker_base_policy import (
 #     BerserkerBasePolicy as HeuristicPolicy,
 # )
-
-
-from rl_attack import load_attack_module
 
 
 # Default cache path: bundled into the Docker image alongside source.
@@ -65,9 +62,6 @@ DEFAULT_POLICY_KWARGS: dict = dict(
 )
 
 # DEFAULT_POLICY_VARIANT = os.environ.get("AE_POLICY_VARIANT", "normal")
-# DEFAULT_ATTACK_MODEL = os.environ.get("AE_ATTACK_MODEL", "")
-# DEFAULT_ATTACK_BOMB_MARGIN = float(os.environ.get("AE_ATTACK_BOMB_MARGIN", "0.0"))
-# DEFAULT_ATTACK_MODULE_MODE = os.environ.get("AE_ATTACK_MODULE_MODE", "hybrid")
 
 
 class AEManager:
