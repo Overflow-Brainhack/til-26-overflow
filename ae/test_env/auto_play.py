@@ -70,6 +70,7 @@ AGENT_TYPES = (
     "berserker",
     "random",
     "rl",
+    "layered_rl",
 )
 
 # Set from --rl-guards in main(). Default off so existing benchmarks keep
@@ -99,7 +100,8 @@ def _make_policy(
     elif agent_type == "random":
         policy = RandomPolicy()
     elif agent_type == "rl":
-        # policy = RLPolicy(checkpoint_path=rl_checkpoint)
+        policy = RLPolicy(checkpoint_path=rl_checkpoint)
+    elif agent_type == "layered_rl":
         if _RL_GUARDS_ENABLED:
             policy = LayeredRLPolicy(
                 checkpoint_path=rl_checkpoint,
@@ -454,6 +456,7 @@ _TYPE_COLORS: dict[str, tuple[int, int, int]] = {
     "berserker": (255, 80, 80),
     "random": (200, 200, 80),
     "rl": (180, 120, 255),
+    "layered_rl": (160, 140, 255),
 }
 
 
