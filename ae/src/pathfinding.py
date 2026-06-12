@@ -13,6 +13,7 @@ single function — pathfinding stays generic, policy decides the cost model.
 """
 
 import heapq
+import math
 from typing import Callable, Optional
 
 from constants import Action, DIR_VECTOR, Direction
@@ -57,8 +58,10 @@ def from_can_traverse(
     cost: float = 1.0,
 ) -> EdgeCost:
     """Adapter: turn a boolean traversability check into an EdgeCost."""
+
     def f(a: tuple[int, int], b: tuple[int, int]) -> Optional[float]:
         return cost if can_traverse(a, b) else None
+
     return f
 
 
@@ -89,7 +92,9 @@ def first_action_to(
             return first
         if cost > seen.get((pos, dirn), float("inf")):
             continue
-        for action, next_pos, next_dir, step_cost in _expand(pos, dirn, edge_cost, turn_cost):
+        for action, next_pos, next_dir, step_cost in _expand(
+            pos, dirn, edge_cost, turn_cost
+        ):
             new_cost = cost + step_cost
             if new_cost > max_cost:
                 continue
@@ -98,7 +103,9 @@ def first_action_to(
                 seen[state] = new_cost
                 chosen_first = first if first is not None else action
                 counter += 1
-                heapq.heappush(heap, (new_cost, counter, next_pos, next_dir, chosen_first))
+                heapq.heappush(
+                    heap, (new_cost, counter, next_pos, next_dir, chosen_first)
+                )
     return None
 
 
@@ -112,50 +119,139 @@ def temporal_first_action_to(
     turn_cost: float = 1.0,
     max_cost: float = 200.0,
 ) -> Optional[Action]:
-    """Like first_action_to, but rejects edges whose arrival tick is in danger_timeline.
+    """Backward-compatible wrapper for true time-space pathfinding."""
+    return time_space_first_action_to(
+        start,
+        facing,
+        goals,
+        edge_cost,
+        danger_timeline,
+        turn_cost=turn_cost,
+        max_cost=max_cost,
+    )
 
-    Each action costs 1 game tick, so accumulated Dijkstra cost equals the tick
-    offset from now at which the agent occupies a cell.  An edge to next_pos is
-    blocked when next_pos in danger_timeline.get(arrival_tick, ()).
 
-    This handles time-displaced blasts correctly: a cell passed through at tick 1
-    is safe even if danger_timeline[3] contains it; a cell entered at tick 3 when
-    danger_timeline[3] contains it is blocked even though it is passable at tick 0.
-    Turn actions (LEFT/RIGHT) keep next_pos == pos, so staying in a cell that becomes
-    dangerous at cost+1 is also correctly rejected.
+def time_space_first_action_to(
+    start: tuple[int, int],
+    facing: int,
+    goals: set[tuple[int, int]],
+    edge_cost: EdgeCost,
+    danger_timeline: dict[int, set[tuple[int, int]]],
+    *,
+    turn_cost: float = 1.0,
+    wait_cost: float = 1.0,
+    max_cost: float = 200.0,
+) -> Optional[Action]:
+    """Cheapest path through `(position, facing, tick)` state space.
+
+    A cell is blocked only at ticks where `danger_timeline[tick]` contains it.
+    This lets callers move through a blast footprint before or after detonation,
+    and also lets the search revisit the same `(position, facing)` at a later
+    tick after temporary danger has cleared.
     """
-    if start in goals:
+    if start in goals and start not in danger_timeline.get(0, ()):
         return Action.STAY
 
     counter = 0
-    heap: list[tuple[float, int, tuple[int, int], int, Optional[Action]]] = [
-        (0.0, counter, start, facing, None)
+    start_tick = 0
+    max_tick = int(math.ceil(max_cost))
+    heap: list[tuple[float, int, tuple[int, int], int, int, Optional[Action]]] = [
+        (0.0, counter, start, facing, start_tick, None)
     ]
-    seen: dict[tuple[tuple[int, int], int], float] = {(start, facing): 0.0}
+    seen: dict[tuple[tuple[int, int], int, int], float] = {
+        (start, facing, start_tick): 0.0
+    }
 
     while heap:
-        cost, _, pos, dirn, first = heapq.heappop(heap)
+        cost, _, pos, dirn, tick, first = heapq.heappop(heap)
         if cost > max_cost:
             continue
-        if pos in goals:
-            return first
-        if cost > seen.get((pos, dirn), float("inf")):
+        state = (pos, dirn, tick)
+        if cost > seen.get(state, float("inf")):
             continue
-        for action, next_pos, next_dir, step_cost in _expand(pos, dirn, edge_cost, turn_cost):
+        if pos in goals:
+            return first if first is not None else Action.STAY
+        for action, next_pos, next_dir, step_cost in _expand_time_space(
+            pos, dirn, edge_cost, turn_cost, wait_cost
+        ):
             arrival = cost + step_cost
             arrival_tick = int(round(arrival))
+            if arrival_tick > max_tick:
+                continue
             if next_pos in danger_timeline.get(arrival_tick, ()):
                 continue
             new_cost = arrival
             if new_cost > max_cost:
                 continue
-            state = (next_pos, next_dir)
-            if new_cost < seen.get(state, float("inf")):
-                seen[state] = new_cost
+            next_state = (next_pos, next_dir, arrival_tick)
+            if new_cost < seen.get(next_state, float("inf")):
+                seen[next_state] = new_cost
                 chosen_first = first if first is not None else action
                 counter += 1
-                heapq.heappush(heap, (new_cost, counter, next_pos, next_dir, chosen_first))
+                heapq.heappush(
+                    heap,
+                    (
+                        new_cost,
+                        counter,
+                        next_pos,
+                        next_dir,
+                        arrival_tick,
+                        chosen_first,
+                    ),
+                )
     return None
+
+
+def time_space_reachable_cells(
+    start: tuple[int, int],
+    facing: int,
+    edge_cost: EdgeCost,
+    danger_timeline: dict[int, set[tuple[int, int]]],
+    *,
+    max_cost: float = 50.0,
+    turn_cost: float = 1.0,
+    wait_cost: float = 1.0,
+) -> dict[tuple[int, int], float]:
+    """Cell -> earliest safe arrival cost through `(position, facing, tick)`."""
+    counter = 0
+    start_tick = 0
+    max_tick = int(math.ceil(max_cost))
+    out: dict[tuple[int, int], float] = {}
+    if start not in danger_timeline.get(0, ()):
+        out[start] = 0.0
+    seen: dict[tuple[tuple[int, int], int, int], float] = {
+        (start, facing, start_tick): 0.0
+    }
+    heap: list[tuple[float, int, tuple[int, int], int, int]] = [
+        (0.0, counter, start, facing, start_tick)
+    ]
+
+    while heap:
+        cost, _, pos, dirn, tick = heapq.heappop(heap)
+        if cost > max_cost:
+            continue
+        state = (pos, dirn, tick)
+        if cost > seen.get(state, float("inf")):
+            continue
+        for _action, next_pos, next_dir, step_cost in _expand_time_space(
+            pos, dirn, edge_cost, turn_cost, wait_cost
+        ):
+            new_cost = cost + step_cost
+            arrival_tick = int(round(new_cost))
+            if new_cost > max_cost or arrival_tick > max_tick:
+                continue
+            if next_pos in danger_timeline.get(arrival_tick, ()):
+                continue
+            next_state = (next_pos, next_dir, arrival_tick)
+            if new_cost < seen.get(next_state, float("inf")):
+                seen[next_state] = new_cost
+                if next_pos not in out or new_cost < out[next_pos]:
+                    out[next_pos] = new_cost
+                counter += 1
+                heapq.heappush(
+                    heap, (new_cost, counter, next_pos, next_dir, arrival_tick)
+                )
+    return out
 
 
 def reachable_cells(
@@ -170,7 +266,9 @@ def reachable_cells(
     counter = 0
     out: dict[tuple[int, int], float] = {start: 0.0}
     seen: dict[tuple[tuple[int, int], int], float] = {(start, facing): 0.0}
-    heap: list[tuple[float, int, tuple[int, int], int]] = [(0.0, counter, start, facing)]
+    heap: list[tuple[float, int, tuple[int, int], int]] = [
+        (0.0, counter, start, facing)
+    ]
 
     while heap:
         cost, _, pos, dirn = heapq.heappop(heap)
@@ -178,7 +276,9 @@ def reachable_cells(
             continue
         if cost > seen.get((pos, dirn), float("inf")):
             continue
-        for _action, next_pos, next_dir, step_cost in _expand(pos, dirn, edge_cost, turn_cost):
+        for _action, next_pos, next_dir, step_cost in _expand(
+            pos, dirn, edge_cost, turn_cost
+        ):
             new_cost = cost + step_cost
             if new_cost > max_cost:
                 continue
@@ -214,3 +314,14 @@ def _expand(
 
     yield Action.RIGHT, pos, _RIGHT[facing], turn_cost
     yield Action.LEFT, pos, _LEFT[facing], turn_cost
+
+
+def _expand_time_space(
+    pos: tuple[int, int],
+    facing: int,
+    edge_cost: EdgeCost,
+    turn_cost: float,
+    wait_cost: float,
+):
+    yield from _expand(pos, facing, edge_cost, turn_cost)
+    yield Action.STAY, pos, facing, wait_cost

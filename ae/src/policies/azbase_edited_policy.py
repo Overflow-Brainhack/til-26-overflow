@@ -66,6 +66,8 @@ from abc import ABC, abstractmethod
 from collections import deque
 from typing import NamedTuple, Optional
 
+from .policy import Policy
+
 from constants import (
     Action,
     BASE_DESTROY_BONUS,
@@ -154,11 +156,6 @@ def _intercept_cells(
     return out
 
 
-class Policy(ABC):
-    @abstractmethod
-    def choose(self, obs: ParsedObs, memory: MapMemory) -> int: ...
-
-
 class EditedHeuristicPolicy(Policy):
     """Rule-based agent. All feature toggles are constructor args so callers
     can run baseline-vs-feature comparisons without forking the policy."""
@@ -198,8 +195,6 @@ class EditedHeuristicPolicy(Policy):
         defense_abandon_margin: int = 2,
         max_defense_distance: int = 9,
         defense_cooldown_scale: float = 0.6,
-        attack_module: Optional[object] = None,  # legacy duck-typed hook; rl_attack module was removed
-        attack_module_mode: str = "hybrid",
     ) -> None:
         self.predictive_bomb = predictive_bomb
         self.predictive_bomb_threshold = predictive_bomb_threshold
@@ -230,8 +225,6 @@ class EditedHeuristicPolicy(Policy):
         self.defense_abandon_margin = defense_abandon_margin
         self.max_defense_distance = max_defense_distance
         self.defense_cooldown_scale = defense_cooldown_scale
-        self.attack_module = attack_module
-        self.attack_module_mode = attack_module_mode
 
         # Adaptive base-weight state — reset each round (step == 0).
         self._adaptive_weight: float = base_weight_min
@@ -535,12 +528,6 @@ class EditedHeuristicPolicy(Policy):
 
         blast = cells_in_blast(memory, obs.location)
 
-        if self.attack_module is not None and self.attack_module_mode == "replace":
-            learned = self.attack_module.choose_attack(obs, memory)
-            if learned is not None:
-                return int(learned)
-            return None
-
         # Economy mode: score the opportunity and only bomb if score is sufficient.
         if self.bomb_economy:
             score = self._bomb_opportunity_score(memory, blast)
@@ -560,11 +547,6 @@ class EditedHeuristicPolicy(Policy):
                         )
                     )
                 return int(Action.PLACE_BOMB)
-            if self.attack_module is not None and self.attack_module_mode == "hybrid":
-                learned = self.attack_module.choose_attack(obs, memory)
-                if learned is not None:
-                    return int(learned)
-                return None
             if score < self.bomb_reserve_threshold:
                 return None
             if self.auto_tune_bomb:
@@ -590,12 +572,6 @@ class EditedHeuristicPolicy(Policy):
                 definite += 50.0 if base_hp <= BOMB_ATTACK else 2.0
         if definite >= 1.0:
             return int(Action.PLACE_BOMB)
-
-        if self.attack_module is not None and self.attack_module_mode == "hybrid":
-            learned = self.attack_module.choose_attack(obs, memory)
-            if learned is not None:
-                return int(learned)
-            return None
 
         # Predictive: would the bomb plausibly hit a moving enemy by detonation?
         if self.predictive_bomb:

@@ -79,7 +79,13 @@ from constants import (
 )
 from map_memory import MapMemory
 from observation import ParsedObs
-from pathfinding import EdgeCost, first_action_to, next_pos_after, reachable_cells, temporal_first_action_to
+from pathfinding import (
+    EdgeCost,
+    first_action_to,
+    next_pos_after,
+    reachable_cells,
+    temporal_first_action_to,
+)
 from threat import (
     cells_in_blast,
     cells_safe_for_at_least,
@@ -91,20 +97,20 @@ from threat import (
 
 
 # Search-space tunables (independent of feature toggles).
-DEFEND_RADIUS = 4                  # enemy within this many cells of base = threat
-EXPLORE_BUDGET = 60.0              # max Dijkstra cost when looking for frontier
+DEFEND_RADIUS = 4  # enemy within this many cells of base = threat
+EXPLORE_BUDGET = 60.0  # max Dijkstra cost when looking for frontier
 
 # How many steps from our base toward the enemy the intercept position sits.
 INTERCEPT_STEPS = 2
 
 # Predictive-bomb auto-tuning constants.
-_TUNE_EMA_ALPHA = 0.75   # smoothing factor for the hit-rate EMA
-_TUNE_MIN = 0.05         # floor: never go below this threshold
-_TUNE_MAX = 0.95         # ceiling: never go above this threshold
-_TUNE_WARMUP = 3         # minimum resolved bombs before threshold updates
+_TUNE_EMA_ALPHA = 0.75  # smoothing factor for the hit-rate EMA
+_TUNE_MIN = 0.05  # floor: never go below this threshold
+_TUNE_MAX = 0.95  # ceiling: never go above this threshold
+_TUNE_WARMUP = 3  # minimum resolved bombs before threshold updates
 
 # Loop-detection constants.
-_LOOP_PERIODS = (2, 3)   # cycle lengths to detect
+_LOOP_PERIODS = (2, 3)  # cycle lengths to detect
 # Minimum history depth needed: 2*max_period - 1 = 5. Default window of 6
 # gives one entry of slack while keeping memory negligible.
 _LOOP_WINDOW_DEFAULT = 6
@@ -112,6 +118,7 @@ _LOOP_WINDOW_DEFAULT = 6
 
 class _PendingBomb(NamedTuple):
     """Record of a predictive bomb we placed, pending hit/miss resolution."""
+
     placed_step: int
     blast_cells: frozenset[tuple[int, int]]
     expected_hits: float
@@ -213,14 +220,16 @@ class HeuristicPolicy(Policy):
 
         # Mutable auto-tune state — persists across rounds (policy is not re-created on /reset).
         self._tuned_threshold: float = predictive_bomb_threshold
-        self._hit_ema: float = bomb_tune_target   # warm-start at the target hit rate
+        self._hit_ema: float = bomb_tune_target  # warm-start at the target hit rate
         self._ema_n: int = 0
         self._pending_bombs: list[_PendingBomb] = []
 
         # Rolling history of (action, position) pairs for loop detection.
         # Both components must match for a cycle to be confirmed — same action at
         # a different position (e.g. two FORWARD moves in a corridor) is not a loop.
-        self._action_history: deque[tuple[int, tuple[int, int]]] = deque(maxlen=loop_window)
+        self._action_history: deque[tuple[int, tuple[int, int]]] = deque(
+            maxlen=loop_window
+        )
 
         # Precomputed attack-vector hotspots — cell → coverage count. Computed once
         # per round when ally_base is first known; cheap (256 × 25 LOS checks).
@@ -313,23 +322,31 @@ class HeuristicPolicy(Policy):
         buf = list(self._action_history)  # deque doesn't support slicing
         n = len(buf)
         for period in _LOOP_PERIODS:
-            needed = 2 * period - 1   # minimum history length for this period
+            needed = 2 * period - 1  # minimum history length for this period
             if n < needed:
                 continue
-            suffix = tuple(buf[n - (period - 1):]) + (entry,)
-            prev   = tuple(buf[n - (2 * period - 1): n - (period - 1)])
+            suffix = tuple(buf[n - (period - 1) :]) + (entry,)
+            prev = tuple(buf[n - (2 * period - 1) : n - (period - 1)])
             if suffix == prev:
                 return True
         return False
 
-    def _break_loop(self, obs: ParsedObs, memory: MapMemory, looping_action: int) -> int:
+    def _break_loop(
+        self, obs: ParsedObs, memory: MapMemory, looping_action: int
+    ) -> int:
         """Return a legal, non-looping action to escape the detected cycle.
 
         Priority: turns first (cheap, changes heading without committing to a
         cell), then linear motion, then STAY.  Skips the detected looping
         action and any action that would itself complete a cycle.
         """
-        for action in (Action.LEFT, Action.RIGHT, Action.FORWARD, Action.BACKWARD, Action.STAY):
+        for action in (
+            Action.LEFT,
+            Action.RIGHT,
+            Action.FORWARD,
+            Action.BACKWARD,
+            Action.STAY,
+        ):
             candidate = int(action)
             if candidate == looping_action:
                 continue
@@ -339,7 +356,13 @@ class HeuristicPolicy(Policy):
                 return candidate
         # All alternatives are either masked or themselves looping — return any
         # masked-legal action as a last resort.
-        for action in (Action.LEFT, Action.RIGHT, Action.FORWARD, Action.BACKWARD, Action.STAY):
+        for action in (
+            Action.LEFT,
+            Action.RIGHT,
+            Action.FORWARD,
+            Action.BACKWARD,
+            Action.STAY,
+        ):
             if obs.action_mask[int(action)] == 1:
                 return int(action)
         return int(Action.STAY)
@@ -403,7 +426,9 @@ class HeuristicPolicy(Policy):
         # arrival tick offset. Edges are blocked when the destination cell is
         # in danger_timeline at that specific tick — catching bombs that fire in
         # 2-3 ticks along the planned path, not just tick-0/1 blasts.
-        action = temporal_first_action_to(obs.location, obs.direction, safe, edge, timeline)
+        action = temporal_first_action_to(
+            obs.location, obs.direction, safe, edge, timeline
+        )
         if action is not None:
             return int(action)
         return self._panic_move(obs, memory, timeline)
@@ -425,7 +450,9 @@ class HeuristicPolicy(Policy):
                 best_action = int(action)
         return best_action
 
-    def _bomb_opportunity_score(self, memory: MapMemory, blast: set[tuple[int, int]]) -> float:
+    def _bomb_opportunity_score(
+        self, memory: MapMemory, blast: set[tuple[int, int]]
+    ) -> float:
         """Compute unified value score for placing a bomb at the current position.
 
         Score = Σ base_hit_value + agent_hits * agent_bomb_value
@@ -458,7 +485,11 @@ class HeuristicPolicy(Policy):
         score = base_score + agent_hits * self.agent_bomb_value
         if self.predictive_bomb:
             expected = self._expected_hits(memory, blast)
-            if agent_hits > 0 or base_hits > 0 or expected >= self._effective_threshold():
+            if (
+                agent_hits > 0
+                or base_hits > 0
+                or expected >= self._effective_threshold()
+            ):
                 score += expected * self.agent_bomb_value
         return score
 
@@ -482,11 +513,13 @@ class HeuristicPolicy(Policy):
                 return None
             if self.auto_tune_bomb:
                 expected = self._expected_hits(memory, blast)
-                self._pending_bombs.append(_PendingBomb(
-                    placed_step=obs.step,
-                    blast_cells=frozenset(blast),
-                    expected_hits=expected,
-                ))
+                self._pending_bombs.append(
+                    _PendingBomb(
+                        placed_step=obs.step,
+                        blast_cells=frozenset(blast),
+                        expected_hits=expected,
+                    )
+                )
             return int(Action.PLACE_BOMB)
 
         # Definite hits: enemies / enemy bases currently in blast.
@@ -507,11 +540,13 @@ class HeuristicPolicy(Policy):
             expected = self._expected_hits(memory, blast)
             if expected >= self._effective_threshold():
                 if self.auto_tune_bomb:
-                    self._pending_bombs.append(_PendingBomb(
-                        placed_step=obs.step,
-                        blast_cells=frozenset(blast),
-                        expected_hits=expected,
-                    ))
+                    self._pending_bombs.append(
+                        _PendingBomb(
+                            placed_step=obs.step,
+                            blast_cells=frozenset(blast),
+                            expected_hits=expected,
+                        )
+                    )
                 return int(Action.PLACE_BOMB)
 
         return None
@@ -542,7 +577,8 @@ class HeuristicPolicy(Policy):
 
         # Primary threats: enemy agents currently close to the base.
         threats = {
-            p for p in memory.enemy_agents
+            p
+            for p in memory.enemy_agents
             if abs(p[0] - bx) + abs(p[1] - by) <= effective_radius
         }
 
@@ -552,9 +588,11 @@ class HeuristicPolicy(Policy):
         bomb_virtual_threats: set[tuple[int, int]] = set()
         if self.smart_defend:
             bomb_virtual_threats = {
-                bomb.pos for bomb in memory.bombs.values()
+                bomb.pos
+                for bomb in memory.bombs.values()
                 if not bomb.ally
-                and abs(bomb.pos[0] - bx) + abs(bomb.pos[1] - by) <= effective_radius + BOMB_BLAST_RADIUS
+                and abs(bomb.pos[0] - bx) + abs(bomb.pos[1] - by)
+                <= effective_radius + BOMB_BLAST_RADIUS
                 and bomb.pos not in danger_now
             }
 
@@ -588,7 +626,10 @@ class HeuristicPolicy(Policy):
             else:
                 chase_targets = combined_threats
 
-            targets = _intercept_cells(chase_targets, memory.ally_base, memory) or chase_targets
+            targets = (
+                _intercept_cells(chase_targets, memory.ally_base, memory)
+                or chase_targets
+            )
         else:
             if not combined_threats:
                 return None
@@ -693,7 +734,9 @@ class HeuristicPolicy(Policy):
                     if not memory.in_bounds(proj):
                         break
                     if proj in covered:
-                        enemy_score += self.agent_bomb_value * (BOMB_TIMER + 1 - t) / BOMB_TIMER
+                        enemy_score += (
+                            self.agent_bomb_value * (BOMB_TIMER + 1 - t) / BOMB_TIMER
+                        )
                         break
 
         # Tier 3: active enemy bomb in coverage — confirmed attack corridor.
@@ -724,7 +767,9 @@ class HeuristicPolicy(Policy):
         if not attack_vector:
             return None
 
-        distances = reachable_cells(obs.location, obs.direction, edge, max_cost=EXPLORE_BUDGET)
+        distances = reachable_cells(
+            obs.location, obs.direction, edge, max_cost=EXPLORE_BUDGET
+        )
 
         best_score = 0.0
         best_cell: Optional[tuple[int, int]] = None
@@ -754,10 +799,7 @@ class HeuristicPolicy(Policy):
         # bomb is handled by _try_attack, not here.
         base_candidates: list[tuple[int, int]] = []
         if self.proactive_base_routing:
-            base_candidates = [
-                p for p in memory.enemy_bases
-                if p != obs.location
-            ]
+            base_candidates = [p for p in memory.enemy_bases if p != obs.location]
 
         if not candidates and not base_candidates:
             return None
@@ -820,13 +862,19 @@ class HeuristicPolicy(Policy):
         if action is None:
             return None
         ax, ay = obs.location
-        self._debug_target = min(frontier, key=lambda c: abs(c[0] - ax) + abs(c[1] - ay))
+        self._debug_target = min(
+            frontier, key=lambda c: abs(c[0] - ax) + abs(c[1] - ay)
+        )
         return self._maybe_wall_break(obs, memory, action)
 
     # ── auto-tune helpers ────────────────────────────────────────────────────
 
     def _effective_threshold(self) -> float:
-        return self._tuned_threshold if self.auto_tune_bomb else self.predictive_bomb_threshold
+        return (
+            self._tuned_threshold
+            if self.auto_tune_bomb
+            else self.predictive_bomb_threshold
+        )
 
     def _expected_hits(self, memory: MapMemory, blast: set[tuple[int, int]]) -> float:
         if self.drift_aware_bomb:
@@ -845,23 +893,29 @@ class HeuristicPolicy(Policy):
         if not self.auto_tune_bomb or not self._pending_bombs:
             return
         current = memory.current_step
-        resolved = [b for b in self._pending_bombs if current >= b.placed_step + BOMB_TIMER + 1]
+        resolved = [
+            b for b in self._pending_bombs if current >= b.placed_step + BOMB_TIMER + 1
+        ]
         for bomb in resolved:
             self._pending_bombs.remove(bomb)
             hit = any(
-                p in bomb.blast_cells and memory.enemy_agents.get(p, -1) >= bomb.placed_step
+                p in bomb.blast_cells
+                and memory.enemy_agents.get(p, -1) >= bomb.placed_step
                 for p in memory.enemy_agents
             )
             self._update_bomb_ema(hit)
 
     def _update_bomb_ema(self, hit: bool) -> None:
-        self._hit_ema = _TUNE_EMA_ALPHA * self._hit_ema + (1 - _TUNE_EMA_ALPHA) * (1.0 if hit else 0.0)
+        self._hit_ema = _TUNE_EMA_ALPHA * self._hit_ema + (1 - _TUNE_EMA_ALPHA) * (
+            1.0 if hit else 0.0
+        )
         self._ema_n += 1
         if self._ema_n >= _TUNE_WARMUP:
             # Positive error → hit rate below target → raise threshold (bomb less).
             error = self.bomb_tune_target - self._hit_ema
-            self._tuned_threshold = max(_TUNE_MIN, min(_TUNE_MAX,
-                self._tuned_threshold + 0.05 * error))
+            self._tuned_threshold = max(
+                _TUNE_MIN, min(_TUNE_MAX, self._tuned_threshold + 0.05 * error)
+            )
 
     @property
     def tuned_threshold(self) -> float:
@@ -871,7 +925,11 @@ class HeuristicPolicy(Policy):
     # ── adaptive base-weight helpers ─────────────────────────────────────────
 
     def _effective_base_weight(self) -> float:
-        return self._adaptive_weight if self.adaptive_base_weight else self.base_route_weight
+        return (
+            self._adaptive_weight
+            if self.adaptive_base_weight
+            else self.base_route_weight
+        )
 
     def _update_adaptive_weight(self, obs: ParsedObs, memory: MapMemory) -> None:
         """Adjust _adaptive_weight based on observed enemy aggression.

@@ -2,7 +2,28 @@
   "permissions": {
     "allow": [
       "Bash(ls \"c:\\\\\\\\Users\\\\\\\\zedon\\\\\\\\Documents\\\\\\\\GitHub\\\\\\\\til-26-overflow\\\\\\\\ae\\\\\\\\\")",
-      "Bash(ls \"c:\\\\\\\\Users\\\\\\\\zedon\\\\\\\\Documents\\\\\\\\GitHub\\\\\\\\til-26-overflow\\\\\\\\ae\\\\\\\\src\\\\\\\\\")"
+      "Bash(ls \"c:\\\\\\\\Users\\\\\\\\zedon\\\\\\\\Documents\\\\\\\\GitHub\\\\\\\\til-26-overflow\\\\\\\\ae\\\\\\\\src\\\\\\\\\")",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\zedon\\\\Documents\\\\GitHub\\\\til-26-overflow\\\\ae\\\\\" -Recurse -File | Select-Object FullName | head -50)",
+      "Bash(grep -v \"^--$\")",
+      "Bash(docker info *)",
+      "Bash(gcloud auth *)",
+      "Bash(pip install *)",
+      "Bash(pip show *)",
+      "Bash(pip uninstall *)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(RL_AUTORUN_STAGE=3 RL_AUTORUN_CHECKPOINT=best python rl_autorun.py --submit ae tune-001-baseline-stage3-best)",
+      "Bash(RL_AUTORUN_STAGE=3 RL_AUTORUN_CHECKPOINT=best RL_AUTORUN_TARGET=ae/models/ppo.pt python rl_autorun.py --submit ae tune-001b-baseline-fix)",
+      "Bash(python rl_autorun.py --await-eval ae tune-001b-baseline-fix --since-iso \"2026-05-24T08:58:22.337938+00:00\" --timeout 1800 > /tmp/eval-tune-001b.json 2>&1)",
+      "Bash(git push *)",
+      "Bash(tasklist /FI \"IMAGENAME eq python.exe\" /FO LIST)",
+      "PowerShell(Get-Process python -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-Process python -ErrorAction SilentlyContinue | Where-Object {$_.StartTime -gt \\(Get-Date \"2026-05-24 16:40:00\"\\)} | ForEach-Object { $p = $_; try { $cmd = \\(Get-CimInstance Win32_Process -Filter \"ProcessId=$\\($p.Id\\)\"\\).CommandLine; \"$\\($p.Id\\) [$\\($p.StartTime\\)] $cmd\" } catch { \"$\\($p.Id\\) [$\\($p.StartTime\\)] \\(cmd unavail\\)\" } })",
+      "PowerShell(Stop-Process -Id 43736, 18508, 22212 -Force -ErrorAction SilentlyContinue; Get-Process python -ErrorAction SilentlyContinue | Where-Object {$_.Id -in @\\(43736, 18508, 22212\\)} | Select-Object Id, HasExited)"
+    ],
+    "additionalDirectories": [
+      "\\tmp"
     ]
   },
   "systemPrompt": "Always give clear and concise responses. No unnecessary padding or repetition. Get to the point. Always ask for confirmation before executing console/shell commands."

@@ -23,15 +23,11 @@ from typing import Optional
 from constants import Action
 from map_memory import MapMemory
 from observation import ParsedObs
-from pathfinding import first_action_to, from_can_traverse, next_pos_after
-from policy import Policy
-from threat import cells_in_blast, imminent_danger, project_danger
+from pathfinding import first_action_to
+from .policy import Policy
+from threat import cells_in_blast
 
 
-# Extra ticks to budget for bombing through a destructible wall.
-# Dijkstra will naturally prefer going around when the detour is shorter.
-_WALL_BREAK_COST = 1.0
-_RESOURCE_COOLDOWN = 35
 _CHURN_WINDOW = 6
 
 
@@ -52,9 +48,7 @@ class BerserkerPolicy(Policy):
         # Resource tiles visited recently. Tile respawn is roughly 40 steps, so
         # use a shorter suppress window instead of blacklisting a tile forever.
         self._collected: dict[tuple[int, int], int] = {}
-        self._history: deque[tuple[tuple[int, int], int]] = deque(
-            maxlen=_CHURN_WINDOW
-        )
+        self._history: deque[tuple[tuple[int, int], int]] = deque(maxlen=_CHURN_WINDOW)
 
     def choose(self, obs: ParsedObs, memory: MapMemory) -> int:
         if obs.step == 0:
@@ -86,7 +80,8 @@ class BerserkerPolicy(Policy):
             # Firing positions are cells from which a bomb would hit the target.
             # By LOS symmetry, these equal cells_in_blast centred on the base.
             firing_positions = {
-                p for p in cells_in_blast(memory, target)
+                p
+                for p in cells_in_blast(memory, target)
                 if memory.in_bounds(p) and p != target
             }
             if firing_positions:
@@ -107,7 +102,8 @@ class BerserkerPolicy(Policy):
         if memory.tile_contents.get(pos) == "resource":
             self._collected[pos] = int(obs.step)
         resources = {
-            p for p, k in memory.tile_contents.items()
+            p
+            for p, k in memory.tile_contents.items()
             if k == "resource"
             and p != pos
             and not self._resource_recently_collected(p, obs.step)
@@ -157,7 +153,9 @@ class BerserkerPolicy(Policy):
             action = replacement
         return self._record(obs, action)
 
-    def _destination(self, obs: ParsedObs, memory: MapMemory, action: int) -> Optional[tuple[int, int]]:
+    def _destination(
+        self, obs: ParsedObs, memory: MapMemory, action: int
+    ) -> Optional[tuple[int, int]]:
         if action in (int(Action.FORWARD), int(Action.BACKWARD)):
             dest = next_pos_after(obs.location, obs.direction, action)
             if not memory.in_bounds(dest) or not memory.passable(obs.location, dest):
@@ -243,7 +241,9 @@ class BerserkerPolicy(Policy):
             dest = obs.location
             if action in (Action.FORWARD, Action.BACKWARD):
                 dest = next_pos_after(obs.location, obs.direction, idx)
-                if not memory.in_bounds(dest) or not memory.passable(obs.location, dest):
+                if not memory.in_bounds(dest) or not memory.passable(
+                    obs.location, dest
+                ):
                     continue
             tick = imminent_danger(memory, dest, timeline)
             if tick is not None and tick <= 2:
@@ -253,49 +253,3 @@ class BerserkerPolicy(Policy):
             if best is None or score > best[0]:
                 best = (score, idx)
         return best[1] if best is not None else None
-
-    def _edge_cost(self, memory: MapMemory):
-        """EdgeCost that allows traversal through destructible walls at extra cost."""
-        def cost(a: tuple[int, int], b: tuple[int, int]) -> Optional[float]:
-            if not memory.in_bounds(b):
-                return None
-            if memory.passable(a, b):
-                return 1.0
-            if memory.edge_is_destructible_wall(a, b):
-                return _WALL_BREAK_COST
-            return None
-        return cost
-
-    def _maybe_wall_break(self, obs: ParsedObs, memory: MapMemory, action: int) -> int:
-        """If the planned move crosses a destructible wall, place a bomb to clear it.
-
-        Returns PLACE_BOMB when we need to blast through, STAY when our own bomb
-        is already in progress, or the original action when the path is clear.
-        """
-        if action not in (int(Action.FORWARD), int(Action.BACKWARD)):
-            return action
-        next_pos = next_pos_after(obs.location, obs.direction, action)
-        if not memory.edge_is_destructible_wall(obs.location, next_pos):
-            return action
-        # Already have an ally bomb here — wait for it to detonate the wall.
-        sitting_bomb = memory.bombs.get(obs.location)
-        if sitting_bomb is not None and sitting_bomb.ally:
-            return int(Action.STAY)
-        if obs.action_mask[Action.PLACE_BOMB] == 1 and obs.team_bombs > 0:
-            return int(Action.PLACE_BOMB)
-        return action
-
-    def _pick_target(self, memory: MapMemory) -> Optional[tuple[int, int]]:
-        """Weakest (lowest HP) known enemy base, or None if none remain.
-
-        Bases observed at exactly 0 HP are treated as destroyed and excluded —
-        the simulator may keep them visible with health_ratio=0 for one tick
-        before the entity is fully removed from the observation.
-        """
-        bases = {
-            b for b in memory.enemy_bases
-            if memory.enemy_base_health.get(b, 100.0) > 0
-        }
-        if not bases:
-            return None
-        return min(bases, key=lambda b: memory.enemy_base_health.get(b, 100.0))

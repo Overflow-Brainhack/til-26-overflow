@@ -34,7 +34,7 @@ from til_environment.config import default_config  # noqa: E402
 
 from ae_manager import AEManager  # noqa: E402
 from map_memory import MapMemory  # noqa: E402
-from policy import HeuristicPolicy  # noqa: E402
+from policies.policy import HeuristicPolicy  # noqa: E402
 
 
 def main() -> None:

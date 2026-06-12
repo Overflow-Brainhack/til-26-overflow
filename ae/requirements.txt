@@ -3,3 +3,14 @@
 fastapi
 uvicorn[standard]
 numpy
+
+# Learned policy (rl_policy.py) inference. CPU build of torch — the RL net is
+# tiny (~1.1M params: two small CNNs + one GRU cell), so per-step inference is
+# sub-millisecond on CPU and a GPU is unnecessary. Pinned to the training version
+# (ae_rl/ trains on 2.11.0) so checkpoints load without version surprises.
+#
+# If you switch the Dockerfile base to the CUDA image (nvcr.io/nvidia/pytorch:
+# 25.11-py3, which already ships torch), DELETE the two lines below — that image
+# provides torch, and the cpu index would otherwise pull a CPU build over it.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.11.0

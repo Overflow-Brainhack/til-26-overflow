@@ -8,7 +8,7 @@
 # the watcher tries to submit them (unless SUBMIT_FLAGS includes --build).
 
 [ae]
-tags = ["latest"]
+tags = ["ppo"]
 
 # [cv]
 # tags = ["resnet-baseline", "efficientnet-v2"]

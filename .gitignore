@@ -7,6 +7,8 @@
 **/runs/
 **/logs/
 **/action_logs/
+**/summaries/
+**/tuning/
 *.pt
 *.pth
 *.nemo

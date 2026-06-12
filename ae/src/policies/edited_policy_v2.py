@@ -173,7 +173,8 @@ class EditedHeuristicPolicyV2(EditedHeuristicPolicy):
         candidates = [
             cell
             for cell in memory.collectible_cells()
-            if cell != obs.location and not self._tile_recently_collected(cell, obs.step)
+            if cell != obs.location
+            and not self._tile_recently_collected(cell, obs.step)
         ]
         base_tiles: list[tuple[int, int]] = []
         if self.proactive_base_routing:

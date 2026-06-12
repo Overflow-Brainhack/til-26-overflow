@@ -168,7 +168,7 @@ class EditedHeuristicPolicy(Policy):
         self,
         *,
         predictive_bomb: bool = True,
-        predictive_bomb_threshold: float = 0.25,
+        predictive_bomb_threshold: float = 0.7,
         wall_breaking: bool = True,
         wall_break_cost: float = 5.0,
         adaptive_wall_break_cost: bool = False,
@@ -184,24 +184,20 @@ class EditedHeuristicPolicy(Policy):
         wall_break_tile_threshold: float = 0.0,
         loop_detection: bool = True,
         loop_window: int = _LOOP_WINDOW_DEFAULT,
-        proactive_base_routing: bool = False,
-        base_route_weight: float = 3.0,
+        proactive_base_routing: bool = True,
+        base_route_weight: float = 100.0,
         adaptive_base_weight: bool = False,
         base_weight_min: float = 0.5,
         base_weight_ramp_rate: float = 0.05,
         base_weight_attack_cooldown: int = 20,
-        # Defaults below were promoted from the former
-        # edited_policy_conservative.py (our best-scoring config) — kept here so
-        # the single class carries the production-tuned values.
+        # additions
         minimum_aggression: float = 1.0,
         aggression_ramp_rate: float = 0.04,
         defensive_force: float = 0.75,
         defense_abandon_margin: int = 2,
         max_defense_distance: int = 9,
         defense_cooldown_scale: float = 0.6,
-        enable_defend: bool = True,
-        attack_module: Optional[object] = None,  # legacy duck-typed hook; rl_attack module was removed
-        attack_module_mode: str = "hybrid",
+        enable_defend: bool = False,
     ) -> None:
         self.predictive_bomb = predictive_bomb
         self.predictive_bomb_threshold = predictive_bomb_threshold
@@ -233,8 +229,6 @@ class EditedHeuristicPolicy(Policy):
         self.max_defense_distance = max_defense_distance
         self.defense_cooldown_scale = defense_cooldown_scale
         self.enable_defend = enable_defend
-        self.attack_module = attack_module
-        self.attack_module_mode = attack_module_mode
 
         # Adaptive base-weight state — reset each round (step == 0).
         self._adaptive_weight: float = base_weight_min
@@ -288,6 +282,10 @@ class EditedHeuristicPolicy(Policy):
         for tick, cells in timeline.items():
             if tick <= 1:
                 danger_now.update(cells)
+
+        # Soft routing-avoidance only (collect/explore). Dodge keeps using the
+        # raw bomb timeline above, so anticipated danger never blocks an escape.
+        danger_now |= self._extra_danger_cells(obs, memory)
 
         # Dodge is safety-critical: skip loop detection so we never get stuck
         # in a blast zone while trying to break a navigation cycle.
@@ -379,9 +377,9 @@ class EditedHeuristicPolicy(Policy):
                 continue
             if obs.action_mask[candidate] != 1:
                 continue
-            if not self._is_loop(candidate, obs.location) and not self._is_position_churn(
-                candidate, obs, memory
-            ):
+            if not self._is_loop(
+                candidate, obs.location
+            ) and not self._is_position_churn(candidate, obs, memory):
                 return candidate
         # All alternatives are either masked or themselves looping — return any
         # masked-legal action as a last resort.
@@ -590,12 +588,6 @@ class EditedHeuristicPolicy(Policy):
 
         blast = cells_in_blast(memory, obs.location)
 
-        if self.attack_module is not None and self.attack_module_mode == "replace":
-            learned = self.attack_module.choose_attack(obs, memory)
-            if learned is not None:
-                return int(learned)
-            return None
-
         # Economy mode: score the opportunity and only bomb if score is sufficient.
         if self.bomb_economy:
             score = self._bomb_opportunity_score(memory, blast)
@@ -615,11 +607,6 @@ class EditedHeuristicPolicy(Policy):
                         )
                     )
                 return int(Action.PLACE_BOMB)
-            if self.attack_module is not None and self.attack_module_mode == "hybrid":
-                learned = self.attack_module.choose_attack(obs, memory)
-                if learned is not None:
-                    return int(learned)
-                return None
             if score < self.bomb_reserve_threshold:
                 return None
             if self.auto_tune_bomb:
@@ -645,12 +632,6 @@ class EditedHeuristicPolicy(Policy):
                 definite += 50.0 if base_hp <= BOMB_ATTACK else 2.0
         if definite >= 1.0:
             return int(Action.PLACE_BOMB)
-
-        if self.attack_module is not None and self.attack_module_mode == "hybrid":
-            learned = self.attack_module.choose_attack(obs, memory)
-            if learned is not None:
-                return int(learned)
-            return None
 
         # Predictive: would the bomb plausibly hit a moving enemy by detonation?
         if self.predictive_bomb:
@@ -971,7 +952,8 @@ class EditedHeuristicPolicy(Policy):
         candidates = [
             cell
             for cell in memory.collectible_cells()
-            if cell != obs.location and not self._tile_recently_collected(cell, obs.step)
+            if cell != obs.location
+            and not self._tile_recently_collected(cell, obs.step)
         ]
 
         # Proactive base routing: include known enemy base cells as synthetic
@@ -996,10 +978,9 @@ class EditedHeuristicPolicy(Policy):
         for cell in candidates:
             if cell not in distances:
                 continue
-            value = memory.tile_value(cell)
-            if value <= 0:
+            if memory.tile_value(cell) <= 0:
                 continue
-            score = value / (distances[cell] + 1.0)
+            score = self._collect_value(cell, memory) / (distances[cell] + 1.0)
             if score > best_score:
                 best_score = score
                 best_cell = cell
@@ -1154,42 +1135,72 @@ class EditedHeuristicPolicy(Policy):
             self._prev_base_health = obs.base_health
             return
 
-        # Signal 1: base health dropped (enemy hit our base).
-        health_drop = (
-            self._prev_base_health is not None
-            and obs.base_health < self._prev_base_health
-        )
-        self._prev_base_health = obs.base_health
+        # Defensive threat-response below is disabled: _try_defend is commented
+        # out (see choose()), so lowering base-routing aggression when the enemy
+        # is near our base / our base takes damage buys nothing — there is no
+        # defending action to switch to. It is also a no-op under the current
+        # config: _effective_base_weight() returns max(_adaptive_weight,
+        # _aggression_floor), and the step-ramped _aggression_floor (>=1.0)
+        # always dominates _adaptive_weight (<=0.2 + 0.02*step), so aggression is
+        # governed entirely by the floor computed above.
+        return
 
-        # Signal 2: enemy visible within defend radius of our base.
-        enemy_near_base = False
-        if memory.ally_base is not None and memory.enemy_agents and obs.base_health > 0:
-            bx, by = memory.ally_base
-            enemy_near_base = any(
-                abs(p[0] - bx) + abs(p[1] - by) <= DEFEND_RADIUS
-                for p in memory.enemy_agents
-            )
+        # # Signal 1: base health dropped (enemy hit our base).
+        # health_drop = (
+        #     self._prev_base_health is not None
+        #     and obs.base_health < self._prev_base_health
+        # )
+        # self._prev_base_health = obs.base_health
+        #
+        # # Signal 2: enemy visible within defend radius of our base.
+        # enemy_near_base = False
+        # if memory.ally_base is not None and memory.enemy_agents and obs.base_health > 0:
+        #     bx, by = memory.ally_base
+        #     enemy_near_base = any(
+        #         abs(p[0] - bx) + abs(p[1] - by) <= DEFEND_RADIUS
+        #         for p in memory.enemy_agents
+        #     )
+        #
+        # if health_drop or enemy_near_base:
+        #     # Attack detected — reset weight and restart defensive cooldown.
+        #     self._adaptive_weight = self.base_weight_min
+        #     self._attack_cooldown = max(
+        #         0,
+        #         int(
+        #             round(
+        #                 self.base_weight_attack_cooldown * self.defense_cooldown_scale
+        #             )
+        #         ),
+        #     )
+        # elif self._attack_cooldown > 0:
+        #     # Still in defensive posture; tick down but keep weight low.
+        #     self._attack_cooldown -= 1
+        # else:
+        #     # Peaceful — ramp weight up toward the base_route_weight ceiling.
+        #     self._adaptive_weight = min(
+        #         self.base_route_weight,
+        #         self._adaptive_weight + self.base_weight_ramp_rate,
+        #     )
 
-        if health_drop or enemy_near_base:
-            # Attack detected — reset weight and restart defensive cooldown.
-            self._adaptive_weight = self.base_weight_min
-            self._attack_cooldown = max(
-                0,
-                int(
-                    round(
-                        self.base_weight_attack_cooldown * self.defense_cooldown_scale
-                    )
-                ),
-            )
-        elif self._attack_cooldown > 0:
-            # Still in defensive posture; tick down but keep weight low.
-            self._attack_cooldown -= 1
-        else:
-            # Peaceful — ramp weight up toward the base_route_weight ceiling.
-            self._adaptive_weight = min(
-                self.base_route_weight,
-                self._adaptive_weight + self.base_weight_ramp_rate,
-            )
+    # ── overridable hooks (no-ops here; subclasses layer behaviour on) ───────
+
+    def _extra_danger_cells(
+        self, obs: ParsedObs, memory: MapMemory
+    ) -> set[tuple[int, int]]:
+        """Additional cells to soft-avoid during collect/explore routing.
+
+        No-op in the base class. Subclasses override to inject threat signals
+        (e.g. anticipated enemy bomb placements) without touching dodge logic.
+        """
+        return set()
+
+    def _collect_value(self, cell: tuple[int, int], memory: MapMemory) -> float:
+        """Scoring numerator for a collectible cell (before /(dist+1)).
+
+        Base policy uses the tile's intrinsic reward value. Subclasses may add a
+        clustering bonus so routes that bunch several tiles together win.
+        """
+        return memory.tile_value(cell)
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -1242,7 +1253,8 @@ class EditedHeuristicPolicy(Policy):
         candidates = [
             cell
             for cell in memory.collectible_cells()
-            if cell != obs.location and not self._tile_recently_collected(cell, obs.step)
+            if cell != obs.location
+            and not self._tile_recently_collected(cell, obs.step)
         ]
         if not candidates:
             return None

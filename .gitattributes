@@ -1,1 +1,4 @@
 nlp_cheese/nlp_eval_512/model.safetensors filter=lfs diff=lfs merge=lfs -text
+asr/models/finetuned-parakeet-tdt-0.6b-v2.nemo filter=lfs diff=lfs merge=lfs -text
+ae/models/ppo.pt filter=lfs diff=lfs merge=lfs -text
+cv/models/rfdetr-final.pth filter=lfs diff=lfs merge=lfs -text

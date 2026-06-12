@@ -81,7 +81,11 @@ challenge_route() {
     return
   fi
   # All challenges' predict route is /<challenge>.
-  echo "/$1"
+  if [[ "$OS" = "Windows" ]]; then
+    echo "//$1"
+  else
+    echo "/$1"
+  fi
 }
 VALID_CHALLENGES="asr cv noise nlp ae surprise"
 
@@ -131,7 +135,7 @@ if ! PORT=$(challenge_port "$CHALLENGE"); then
 fi
 ROUTE=$(challenge_route "$CHALLENGE")
 if [[ "$OS" = "Windows" ]]; then
-  HEALTH="/health"
+  HEALTH="//health"
 else
   HEALTH="/health"
 fi

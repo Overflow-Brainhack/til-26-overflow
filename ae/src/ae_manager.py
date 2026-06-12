@@ -11,30 +11,32 @@ first construction. Bundle a captured cache via the Dockerfile's
 `COPY src .` to start round 1 with full map knowledge.
 """
 
-import os
 from pathlib import Path
 from typing import Any, Optional
 
 from constants import Action
 from map_memory import MapMemory, get_shared_memory
 from observation import parse_observation
-from policy import Policy
+from policies.policy import Policy
+
 # from policies.edited_policy import EditedHeuristicPolicy as HeuristicPolicy
 # from policies.edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy
 # from policies.berserker_policy import BerserkerPolicy
-from policies.azbasev3_policy import BerserkerBasePolicy as HeuristicPolicy
+# from policies.azbasev3_policy import BerserkerBasePolicy as HeuristicPolicy
 # from policies.scoremax_policy import ScoreMaxPolicy as HeuristicPolicy
 # from policies.azbase_berserker_base_policy import (
 #     BerserkerBasePolicy as HeuristicPolicy,
 # )
+from policies.rl_policy import RLPolicy
+# from policies.layered_rl_policy import PRODUCTION_GUARD_KWARGS, LayeredRLPolicy
 
 
 # Default cache path: bundled into the Docker image alongside source.
 DEFAULT_CACHE_PATH = Path(__file__).resolve().parent / "novice_map.json"
 
-# Production policy configuration.  Every HeuristicPolicy parameter is listed
-# here so auto_play.py can import this dict and drive its argparse defaults from
-# it — one place to edit, both the server and the visualiser stay in sync.
+# Production base-policy configuration.  V2-only experimental toggles live as
+# EditedHeuristicPolicyV2.__init__ defaults and are intentionally not listed
+# here or exposed through auto_play.py's argparse.
 DEFAULT_POLICY_KWARGS: dict = dict(
     predictive_bomb=True,
     predictive_bomb_threshold=0.7,
@@ -61,8 +63,6 @@ DEFAULT_POLICY_KWARGS: dict = dict(
     base_weight_attack_cooldown=20,
 )
 
-# DEFAULT_POLICY_VARIANT = os.environ.get("AE_POLICY_VARIANT", "normal")
-
 
 class AEManager:
     def __init__(
@@ -87,7 +87,11 @@ class AEManager:
 
         self._memory.reset_round()
         # self._policy: Policy = policy or BerserkerPolicy()
-        self._policy: Policy = policy or HeuristicPolicy(**DEFAULT_POLICY_KWARGS)
+        # self._policy: Policy = policy or HeuristicPolicy()
+        self._policy: Policy = policy or RLPolicy()
+        # self._policy: Policy = policy or LayeredRLPolicy(
+        #     heuristic_kwargs=DEFAULT_POLICY_KWARGS, **PRODUCTION_GUARD_KWARGS
+        # )
 
     def _maybe_load_cache(self, path: Path) -> None:
         if not path.exists():

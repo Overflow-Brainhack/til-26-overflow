@@ -4,13 +4,14 @@ Agent types
 -----------
   normal              — HeuristicPolicy (balanced: dodge, attack, defend, collect, explore)
   berserker           — BerserkerPolicy (rush enemy bases, ignore self-preservation)
-  berserker_base      — BerserkerBasePolicy (heuristic base, berserker-style aggression)
   random              — RandomPolicy (uniform sample over legal actions)
+  rl                  — RLPolicy loaded from ae/models/ae_rl.pt by default
 
 Visual mode (default):
     python ae/test_env/auto_play.py
+    python ae/test_env/auto_play.py --agent-type rl
     python ae/test_env/auto_play.py --agent-type berserker
-    python ae/test_env/auto_play.py --agent-types berserker normal normal normal normal normal
+    python ae/test_env/auto_play.py --agent-types rl normal normal normal normal normal
     python ae/test_env/auto_play.py --rounds 3 --seed 42 --fps 4
     python ae/test_env/auto_play.py --action-log ae/test_env/action_logs/normal.txt
 
@@ -51,6 +52,8 @@ from til_environment.bomberman_env import Bomberman  # noqa: E402
 from til_environment.config import default_config, load_config  # noqa: E402
 
 from ae_manager import DEFAULT_CACHE_PATH, DEFAULT_POLICY_KWARGS, AEManager  # noqa: E402
+
+# import various policies
 from policies.azbase_berserker_base_policy import (  # noqa: E402
     BerserkerBasePolicy as BerserkerBaseAzbasePolicy,
 )
@@ -60,15 +63,16 @@ from policies.azbasev4_policy import BerserkerBaseV4Policy  # noqa: E402
 from policies.berserker_policy import BerserkerPolicy  # noqa: E402
 from constants import Action, GRID_SIZE  # noqa: E402
 from policies.edited_policy import EditedHeuristicPolicy as HeuristicPolicy  # noqa: E402
-
-# Comment the line below to benchmark the plain edited_policy instead of the
-# experimental clone (mirrors the toggle in ae_manager.py).
 from policies.edited_policy_v2 import EditedHeuristicPolicyV2 as HeuristicPolicy  # noqa: E402
 from map_memory import MapMemory  # noqa: E402
 from observation import ParsedObs  # noqa: E402
 from policy import Policy  # noqa: E402
 from policies.scoremax_policy import ScoreMaxPolicy  # noqa: E402
-
+from policies.rl_policy import RLPolicy  # noqa: E402
+from policies.layered_rl_policy import (  # noqa: E402
+    PRODUCTION_GUARD_KWARGS,
+    LayeredRLPolicy,
+)
 
 AGENT_TYPES = (
     "normal",
@@ -79,10 +83,16 @@ AGENT_TYPES = (
     "berserker_base_submit",
     "scoremax",
     "random",
+    "rl",
+    "layered_rl",
 )
 
-DEFAULT_BENCHMARK_TYPES = AGENT_TYPES
 DEFAULT_ACTION_LOG = HERE / "action_logs" / "auto_play_actions.txt"
+# Set from --rl-guards in main(). Default off so existing benchmarks keep
+# measuring the bare RL policy; pass --rl-guards to A/B the production
+# (ae_manager) configuration: dodge override + oscillation break + stagnation
+# takeover.
+_RL_GUARDS_ENABLED = False
 
 
 class RandomPolicy(Policy):
@@ -96,9 +106,10 @@ class RandomPolicy(Policy):
 def _make_policy(
     agent_type: str,
     policy_kwargs: dict,
+    rl_checkpoint: Optional[Path] = None,
 ) -> Policy:
     if agent_type == "normal":
-        policy: Policy = HeuristicPolicy(**policy_kwargs)
+        policy: Policy = HeuristicPolicy()
     elif agent_type == "berserker":
         policy = BerserkerPolicy()
     elif agent_type == "berserker_base":
@@ -113,6 +124,17 @@ def _make_policy(
         policy = ScoreMaxPolicy(**policy_kwargs)
     elif agent_type == "random":
         policy = RandomPolicy()
+    elif agent_type == "rl":
+        policy = RLPolicy(checkpoint_path=rl_checkpoint)
+    elif agent_type == "layered_rl":
+        if _RL_GUARDS_ENABLED:
+            policy = LayeredRLPolicy(
+                checkpoint_path=rl_checkpoint,
+                heuristic_kwargs=policy_kwargs,
+                **PRODUCTION_GUARD_KWARGS,
+            )
+        else:
+            policy = LayeredRLPolicy(checkpoint_path=rl_checkpoint)
     else:
         raise ValueError(f"unknown agent type: {agent_type}")
 
@@ -123,12 +145,17 @@ def _make_factories(
     agents: list[str],
     types: list[str],
     policy_kwargs: dict,
+    rl_checkpoint: Optional[Path] = None,
 ) -> dict[str, callable]:
     """Return a per-agent-id dict of zero-arg callables that produce a Policy."""
     out: dict[str, callable] = {}
     for agent, t in zip(agents, types):
         t_ = t  # capture loop variable
-        out[agent] = lambda t=t_: _make_policy(t, policy_kwargs)
+        out[agent] = lambda t=t_: _make_policy(
+            t,
+            policy_kwargs,
+            rl_checkpoint,
+        )
     return out
 
 
@@ -401,12 +428,8 @@ class RewardBreakdownTracker:
                     "attack_damage_pos": float(buckets.get("attack_damage_pos", 0.0)),
                     "attack_damage_neg": float(buckets.get("attack_damage_neg", 0.0)),
                     "attack_kill": float(buckets.get("attack_kill", 0.0)),
-                    "destroy_enemy_base": float(
-                        buckets.get("destroy_enemy_base", 0.0)
-                    ),
-                    "own_base_destroyed": float(
-                        buckets.get("own_base_destroyed", 0.0)
-                    ),
+                    "destroy_enemy_base": float(buckets.get("destroy_enemy_base", 0.0)),
+                    "own_base_destroyed": float(buckets.get("own_base_destroyed", 0.0)),
                     "collect_mission": float(buckets.get("collect_mission", 0.0)),
                     "collect_resource": float(buckets.get("collect_resource", 0.0)),
                     "collect_recon": float(buckets.get("collect_recon", 0.0)),
@@ -425,7 +448,8 @@ def _run_benchmark(
     policy_kwargs: dict,
     cache_path: Optional[Path],
     action_logger: ActionLogger,
-    agent_types: tuple[str, ...] = DEFAULT_BENCHMARK_TYPES,
+    agent_types: tuple[str, ...] = AGENT_TYPES,
+    rl_checkpoint: Optional[Path] = None,
 ) -> None:
     """Headless comparison: run each type for *rounds* rounds, then print table.
 
@@ -456,6 +480,7 @@ def _run_benchmark(
             env.possible_agents,
             [agent_type] * n_agents,
             policy_kwargs,
+            rl_checkpoint,
         )
         managers, cache_tmpl = _build_managers(env, factories, cache_path)
         agent_type_map = {agent: agent_type for agent in env.possible_agents}
@@ -551,7 +576,8 @@ def _run_matchup_benchmark(
     policy_kwargs: dict,
     cache_path: Optional[Path],
     action_logger: ActionLogger,
-    agent_types: tuple[str, ...] = DEFAULT_BENCHMARK_TYPES,
+    agent_types: tuple[str, ...] = AGENT_TYPES,
+    rl_checkpoint: Optional[Path] = None,
 ) -> None:
     """Headless cross-type matchup: for every (focus, opponent) pair run *rounds* rounds.
 
@@ -599,6 +625,7 @@ def _run_matchup_benchmark(
                 env.possible_agents,
                 type_list,
                 policy_kwargs,
+                rl_checkpoint,
             )
             managers, cache_tmpl = _build_managers(env, factories, cache_path)
             agent_type_map = dict(zip(env.possible_agents, type_list))
@@ -730,6 +757,8 @@ _TYPE_COLORS: dict[str, tuple[int, int, int]] = {
     "berserker_base_submit": (255, 175, 120),
     "scoremax": (255, 215, 90),
     "random": (200, 200, 80),
+    "rl": (180, 120, 255),
+    "layered_rl": (160, 140, 255),
 }
 
 
@@ -945,6 +974,22 @@ def main() -> None:
             "Default: all available policy types."
         ),
     )
+    parser.add_argument(
+        "--rl-checkpoint",
+        type=Path,
+        default=None,
+        help="Checkpoint for --agent-type rl (default: ae/models/ae_rl.pt)",
+    )
+    parser.add_argument(
+        "--rl-guards",
+        action="store_true",
+        default=False,
+        help=(
+            "Run rl agents with the production safety guards "
+            "(dodge override + oscillation break + stagnation takeover), "
+            "matching what ae_manager ships."
+        ),
+    )
     # ── heuristic (normal) policy toggles ────────────────────────────────────
     parser.add_argument(
         "--predictive-bomb",
@@ -1084,12 +1129,6 @@ def main() -> None:
         type=int,
         default=_P["base_weight_attack_cooldown"],
     )
-    parser.add_argument("--minimum-aggression", type=float, default=2.0)
-    parser.add_argument(
-        "--aggression-ramp-rate",
-        type=float,
-        default=0.08,
-    )
     parser.add_argument("--defensive-force", type=float, default=0.6)
     parser.add_argument(
         "--defense-abandon-margin",
@@ -1117,6 +1156,9 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    global _RL_GUARDS_ENABLED
+    _RL_GUARDS_ENABLED = args.rl_guards
+
     # Build kwargs for normal (HeuristicPolicy) agents.
     policy_kwargs = dict(
         predictive_bomb=args.predictive_bomb,
@@ -1142,17 +1184,11 @@ def main() -> None:
         base_weight_min=args.base_weight_min,
         base_weight_ramp_rate=args.base_weight_ramp_rate,
         base_weight_attack_cooldown=args.base_weight_attack_cooldown,
-        minimum_aggression=args.minimum_aggression,
-        aggression_ramp_rate=args.aggression_ramp_rate,
-        defensive_force=args.defensive_force,
-        defense_abandon_margin=args.defense_abandon_margin,
-        max_defense_distance=args.max_defense_distance,
-        defense_cooldown_scale=args.defense_cooldown_scale,
     )
 
     # ── benchmark mode (headless) ─────────────────────────────────────────────
     benchmark_types = (
-        tuple(args.benchmark_types) if args.benchmark_types else DEFAULT_BENCHMARK_TYPES
+        tuple(args.benchmark_types) if args.benchmark_types else AGENT_TYPES
     )
     run_mode = (
         "benchmark-matchup"
@@ -1161,8 +1197,10 @@ def main() -> None:
         if args.benchmark
         else "visual"
     )
-    selected_types = benchmark_types if (args.benchmark or args.benchmark_matchup) else (
-        tuple(args.agent_types) if args.agent_types else (args.agent_type,)
+    selected_types = (
+        benchmark_types
+        if (args.benchmark or args.benchmark_matchup)
+        else (tuple(args.agent_types) if args.agent_types else (args.agent_type,))
     )
     action_logger = ActionLogger(args.action_log)
     action_logger.open(
@@ -1180,6 +1218,7 @@ def main() -> None:
             args.cache_path,
             action_logger,
             benchmark_types,
+            args.rl_checkpoint,
         )
         action_logger.close()
         return
@@ -1192,6 +1231,7 @@ def main() -> None:
             args.cache_path,
             action_logger,
             benchmark_types,
+            args.rl_checkpoint,
         )
         action_logger.close()
         return
@@ -1220,6 +1260,7 @@ def main() -> None:
         env.possible_agents,
         agent_types_list,
         policy_kwargs,
+        args.rl_checkpoint,
     )
     managers, cached_template = _build_managers(env, factories, args.cache_path)
     reward_tracker = RewardBreakdownTracker(env)
@@ -1350,7 +1391,9 @@ def main() -> None:
                     env.reset(seed=seed)
                     _reset_managers(managers, cached_template)
                     reward_tracker.reset()
-                    action_logger.start_round(rounds_done + 1, seed, label="manual reset")
+                    action_logger.start_round(
+                        rounds_done + 1, seed, label="manual reset"
+                    )
                     history.clear()
                     history_pos = 0
                     paused = False
